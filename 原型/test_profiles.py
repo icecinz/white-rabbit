@@ -17,7 +17,8 @@ from profiles import (AIProfiles, ProfileConflict, DefaultProfileConflict, MAX_R
 
 class AIProfilesTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='rabbit-profiles-synthetic-', dir='/private/tmp')
+        self.temp = tempfile.TemporaryDirectory(prefix='rabbit-profiles-synthetic-',
+                                                dir=Path(tempfile.gettempdir()).resolve())
         self.path = Path(self.temp.name) / 'chat.sqlite'
         with sqlite3.connect(self.path) as db:
             db.executescript('CREATE TABLE chats(id TEXT,content TEXT);'

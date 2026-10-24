@@ -856,7 +856,8 @@ class NativeImageBackfillTests(unittest.TestCase):
 class ProfileSnapshotStoreTests(unittest.TestCase):
     def setUp(self):
         from profiles import AIProfiles, make_profile_snapshot
-        self.temp = tempfile.TemporaryDirectory(prefix='rabbit-profile-snapshot-synthetic-', dir='/private/tmp')
+        self.temp = tempfile.TemporaryDirectory(prefix='rabbit-profile-snapshot-synthetic-',
+                                                dir=Path(tempfile.gettempdir()).resolve())
         self.path = Path(self.temp.name) / 'chat.sqlite'
         self.store = ChatStore(self.path)
         self.profiles = AIProfiles(self.path, capability_validator=lambda _fields: True)
