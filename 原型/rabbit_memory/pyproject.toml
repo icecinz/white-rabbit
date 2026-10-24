@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rabbit-memory"
+version = "0.1.1"
+description = "Explicit local memory profiles, immutable source bindings and bounded Hindsight transport"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools]
+packages = ["rabbit_memory"]
+package-dir = {rabbit_memory = "."}
+include-package-data = false

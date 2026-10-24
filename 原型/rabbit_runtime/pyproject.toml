@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rabbit-runtime"
+version = "0.1.4"
+description = "Explicit native Agent transport and Codex, Pi, DSH, Claude and Hermes execution foundations"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+classifiers = ["Operating System :: POSIX"]
+
+[project.optional-dependencies]
+claude = ["claude-agent-sdk==0.2.152"]
+
+[tool.setuptools]
+packages = ["rabbit_runtime", "rabbit_runtime.pi", "rabbit_runtime.dsh", "rabbit_runtime.claude", "rabbit_runtime.hermes"]
+package-dir = {rabbit_runtime = "."}
+include-package-data = false
+
+[tool.setuptools.package-data]
+"rabbit_runtime.pi" = ["thinking_levels.mjs"]
+"rabbit_runtime.dsh" = ["worker.mjs"]
+"rabbit_runtime.hermes" = ["worker.mjs", "vendor/hermes_gateway/json-rpc-gateway.mjs", "vendor/hermes_gateway/LICENSE", "vendor/hermes_gateway/upstream.json"]

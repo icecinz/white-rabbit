@@ -1,0 +1,34 @@
+{
+  "project": "Hermes Agent",
+  "project_version": "0.21.1",
+  "source_kind": "git_commit",
+  "repository": "https://github.com/NousResearch/hermes-agent",
+  "commit": "145c713f1691b44bc485ce0ce4818cdb0e9c396b",
+  "source": {
+    "upstream_path": "apps/shared/src/json-rpc-gateway.ts",
+    "vendored_path": "json-rpc-gateway.ts",
+    "sha256": "4a4f6418e0b796cf23b37ca1de083b491f6ae922425643ed0904fd1d0347b749",
+    "matches_commit_blob": true,
+    "local_path_clean": true,
+    "modified": false
+  },
+  "license": {
+    "identifier": "MIT",
+    "copyright": "Copyright (c) 2025 Nous Research",
+    "upstream_path": "LICENSE",
+    "vendored_path": "LICENSE",
+    "sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+    "matches_commit_blob": true
+  },
+  "build": {
+    "script": "../../build_hermes_gateway.mjs",
+    "node_version": "v24.19.0",
+    "api": "node:module.stripTypeScriptTypes",
+    "options": { "mode": "transform", "sourceMap": false },
+    "output": "json-rpc-gateway.mjs",
+    "output_sha256": "41698f3300bca23af5eb1e881b7cf2d1aa962d56505b627f5829a80b23ad3fe4",
+    "runtime_dependencies": [],
+    "note": "The Node conversion API is experimental; the exact Node version and input bytes are pinned. No runtime protocol implementation is replaced."
+  },
+  "scope": "Official transport module only; no Agent execution, backend lifecycle, approval ownership, or submission receipt proof is supplied by this artifact."
+}

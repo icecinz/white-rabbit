@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f3ee">
+  <meta name="application-name" content="小白兔">
+  <meta name="apple-mobile-web-app-title" content="小白兔">
+  <title>小白兔 · AI 助手</title>
+  <link rel="icon" type="image/png" sizes="1024x1024" href="/rabbit-app-1024.png">
+  <link rel="apple-touch-icon" href="/rabbit-app-1024.png">
+  <link rel="manifest" href="/app.webmanifest">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/workspace.css">
+  <link rel="stylesheet" href="/specialist.css">
+  <script src="/agents.js" defer></script>
+  <script src="/markdown-it.min.js" defer></script>
+  <script src="/rich_text.js" defer></script>
+  <script src="/materials.js" defer></script>
+  <script src="/profiles.js" defer></script>
+  <script src="/native_memory.js" defer></script>
+  <script src="/workspace.js" defer></script>
+  <script src="/browser_state.js" defer></script>
+  <script src="/text_file_download.js" defer></script>
+  <script src="/file_tasks.js" defer></script>
+  <script src="/file_materials.js" defer></script>
+  <script src="/project_publish.js" defer></script>
+  <script src="/markdown_chats.js" defer></script>
+  <script src="/conversation_groups.js" defer></script>
+  <script src="/history_quotes.js" defer></script>
+  <script src="/native_materials.js" defer></script>
+  <script src="/handoff_view.js" defer></script>
+  <script src="/specialist_tools.js" defer></script>
+  <script src="/specialist.js" defer></script>
+  <script src="/pi_native_history.js" defer></script>
+  <script src="/pi_native.js" defer></script>
+  <script src="/hermes_native_history.js" defer></script>
+  <script src="/hermes_attachment_state.js" defer></script>
+  <script src="/hermes_native.js" defer></script>
+  <script src="/claude_material_draft.js" defer></script>
+  <script src="/claude_native.js" defer></script>
+  <script src="/dsh_material_draft.js" defer></script>
+  <script src="/dsh_native.js" defer></script>
+  <script src="/native_chats.js" defer></script>
+  <script src="/native_handoff.js" defer></script>
+  <script src="/native_adoption.js" defer></script>
+  <script src="/native_text_quote.js" defer></script>
+  <script src="/native_file_quote.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <button class="sidebar-backdrop" id="sidebar-backdrop" aria-label="关闭会话列表" hidden></button>
+    <aside class="sidebar" id="sidebar" aria-label="对话与导航">
+      <div class="brand">
+        <img class="brand-mark" src="/rabbit-app-1024.png" alt="" width="40" height="40">
+        <div><h1>小白兔</h1><p id="brand-agents"></p></div>
+        <button class="icon-button close-sidebar" id="close-sidebar" aria-label="关闭会话列表">×</button>
+      </div>
+      <section id="specialist-composer-card" class="specialist-composer-card" hidden aria-label="小白兔专员">
+        <button type="button" class="specialist-composer-label" id="specialist-composer-label" aria-controls="specialist-panel">小白兔专员</button>
+        <div id="specialist-composer-mount"></div>
+      </section>
+      <nav class="main-navigation" aria-label="主要页面">
+        <button id="conversations-nav" class="page-nav active" data-page="conversations" aria-current="page">对话</button>
+        <button id="management-nav" class="page-nav" data-page="management">管理</button>
+        <button id="settings-nav" class="page-nav" data-page="settings">设置</button>
+      </nav>
+      <div class="sidebar-content">
+      <div id="sidebar-chat-content" class="sidebar-chat-content">
+      <div class="new-chat-row"><button class="new-chat-button" id="new-chat"><span aria-hidden="true">＋</span> 新对话</button></div>
+      <div class="list-tools">
+        <label class="search-field">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
+          <input id="search-input" type="search" placeholder="搜索全部对话" autocomplete="off" aria-label="搜索会话">
+        </label>
+        <div id="history-tools">
+          <div class="source-filters" id="source-filters" aria-label="对话分类">
+            <button class="source-filter active" data-agent="all" aria-pressed="true">全部</button>
+          </div>
+          <div class="history-update"><span id="history-summary">原来的对话，保留原文</span><button id="refresh-history" title="重新读取历史记录" aria-label="更新历史记录">更新</button></div>
+        </div>
+      </div>
+      <button type="button" class="context-preview-button markdown-folder-entry" id="open-markdown-chats" data-control-interface="ai" hidden>文件夹</button>
+      <div class="session-list" id="session-list" aria-label="全部对话"></div>
+      </div>
+      <nav id="sidebar-section-list" class="sidebar-section-list" aria-label="页面分类" hidden></nav>
+      </div>
+      <div class="sidebar-footer"><span class="privacy-dot" aria-hidden="true"></span> 记录保存在这台电脑 <span id="connection-state" aria-live="polite"></span></div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="conversation-header">
+        <button class="icon-button menu-button" id="open-sidebar" aria-label="打开会话列表" aria-controls="sidebar" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"></path></svg></button>
+        <div class="conversation-heading"><div class="heading-eyebrow" id="heading-eyebrow">对话</div><h2 id="conversation-title">新对话</h2><p id="conversation-meta">每一轮，都可以选择回答你的 AI</p></div>
+        <div class="header-actions"><button type="button" class="text-button" data-control-interface="ai" id="native-adopt" aria-controls="native-adoption-modal" hidden>继续原对话</button><div class="header-secondary-actions" id="header-actions"></div></div>
+      </header>
+
+      <p class="demo-mode-banner" id="demo-mode-banner" role="note" hidden>演示模式 · 仅虚构数据与模拟回答，不连接真实 AI；退出后清理本次数据。</p>
+      <section id="workspace-panel" hidden aria-label="管理和设置"></section>
+      <section id="native-chats-panel" hidden aria-label="原生对话"></section>
+      <div id="settings-mount-parking" hidden><section id="specialist-settings" aria-label="小白兔专员设置"></section><section id="native-chat-settings" aria-label="Agent 会话设置"></section></div>
+      <div id="specialist-layout" class="specialist-layout" hidden>
+        <section id="specialist-panel" hidden aria-label="小白兔专员"></section>
+        <aside id="specialist-guide-panel" class="specialist-guide-panel" hidden aria-label="专员指南"></aside>
+      </div>
+      <div class="conversation-scroll" id="conversation-scroll" tabindex="0" aria-label="对话内容">
+        <div class="messages" id="messages" aria-live="polite" aria-relevant="additions text"></div>
+      </div>
+
+      <div class="composer-region" id="composer-region">
+        <section class="context-preview" id="context-preview" aria-label="本轮上下文预览" hidden></section>
+        <div class="run-notice" id="run-notice" data-control-interface="ai" role="status" hidden></div>
+        <form class="composer" id="composer-form">
+          <section id="conversation-config-status" class="profile-status" data-control-interface="ai" aria-label="对话配置状态"></section>
+          <div class="profile-choice-row"><button type="button" id="choose-ai-profile" class="profile-trigger" aria-expanded="false" aria-controls="profile-picker"><span>AI 配置</span><strong id="ai-profile-label">正在读取…</strong><span aria-hidden="true">⌄</span></button><button type="button" id="choose-memory-profile" class="profile-trigger" aria-expanded="false" aria-controls="profile-picker"><span>记忆配置</span><strong id="memory-profile-label">不使用长期记忆</strong><span aria-hidden="true">⌄</span></button><label class="interface-choice" for="interface-method" title="纯程序接口：只走程序接口。AI接口：小白兔专员全程当接口（待接入）。混合接口：程序优先，没有合适接口才交专员（待接入）。"><span>接口方式</span><select id="interface-method" aria-label="接口方式" title="当前仅支持纯程序接口；另外两种方式待接入。"><option value="program" selected>纯程序接口</option><option value="ai" disabled>AI接口（待接入）</option><option value="mixed" disabled>混合接口（待接入）</option></select></label></div>
+          <label for="message-input" class="sr-only">输入你的消息</label>
+          <textarea id="message-input" rows="2" placeholder="在此输入" aria-describedby="composer-hint" enterkeyhint="send"></textarea>
+          <input id="image-input" class="sr-only" type="file" accept="image/png,image/jpeg" multiple aria-label="选择 PNG 或 JPEG 图片">
+          <div id="composer-materials" class="composer-materials" aria-label="本轮图片材料" hidden></div>
+          <input id="text-file-input" class="sr-only" type="file" accept=".md,.txt,text/markdown,text/plain" aria-label="选择 UTF-8 Markdown 或文本文件">
+          <div id="composer-files" class="composer-files" aria-label="已选文件" hidden></div>
+          <div id="file-material-status" class="material-upload-status" role="status" hidden></div>
+          <p id="material-upload-status" class="material-upload-status" role="status" hidden></p>
+          <p id="image-model-status" class="image-model-status" role="status" hidden></p>
+          <div class="composer-bottomline"><details class="composer-more" id="composer-more"><summary>更多</summary><div class="composer-support"><button type="button" class="context-preview-button" id="toggle-file-task" aria-pressed="false" title="让 AI 在这一轮保存新文件；当前支持 Markdown（.md）和文本（.txt）。">生成文件</button><button type="button" class="context-preview-button" id="add-text-file" title="添加 UTF-8 编码的 Markdown（.md）或文本（.txt），单份最多 512 KiB。">添加文件</button><button type="button" class="context-preview-button" id="pick-text-file" title="选择之前添加到这台电脑的 Markdown（.md）或文本（.txt）文件。">已添加的文件</button><button type="button" class="context-preview-button" id="add-image">添加图片</button><button type="button" class="context-preview-button" id="preview-context" aria-expanded="false" aria-controls="context-preview">查看本轮上下文</button><button type="button" class="context-preview-button" id="quote-history" aria-controls="history-quotes-modal">引用其他对话</button><button type="button" class="context-preview-button" id="native-handoff" aria-controls="native-handoff-modal" hidden>交给原生 Agent</button></div></details><div class="composer-submit"><button type="submit" class="send-button" id="send-button"><span id="send-label">发送</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"></path></svg></button><span id="composer-hint">Enter 发送 · Shift+Enter 换行</span></div></div>
+        </form>
+        <p class="composer-footnote" id="composer-footnote" hidden></p>
+        <p id="browser-state-notice" class="browser-state-notice" role="status" hidden></p>
+      </div>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <section class="file-task-modal" id="file-task-modal" role="dialog" aria-modal="true" aria-labelledby="file-task-preview-title" hidden></section>
+  <section class="file-task-modal" id="native-handoff-modal" role="dialog" aria-modal="true" aria-labelledby="native-handoff-title" hidden></section>
+  <section class="file-task-modal" id="native-text-handoff-modal" role="dialog" aria-modal="true" aria-labelledby="native-text-handoff-title" hidden></section>
+  <section class="file-task-modal" id="native-file-handoff-modal" role="dialog" aria-modal="true" aria-labelledby="native-file-handoff-title" hidden></section>
+  <section class="file-task-modal" id="native-adoption-modal" role="dialog" aria-modal="true" aria-labelledby="native-adoption-title" hidden></section>
+  <section class="file-task-modal" id="file-material-modal" role="dialog" aria-modal="true" aria-labelledby="file-material-preview-title" hidden></section>
+  <section class="file-task-modal" id="project-publication-modal" role="dialog" aria-modal="true" aria-labelledby="project-publication-title" hidden></section>
+  <section class="file-task-modal" id="markdown-chats-modal" role="dialog" aria-modal="true" aria-labelledby="markdown-chats-title" hidden></section>
+  <section class="file-task-modal" id="conversation-group-modal" role="dialog" aria-modal="true" aria-labelledby="conversation-group-title" hidden></section>
+  <section class="material-viewer" id="material-viewer" role="dialog" aria-modal="true" aria-labelledby="material-viewer-title" hidden></section>
+  <section class="profile-picker" id="profile-picker" role="dialog" aria-modal="true" aria-labelledby="profile-picker-title" hidden></section>
+  <section class="history-quotes-modal" id="history-quotes-modal" role="dialog" aria-modal="true" aria-labelledby="history-quotes-title" hidden></section>
+  <section class="document-viewer" id="document-viewer" data-control-interface="ai" role="dialog" aria-modal="true" aria-labelledby="document-title" hidden>
+    <div class="document-panel">
+      <header><h2 id="document-title">文件预览</h2><button type="button" id="close-document" aria-label="关闭文件预览">关闭</button></header>
+      <p id="document-meta"></p>
+      <div class="document-content" id="document-content" tabindex="0"></div>
+    </div>
+  </section>
+</body>
+</html>

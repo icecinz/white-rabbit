@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rabbit-specialist"
+version = "0.1.0"
+description = "Explicit Rabbit specialist role, workspace and reported task coordination"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["rabbit-runtime>=0.1,<0.2", "rabbit-preparation>=0.1.1,<0.2"]
+classifiers = ["Operating System :: POSIX"]
+
+[tool.setuptools]
+packages = ["rabbit_specialist"]
+package-dir = {rabbit_specialist = "."}
+include-package-data = false

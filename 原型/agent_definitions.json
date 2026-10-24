@@ -1,0 +1,7 @@
+[
+  {"id": "codex", "label": "Codex", "initial": "C"},
+  {"id": "hermes", "label": "Hermes", "initial": "H"},
+  {"id": "claude", "label": "Claude Code", "initial": "CC"},
+  {"id": "pi", "label": "Pi", "initial": "P"},
+  {"id": "dsh", "label": "DeepSeek Harness", "initial": "DSH"}
+]
