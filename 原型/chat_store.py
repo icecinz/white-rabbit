@@ -12,9 +12,11 @@ from urllib.parse import quote
 import uuid
 
 from preferences import validate_model_id
+from model_catalog import valid_model
 from rabbit_content.file_intent import validate_intent, validate_inputs
 from profiles import (AIProfiles, ProfileConflict, UNSET, MAX_REVISION, make_profile_snapshot,
-                      validate_request_snapshot, validate_profile_id, initialize_schema as initialize_profile_schema)
+                      validate_request_snapshot, validate_profile_id, REASONING_EFFORTS,
+                      initialize_schema as initialize_profile_schema)
 from rabbit_memory.memory_profiles import (MemoryProfiles, MemoryProfileConflict, make_memory_snapshot,
     validate_memory_profile_id, initialize_schema as initialize_memory_profile_schema)
 from memory_context import validate_memory_inputs, memory_query, public_recall_info
@@ -565,6 +567,43 @@ class ChatStore:
                 snapshot = validate_request_snapshot(json.loads(row['request_snapshot']))
                 if snapshot is not None:
                     result[row['message_id']] = snapshot
+            return result
+
+    def message_request_configurations(self, chat_id):
+        """Safe frozen request parameters, not provider execution telemetry.
+
+        Historical replies never resolve today's profile or connector defaults.
+        Missing, corrupt or ambiguous evidence leaves this optional item absent.
+        """
+        with self.lock, self._open(readonly=True) as db:
+            db.execute('BEGIN')
+            if not db.execute('SELECT 1 FROM chats WHERE id=?', (chat_id,)).fetchone():
+                raise KeyError('找不到这段对话。')
+            rows = db.execute('''SELECT r.message_id,r.route FROM runs r
+                JOIN messages m ON m.id=r.message_id AND m.chat_id=r.chat_id
+                WHERE r.chat_id=? AND m.role='assistant' ''', (chat_id,))
+            result, seen = {}, set()
+            for row in rows:
+                message_id = row['message_id']
+                if message_id in seen:
+                    result.pop(message_id, None)
+                    continue
+                seen.add(message_id)
+                raw = row['route']
+                if not isinstance(raw, str) or len(raw) > 64 * 1024:
+                    continue
+                try:
+                    route = json.loads(raw)
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(route, dict) or not valid_model(route.get('model')):
+                    continue
+                effort = route.get('reasoning_effort')
+                result[message_id] = {
+                    'model': route['model'],
+                    'reasoning_effort': effort if isinstance(effort, str) and effort in REASONING_EFFORTS else None,
+                    'source': 'requested_route',
+                }
             return result
 
     def memory_message_info(self, chat_id):

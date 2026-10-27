@@ -1,32 +1,37 @@
 # Contributing · 参与方式
 
-Thank you for trying White Rabbit. Start with the [demo](README.md#try-the-demo), then choose one small change.
+Try the [fictional demo](README.md#try-the-fictional-demo), then choose a small problem. Improvements to a reusable core, an accurate integration boundary, or a clear explanation are welcome alongside product features.
 
 ## Report a problem
 
-Please include:
+Include the intended operation, reproduction steps, expected/actual result, OS/Python version, and relevant native agent/SDK/CLI versions. State whether the evidence comes from fictional fixtures, browser interaction, a real agent, or an already running external application.
 
-- What you wanted to do, the steps, and what happened instead.
-- Your OS and Python version; for a native connection, the agent/SDK/CLI versions.
-- Whether it happened in the fictional demo or with a real agent.
-- A minimal reproduction using invented data when possible.
+Use invented data where possible. Omit credentials, real conversations, account files, and unredacted private paths. If sending may already have happened, report the original request's state; a second request is not a way to check the first.
 
-Do not put credentials, real conversations, native account files, or unredacted private paths in an issue or log. If a send's outcome is unknown, report its state rather than retrying it as a new request.
+## Work within a module
 
-## Make a change
+Before a larger change, name its module, owned data, inputs, outputs, and failure states. The [architecture guide](ARCHITECTURE.md) maps seven responsibilities to six installable cores and remaining host assembly.
 
-Describe the affected module, its input/output, and its failure behavior before making a large change. Reuse existing application interfaces and mature upstream components. An adapter that returns text should not be described as a full native integration.
+- Keep a core independently installable; provide explicit paths/readers/capabilities instead of importing the host.
+- Use one implementation for shared rules. The specialist and graphical UI call the same business API and version checks.
+- Preserve the original agent's executor, session identity, tool behavior, and approvals. Reading history or opening a new CLI is not attachment to live desktop work.
+- Add a supported interface before marking an entry AI-operable or moving its control into the specialist's settings catalog.
+- Apply [human/AI color semantics](docs/design.md) to the whole entry. Read-only purple content does not imply writable access; confirmations remain human actions.
 
-Use a branch and a pull request. Explain the resulting behavior, how you checked it, and what remains unverified. Separate unit tests with fictional data, browser checks, and actual native-agent runs. New native adapters should preserve the original agent's session identity, approval rules, and execution loop.
+## Submit a change
 
-The public tree includes a selected set of offline regression tests. Use the test command in the repository's `Makefile`; do not assume a passing offline suite verifies credentials, every native tool, or recovery on another machine. Demo and fixture tests must not discover personal histories or contact models.
+Use a branch and pull request. Explain the resulting behavior, verification, and remaining limits. Prefer a small reviewable change over many nominal options. Record model/SDK version assumptions in the adapter rather than presenting them as universal compatibility.
 
-Write user-facing documentation in English and Chinese when practical. Clear text and small, reviewable changes help more than adding many settings at once.
+Use the repository's `Makefile` for the supplied offline checks. Keep tests isolated from personal histories and model calls; do not run a live verification script merely because its name starts with `test` or `verify`. Run relevant browser checks when changing interaction. A passing offline suite does not establish real-account permissions, every tool, or another machine's recovery behavior.
+
+Keep English and Chinese user documentation aligned. For integration evidence, distinguish a native target round trip from the complete specialist-to-target-to-result chain. Preserve previous failed evidence when reporting a later correction; do not substitute the most recent answer for the answer belonging to an exact request.
 
 ## 中文
 
-先运行演示，再选一个小问题。反馈时说明操作、预期、实际结果、系统与版本，并区分虚构演示和真实 Agent；尽量用虚构资料复现，不附带真实聊天、凭据或未经处理的私人日志。
+先试演示，再挑一个小问题。反馈写清步骤、预期、实际、版本及证据范围，用虚构资料复现，不上传真实聊天或凭据。
 
-改动应说明所属模块、输入输出与失败状态。页面和 AI 管理共用业务规则，原生连接保留 Agent 自己的执行器、会话和审批规则。发送结果未知时查询原回执，不换一个请求编号重复发送。
+独立核心需保持可安装和明确输入；界面、专员共用业务接口与版本检查，不建第二套设置系统。原生执行器、身份、工具和审批继续归原 Agent；历史可读、会话恢复和存活工作接管分开验证。
 
-PR 请分别写明离线测试、浏览器操作、真实 Agent 调用的证据与尚未验证的部分。公开测试的范围以仓库实际提供的文件和 `Makefile` 为准；测试通过不代表所有原生能力已经验收。
+新增“交给 AI 的设置”前先实现可靠接口。紫色表达已接通的程序能力，黑色／中性色保留当前人操作或确认；颜色不扩大权限。
+
+PR 说明变化、核验和剩余边界。离线测试、浏览器操作、真实 Agent、完整交办链分别报告；未知请求只核对原编号，不重发。中英文说明尽量同步，欢迎小而清楚、能单独复用的修改。

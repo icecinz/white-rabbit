@@ -25,6 +25,7 @@ from .._version import VERSION
 
 MAX_FRAME = MAX_RPC_FRAME_BYTES
 MAX_MESSAGE = 1024 * 1024
+MAX_MODEL_LENGTH = 192
 INIT_FIELDS = {'type', 'subtype', 'session_id', 'cwd', 'model', 'tools', 'permissionMode',
                'claude_code_version', 'mcp_servers', 'slash_commands', 'output_style', 'agents'}
 
@@ -351,10 +352,18 @@ class Worker:
                                for item in self.info.get('models', []) if type(item) is dict]}
         if method == 'prompt.submit':
             material = type(params) is dict and 'material_input' in params
-            self.require_session(params, ('client_id', 'message', 'material_input') if material else ('client_id', 'message'))
+            explicit_model = type(params) is dict and 'model' in params
+            fields = ('client_id', 'message') + (('material_input',) if material else ())
+            self.require_session(params, fields + (('model',) if explicit_model else ()))
             client, text = exact_uuid(params['client_id']), params['message']
             if type(text) is not str or not text.strip() or len(text.encode('utf-8')) > 128 * 1024:
                 raise WorkerError('invalid_message')
+            if explicit_model:
+                model = params['model']
+                if (type(model) is not str or not 1 <= len(model) <= MAX_MODEL_LENGTH
+                        or any(ord(char) <= 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF
+                               for char in model)):
+                    raise WorkerError('invalid_model')
             try:
                 content = user_content(text, params['material_input']) if material else text
             except ClaudeMaterialProtocolError:
@@ -367,6 +376,15 @@ class Worker:
                 if len(self.seen_clients) >= 100000:
                     raise WorkerError('submission_limit')
                 self.seen_clients.add(client)
+                if explicit_model:
+                    try:
+                        await self.client.set_model(model)
+                    except Exception:
+                        # Only this prompt is known unsent. The native model
+                        # may already have changed before its ACK was lost.
+                        # Keep the client reserved: neither setter nor query
+                        # may be retried under this same sending identity.
+                        raise WorkerError('model_apply_unconfirmed') from None
                 self.active, self.acked = client, False
                 async def one_message():
                     yield {'type': 'user', 'uuid': client, 'session_id': self.args.session_id,

@@ -18,6 +18,7 @@ from .native_memory_bindings import (
 from .native_hindsight_memory import (
     NativeHindsightReadOnly, read_native_source, probe_native_source,
 )
+from .hermes_files_memory import HermesFilesMemory
 from .memory_management import (
     saved_memory_profile, saved_memory_profiles, memory_profile_creation,
     apply_memory_profile_operation,
@@ -26,8 +27,10 @@ from .memory_connection_check import check_memory_connection
 
 from .write_jobs import MemoryWriteJobs, MemoryJobConflict, enqueue_completed_in
 from .write_runner import MemoryWriteRunner
+from .mem0_memory import Mem0Memory
 
 __all__ = (
+    'Mem0Memory',
     'MemoryProfiles', 'MemoryProfileConflict', 'MemoryProfileCreationConflict',
     'validate_memory_profile_id', 'validate_memory_profile_revision',
     'validate_memory_profile_fields', 'validate_memory_snapshot', 'make_memory_snapshot',
@@ -37,5 +40,5 @@ __all__ = (
     'read_native_source', 'probe_native_source', 'saved_memory_profile',
     'saved_memory_profiles', 'memory_profile_creation', 'apply_memory_profile_operation',
     'check_memory_connection', 'MemoryWriteJobs', 'MemoryJobConflict',
-    'enqueue_completed_in', 'MemoryWriteRunner',
+    'enqueue_completed_in', 'MemoryWriteRunner', 'HermesFilesMemory',
 )

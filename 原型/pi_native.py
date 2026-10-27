@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import threading
@@ -17,6 +18,7 @@ import time
 from urllib.parse import parse_qs, quote
 
 from native_memory_intents import NativeMemoryIntents, NativeMemoryIntentError, validate_selection
+from native_memory_selection import NativeMemorySelections
 from memory_context import selected_memory_block
 from rabbit_runtime.native_session_store import request_sha256 as raw_request_sha256
 from native_materials import MAX_INPUT_BYTES
@@ -118,7 +120,8 @@ def _recover_memory_send(store, profile_intents, memory_intents, identity, body)
 class PiNativeHolder:
     """One exact Pi identity, one raw event consumer, no Agent reimplementation."""
     def __init__(self, store, identity, connection, *, workspace_id, profile_intents=None,
-                 catalogue_observer=None, materials=None, memory_intents=None, memory_recall=None):
+                 catalogue_observer=None, materials=None, memory_intents=None, memory_recall=None,
+                 memory_selections=None):
         self.store, self.identity, self.connection = store, chat_id(identity), connection
         self.workspace_id = workspace_id
         self._action = threading.RLock()
@@ -138,10 +141,12 @@ class PiNativeHolder:
         self.profile_intents = profile_intents
         self.materials = materials
         self.memory_intents, self.memory_recall = memory_intents, memory_recall
+        self.memory_selections = memory_selections
         self._catalogue_observer = catalogue_observer
         self._capability_reader = None
         self._profiles_enabled = profile_intents is not None and callable(getattr(connection, 'model_capabilities', None))
         self._pending_verified = None
+        self._task_result_context = None
 
     def _fault(self, code):
         with self._cache:
@@ -352,6 +357,7 @@ class PiNativeHolder:
         self._stop = threading.Event()
         self._epoch = secrets.token_hex(16)
         self._state, self._problem = 'opening', ''
+        self._task_result_context = None
         with self._cache:
             self._requests.clear(); self._events.clear()
             self._event_number = self._seen_events = 0
@@ -431,8 +437,74 @@ class PiNativeHolder:
                 raise _error('open_failed', 'Pi原生连接未准备好；已有身份与回执保留。', status=503) from None
             return self.view(refresh=False)
 
+    def _task_capabilities(self):
+        if (getattr(self.connection, 'task_results_supported', False) is not True
+                or self._state != 'ready' or self._rpc is None or not self._rpc.running):
+            raise _error('task_results_unavailable', '当前Pi连接不支持精确交办结果，尚未发送；没有改用普通聊天发送。')
+        try:
+            value = self._request('rabbit_task_capabilities')
+            if (type(value) is not dict or set(value) != {'protocol', 'connection_epoch', 'source_kind',
+                    'max_answer_bytes', 'max_entries'} or value['protocol'] != 'rabbit-pi-result/v1'
+                    or value['source_kind'] != 'pi_prompt_completion'
+                    or type(value['connection_epoch']) is not str
+                    or re.fullmatch(r'[0-9a-f]{32}', value['connection_epoch']) is None
+                    or type(value['max_answer_bytes']) is not int or value['max_answer_bytes'] != MAX_PROMPT_BYTES
+                    or type(value['max_entries']) is not int or value['max_entries'] != 128):
+                raise ValueError
+            return _copy(value)
+        except Exception:
+            raise _error('task_results_unavailable', '当前Pi精确结果能力尚未核对，尚未发送；没有改用普通聊天发送。') from None
+
+    def read_task_result(self, client_id):
+        """Read only this ready owner's exact current-connection result."""
+        unavailable = {'state': 'unavailable', 'reason': 'current_result_unavailable', 'answer': None, 'source': None}
+        client_id = chat_id(client_id)
+        with self._action:
+            operation, context = self.store.operation(client_id), self._task_result_context
+            identity = (self._live_identity or {}).get('session_id')
+            if (operation is None or operation['chat_id'] != self.identity or operation['status'] != 'completed'
+                    or context is None or context[0] is not self._rpc or context[1:3] != (self._epoch, identity)):
+                return unavailable
+            try:
+                if self._task_capabilities() != context[3]:
+                    return unavailable
+                value = self._request('rabbit_task_read', {'session_id': identity, 'submission_id': client_id})
+                if type(value) is not dict or set(value) != {'state', 'reason', 'answer', 'source'}:
+                    return unavailable
+                if value['state'] in ('unavailable', 'incomplete'):
+                    if value['answer'] is not None or value['source'] is not None:
+                        return unavailable
+                    if value['state'] == 'incomplete' and value['reason'] == 'answer_capacity':
+                        return dict(unavailable, state='incomplete', reason='result_capacity')
+                    return unavailable
+                answer, source = value['answer'], value['source']
+                if (value['state'] != 'available' or value['reason'] != 'current_connection_result'
+                        or type(answer) is not dict or set(answer) != {'text', 'sha256', 'bytes'}
+                        or type(source) is not dict or set(source) != {'kind', 'submission_id', 'runtime_sid',
+                            'connection_epoch', 'request_sha256', 'terminal_status'}
+                        or source['kind'] != 'pi_prompt_completion' or source['submission_id'] != client_id
+                        or source['runtime_sid'] != identity or source['connection_epoch'] != context[3]['connection_epoch']
+                        or source['request_sha256'] != operation['request_sha256']
+                        or source['terminal_status'] != 'completed' or type(answer['text']) is not str):
+                    return unavailable
+                raw = answer['text'].encode('utf-8')
+                if (type(answer['bytes']) is not int or answer['bytes'] != len(raw)
+                        or answer['sha256'] != hashlib.sha256(raw).hexdigest()):
+                    return unavailable
+                if len(raw) > MAX_PROMPT_BYTES:
+                    return dict(unavailable, state='incomplete', reason='result_capacity')
+                if (self._state != 'ready' or not self._rpc.running or self._task_result_context is not context
+                        or context[0] is not self._rpc or context[1:3] != (self._epoch,
+                            (self._live_identity or {}).get('session_id'))):
+                    return unavailable
+                return _copy(value)
+            except Exception:
+                return unavailable
+
     def send(self, client_id, message, ai_profile_id=None, ai_profile_revision=None, material_refs=_MISSING,
-             memory_profile_id=_MISSING, memory_profile_revision=_MISSING):
+             memory_profile_id=_MISSING, memory_profile_revision=_MISSING, *, track_result=False):
+        if type(track_result) is not bool:
+            raise _error('invalid_tracking', '交办结果选项无效。', status=400, unsent=False)
         client_id = chat_id(client_id)
         with self._action:
             old = self.store.operation(client_id)
@@ -489,11 +561,19 @@ class PiNativeHolder:
                 raise _error(getattr(error, 'code', 'profiles_unavailable'), str(error), unsent=False) from None
             except NativeMaterialError as error:
                 raise _error('material_invalid', str(error), status=400, unsent=old is None) from None
+            if not self._profiles_enabled and self.memory_selections is not None:
+                # Replay has already returned. A legacy connector cannot drop
+                # an existing managed memory choice from a fresh request.
+                choice = self.memory_selections.read('pi', self.identity)
+                if choice['selection']['memory_profile_id'] is not None:
+                    raise _error('memory_unavailable', '下轮记忆选择需要原生配置保护；当前连接无法应用，尚未发送。')
             if self._state != 'ready': raise _error('not_open', '请先明确连接这段Pi原生对话。')
             if material_refs is not _MISSING and not self._profiles_enabled:
                 raise _error('profiles_unavailable', 'Pi材料输入需要可核验的原生配置意图；整份尚未发送。')
             if refs and self.materials is None:
                 raise _error('materials_unavailable', '这条Pi原生入口尚未启用材料；整份尚未发送。')
+            if track_result:
+                self._task_capabilities()
             self._read_native()
             self._ensure_idle()
             intent = None
@@ -559,6 +639,9 @@ class PiNativeHolder:
                     raise
                 raise _error('context_capacity',
                     'Pi完整原生历史加上本轮输入已接近读取容量；本轮尚未发送。请先在原生Pi中明确压缩历史，再重试。') from None
+            if track_result:
+                capabilities = self._task_capabilities()
+                self._task_result_context = (self._rpc, self._epoch, self._live_identity['session_id'], capabilities)
             self.store.attach(self.identity, self._live_identity['session_file'], self._live_identity['session_id'])
             receipt = self.store.begin(self.identity, client_id, request)
             if not receipt['created']: return {'receipt': receipt, 'view': self.view(client_id=client_id)}
@@ -566,6 +649,8 @@ class PiNativeHolder:
                 self._active, self._terminal, self._saw_start = client_id, None, False
             try:
                 fields = {key: value for key, value in request.items() if key != 'type'}
+                if track_result:
+                    fields['rabbit_track_result'] = True
                 response = self._rpc.request('prompt', fields, request_id=client_id, timeout=20)
                 if response.get('success') is True:
                     self.store.accepted(client_id)
@@ -713,6 +798,7 @@ class PiNativeChats:
         self.catalogue = NativeChatCatalogue(catalogue_path, agent='pi')
         self.profiles = AIProfiles(catalogue_path)
         self.profile_intents = PiProfileIntents(catalogue_path, workspace_id=workspace_id)
+        self.memory_selections = NativeMemorySelections(catalogue_path, workspace_id=workspace_id)
         self.memory_recall, self.memory_intents = memory_recall, None
         if memory_recall is not None and not callable(memory_recall): raise ValueError('Pi memory callback must be callable.')
         with sqlite3.connect('file:'+quote(str(catalogue_path),safe='/')+'?mode=ro',uri=True) as db:
@@ -754,7 +840,8 @@ class PiNativeChats:
             self._prepare(identity)
             self._owners[identity] = PiNativeHolder(self.store, identity, self.connection, workspace_id=self.workspace_id,
                 profile_intents=self.profile_intents, catalogue_observer=self._remember_catalogue, materials=self.materials,
-                memory_intents=self.memory_intents, memory_recall=self.memory_recall)
+                memory_intents=self.memory_intents, memory_recall=self.memory_recall,
+                memory_selections=self.memory_selections)
         return self._owners[identity]
 
     def maintenance_state(self):
@@ -851,8 +938,11 @@ class PiNativeChats:
                     raise _error('route', '请使用固定Pi原生动作。', status=405)
                 fields = {k: v for k, v in body.items() if k != '_one_ai_csrf'} if type(body) is dict else body
                 try:
-                    validate_fields(fields, allowed[action], ('ai_profile_id', 'ai_profile_revision', 'material_refs', 'memory_profile_id', 'memory_profile_revision') if action == 'send' else ())
+                    validate_fields(fields, allowed[action], ('ai_profile_id', 'ai_profile_revision', 'material_refs', 'memory_profile_id', 'memory_profile_revision', 'track_result') if action == 'send' else ())
                     if action == 'send':
+                        track_result = fields.pop('track_result', False)
+                        if type(track_result) is not bool:
+                            raise _error('invalid_tracking', '交办结果选项无效。', status=400, unsent=False)
                         chat_id(fields['client_id'])
                         try: validate_selection(fields)
                         except NativeMemoryIntentError:
@@ -965,6 +1055,8 @@ class PiNativeChats:
                         self._reserved.discard(identity)
                 return result
             try:
+                if action == 'send':
+                    return owner.send(**fields, track_result=track_result)
                 return getattr(owner, action)(**fields)
             except (PiProfileIntentError, PiProfileUnavailable, NativeMaterialError, PiMaterialProtocolError, PiMessageViewError) as error:
                 # Configuration metadata can also fail while projecting a

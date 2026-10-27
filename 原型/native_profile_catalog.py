@@ -1,10 +1,11 @@
-"""Saved profile -> original Codex catalogue, without the text adapter policy.
+"""Saved profile -> original Codex/Claude candidates, without text-adapter policy.
 
 Empty fields mean inherit the native thread's current settings. This is not a
 reset to initial defaults. The native catalogue is discovery, not entitlement
 or per-turn model telemetry. No route, permission, provider or cwd is changed.
 """
 from collections import Counter
+from copy import deepcopy
 
 from agent_registry import valid_model_id
 from profiles import SNAPSHOT_PROFILE_FIELDS
@@ -117,4 +118,74 @@ def project_native_capabilities(snapshot, *, enabled):
             'model': row['model'], 'name': row['displayName'], 'supported_efforts': efforts,
             'default_effort': row['defaultReasoningEffort'],
             'explicit_effort_supported': bool(efforts)})
+    return result
+
+
+def normalize_claude_catalogue(value):
+    """SDK initialize candidates only; no provider, entitlement or effort claim."""
+    def text(item, maximum, *, alias=False):
+        return (type(item) is str and 1 <= len(item) <= maximum
+            and not any((ord(char) <= 32 if alias else ord(char) < 32) or ord(char) == 127
+                        or 0xD800 <= ord(char) <= 0xDFFF for char in item))
+
+    if type(value) is not dict or set(value) != {'models'} or type(value['models']) is not list or len(value['models']) > 256:
+        raise NativeProfileUnavailable('Claude SDK 模型目录格式无效或超过读取范围。')
+    result, seen = [], set()
+    for row in value['models']:
+        if (type(row) is not dict or not {'value', 'displayName'} <= row.keys()
+                or row.keys() - {'value', 'displayName', 'description'}
+                or not text(row['value'], 192, alias=True) or not text(row['displayName'], 512)
+                or 'description' in row and (type(row['description']) is not str or len(row['description']) > 4096
+                    or any(0xD800 <= ord(char) <= 0xDFFF for char in row['description']))
+                or row['value'] in seen):
+            raise NativeProfileUnavailable('Claude SDK 模型目录格式无效、重复或超过读取范围。')
+        seen.add(row['value'])
+        result.append(deepcopy(row))
+    return {'models': result}
+
+
+def resolve_claude_profile(profile, catalogue):
+    if profile['agent_instance_id'] != 'local/claude' or profile['device_id'] != 'local':
+        raise NativeProfileUnavailable('这份配置不属于本机 Claude。')
+    if profile['reasoning_effort'] is not None:
+        raise NativeProfileUnavailable('这条 Claude 原生入口仅支持选择模型，思考强度请保留 Agent 默认。')
+    identity = profile['model_id']
+    if not identity:
+        return {}
+    if not valid_model_id(identity, 'claude'):
+        raise NativeProfileUnavailable('这份配置没有有效的 Claude 模型编号。')
+    model = identity.removeprefix('local/claude/')
+    rows = normalize_claude_catalogue(catalogue)['models']
+    if sum(row['value'] == model for row in rows) != 1:
+        raise NativeProfileUnavailable('当前 Claude SDK 目录中没有这个模型，请更新目录后核对。')
+    return {'model': model}
+
+
+def project_claude_profiles(profiles, catalogue):
+    result = []
+    for profile in profiles:
+        if profile['agent_instance_id'] != 'local/claude' or profile['device_id'] != 'local':
+            continue
+        row = {key: profile[key] for key in SNAPSHOT_PROFILE_FIELDS}
+        row['image_input'] = 'unknown'
+        try:
+            resolve_claude_profile(profile, catalogue)
+        except NativeProfileUnavailable as error:
+            row.update(available=False, unavailable_reason=str(error))
+        else:
+            row.update(available=True, unavailable_reason=None)
+        result.append(row)
+    return result
+
+
+def project_claude_capabilities(snapshot, *, enabled):
+    result = {'enabled': bool(enabled), 'source': 'claude/sdk-initialize',
+        'catalogue_available': False, 'observed_at': None, 'source_chat_id': None, 'models': []}
+    if not enabled or snapshot is None:
+        return result
+    catalogue = normalize_claude_catalogue(snapshot['catalogue'])
+    result.update(catalogue_available=True, observed_at=snapshot['observed_at'], source_chat_id=snapshot['source_chat_id'])
+    result['models'] = [{'id': 'local/claude/' + row['value'], 'agent_id': 'claude',
+        'model': row['value'], 'name': row['displayName'], 'supported_efforts': [],
+        'default_effort': None, 'explicit_effort_supported': False} for row in catalogue['models']]
     return result

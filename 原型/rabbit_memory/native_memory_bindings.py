@@ -104,6 +104,7 @@ class NativeMemoryBindings(MemoryProfiles):
         self._check_path()
         self.lock = threading.RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._upgrade_legacy_schema()
         with self._open(create=True) as db:
             db.execute('BEGIN IMMEDIATE')
             initialize_schema(db)

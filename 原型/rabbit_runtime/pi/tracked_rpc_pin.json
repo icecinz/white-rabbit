@@ -1,0 +1,11 @@
+{
+  "name": "@earendil-works/pi-coding-agent",
+  "version": "0.79.1",
+  "files": {
+    "dist/modes/rpc/rpc-mode.js": "b07a4acb6dd1e94b2826c93157071d916d94b08a4fd45732c89532a5c33861a8",
+    "dist/core/agent-session.js": "80c96e979a5a5cb26d6278df0b2b560cefc481765e8dc6985968e7a47752c6f5",
+    "dist/modes/rpc/jsonl.js": "049a9f8ca4242c79f1911ed977949e8d8906b4561f424c2729687f426fabaacf",
+    "node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js": "104df5cf6996db3e56d9120bb73eb842f354ff09bf42240538abac68b15c1ae4",
+    "node_modules/@earendil-works/pi-agent-core/dist/agent.js": "c377937b652581afd130f732e083e0c568f106e8ebd82d2bb9bddd976de54c08"
+  }
+}

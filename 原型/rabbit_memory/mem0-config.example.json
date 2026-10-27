@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "llm": {"model": "", "base_url": "", "api_key": ""},
+  "embedder": {"model": "", "base_url": "", "api_key": "", "dimensions": 1536}
+}

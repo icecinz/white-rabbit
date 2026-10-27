@@ -25,6 +25,7 @@ from native_memory_intents import NativeMemoryIntentError, validate_selection
 from profiles import (AIProfiles, make_profile_snapshot, validate_profile_id,
                       validate_profile_revision, MAX_REVISION, REASONING_EFFORTS)
 from native_chat_selection import assert_selection_in
+from native_memory_selection import assert_memory_selection_in
 
 
 MAX_LIST_CLIENTS = 128
@@ -270,11 +271,14 @@ class HermesProfileIntents:
         chat_id = _uuid(chat_id)
         client_id, explicit, digest = self._request_identity(body)
         profile_id, revision = body.get('ai_profile_id'), body.get('ai_profile_revision')
+        memory = validate_selection(body)
+        memory_id, memory_revision = (memory['id'], memory['revision']) if memory else (None, None)
         with self._db() as db:
             old = self._replay(self._intent_in(db, client_id), chat_id, digest)
             if old is not None:
                 return old
             assert_selection_in(db, self.workspace_id, 'hermes', chat_id, profile_id, revision)
+            assert_memory_selection_in(db, self.workspace_id, 'hermes', chat_id, memory_id, memory_revision)
             profile = self._saved_in(db, profile_id) if explicit else None
             if profile is not None and profile['revision'] != revision:
                 _fail('profile_conflict')
@@ -286,6 +290,7 @@ class HermesProfileIntents:
             if old is not None:
                 return old
             assert_selection_in(db, self.workspace_id, 'hermes', chat_id, profile_id, revision)
+            assert_memory_selection_in(db, self.workspace_id, 'hermes', chat_id, memory_id, memory_revision)
             if explicit:
                 try:
                     unchanged = self._saved_in(db, profile_id) == profile

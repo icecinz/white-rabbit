@@ -23,8 +23,10 @@ from urllib.parse import quote
 import uuid
 
 
-PROGRAMS = frozenset(('hindsight',))
-CONNECTION_IDS = frozenset(('local/hindsight',))
+PROGRAM_CONNECTIONS = {'hindsight': 'local/hindsight',
+                       'hermes_files': 'local/hermes-files', 'mem0': 'local/mem0'}
+PROGRAMS = frozenset(PROGRAM_CONNECTIONS)
+CONNECTION_IDS = frozenset(PROGRAM_CONNECTIONS.values())
 MODES = frozenset(('read_only', 'read_write'))
 MAX_PROFILES = 128
 MAX_REVISION = 2 ** 53 - 1
@@ -39,16 +41,27 @@ CREATION_RECEIPTS_DDL = '''CREATE TABLE IF NOT EXISTS memory_profile_creation_re
     profile_snapshot TEXT NOT NULL)'''
 
 
-def initialize_schema(db):
-    """Initialize local configuration/receipts in the caller's transaction."""
-    db.execute('''CREATE TABLE IF NOT EXISTS memory_profiles (
+LEGACY_PROFILE_SQL = '''CREATE TABLE memory_profiles (
         id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision>0),
         name TEXT NOT NULL, description TEXT NOT NULL, habits TEXT NOT NULL,
         program TEXT NOT NULL CHECK(program='hindsight'),
         connection_id TEXT NOT NULL CHECK(connection_id='local/hindsight'),
         mode TEXT NOT NULL CHECK(mode IN ('read_only','read_write')),
         bank_id TEXT NOT NULL UNIQUE CHECK(bank_id='rabbit-' || id),
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)'''
+PROFILE_SQL = LEGACY_PROFILE_SQL.replace("CHECK(program='hindsight')",
+    "CHECK(program IN ('hindsight','hermes_files','mem0'))").replace(
+    "CHECK(connection_id='local/hindsight')",
+    "CHECK((program='hindsight' AND connection_id='local/hindsight') OR "
+    "(program='hermes_files' AND connection_id='local/hermes-files') OR "
+    "(program='mem0' AND connection_id='local/mem0'))").replace(
+    "CHECK(mode IN ('read_only','read_write'))",
+    "CHECK(mode IN ('read_only','read_write') AND (program='hindsight' OR mode='read_only'))")
+
+
+def initialize_schema(db):
+    """Create absent tables in the caller transaction; upgrades use an owned connection."""
+    db.execute(PROFILE_SQL.replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS ', 1))
     db.execute(CREATION_RECEIPTS_DDL)
 
 
@@ -93,11 +106,13 @@ def validate_memory_profile_fields(name, description='', habits='', program='hin
                   description=_text(description, 200, '用途说明', multiline=True),
                   habits=_text(habits, 4000, '身份与习惯', multiline=True))
     if not isinstance(program, str) or program not in PROGRAMS:
-        raise ValueError('目前只支持已接入的 Hindsight 记忆程序。')
-    if not isinstance(connection_id, str) or connection_id not in CONNECTION_IDS:
-        raise ValueError('目前只能选择已配置的本机 Hindsight 连接。')
+        raise ValueError('请选择已接入的记忆程序。')
+    if not isinstance(connection_id, str) or connection_id != PROGRAM_CONNECTIONS[program]:
+        raise ValueError('记忆程序与本机连接不一致。')
     if not isinstance(mode, str) or mode not in MODES:
         raise ValueError('记忆使用方式需要只读取或读取并记住。')
+    if program != 'hindsight' and mode != 'read_only':
+        raise ValueError('这个记忆程序当前只支持只读注入；手动编辑另行明确保存。')
     return dict(fields, program=program, connection_id=connection_id, mode=mode)
 
 
@@ -166,10 +181,64 @@ class MemoryProfiles:
         self._check_path()
         self.lock = threading.RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._upgrade_legacy_schema()
         with self._open(create=True) as db:
             db.execute('BEGIN IMMEDIATE')
             initialize_schema(db)
         os.chmod(self.path, 0o600)
+
+    def _upgrade_legacy_schema(self):
+        """Owned startup migration; never toggle FK enforcement in a caller transaction."""
+        if not self.path.exists():
+            return
+        normalize = lambda sql: ''.join(sql.lower().split()).replace('ifnotexists', '').replace('"memory_profiles"', 'memory_profiles')
+        with self._open() as db:
+            db.execute('PRAGMA foreign_keys=OFF')
+            previous_alter = db.execute('PRAGMA legacy_alter_table').fetchone()[0]
+            try:
+                db.execute('BEGIN IMMEDIATE')
+                row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_profiles'").fetchone()
+                if row is None or normalize(row[0]) == normalize(PROFILE_SQL):
+                    db.commit()
+                    return
+                if normalize(row[0]) != normalize(LEGACY_PROFILE_SQL):
+                    raise ValueError('记忆配置原表结构无法核验，没有尝试修复。')
+                if db.execute('PRAGMA foreign_key_check').fetchone():
+                    raise ValueError('记忆配置原关联无法核验，没有升级。')
+                before = list(db.execute('SELECT * FROM memory_profiles ORDER BY id'))
+                schema = [tuple(r) for r in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_stat%' ORDER BY type,name")]
+                children = {name: [tuple(r) for r in db.execute('SELECT * FROM ' + name + ' ORDER BY 1')]
+                    for name in ('memory_profile_creation_receipts', 'native_memory_bindings')
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()}
+                objects = [(kind, name, sql) for kind, name, table, sql in schema
+                           if table == 'memory_profiles' and kind in ('index', 'trigger') and sql]
+                db.execute(PROFILE_SQL.replace('memory_profiles', '_rabbit_memory_profiles_upgrade', 1))
+                db.execute('INSERT INTO _rabbit_memory_profiles_upgrade SELECT * FROM memory_profiles')
+                db.execute('DROP TABLE memory_profiles')
+                # Other native guard triggers still refer to the final table name.
+                # Do not rewrite those references to the temporary replacement.
+                db.execute('PRAGMA legacy_alter_table=ON')
+                db.execute('ALTER TABLE _rabbit_memory_profiles_upgrade RENAME TO memory_profiles')
+                for _, _, sql in objects:
+                    db.execute(sql)
+                if [tuple(r) for r in db.execute('SELECT * FROM memory_profiles ORDER BY id')] != [tuple(r) for r in before]:
+                    raise ValueError('记忆配置升级前后数据不一致。')
+                after_schema = [tuple(r) for r in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_stat%' ORDER BY type,name")]
+                unchanged = lambda rows: [r for r in rows if not (r[0] == 'table' and r[1] == 'memory_profiles')]
+                if unchanged(schema) != unchanged(after_schema):
+                    raise ValueError('记忆配置升级改变了原关联结构。')
+                for name, rows in children.items():
+                    if [tuple(r) for r in db.execute('SELECT * FROM ' + name + ' ORDER BY 1')] != rows:
+                        raise ValueError('记忆配置升级改变了原回执或绑定。')
+                if db.execute('PRAGMA foreign_key_check').fetchone():
+                    raise ValueError('记忆配置升级关联核验未通过。')
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+            finally:
+                db.execute('PRAGMA legacy_alter_table=' + str(previous_alter))
+                db.execute('PRAGMA foreign_keys=ON')
 
     def _check_path(self):
         cloud = Path.home() / 'Library' / 'Mobile Documents'

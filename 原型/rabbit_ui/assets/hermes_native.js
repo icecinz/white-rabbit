@@ -47,6 +47,8 @@
     let selectedProfile = null, profileRows = [], profilesReadable = false, profilesReading = false, profileRequest = 0, profilesError = "";
     const configurationSelection = window.RabbitProfiles?.createNativeSelection?.({ agent: "hermes", parseProfile: profile });
     let selectionUnsupported = false;
+    const memorySelection = window.RabbitProfiles?.createNativeMemorySelection?.({ agent: "hermes" });
+    let memorySelectionUnsupported = false;
     let selectedMemory = null, memoryRows = [], memoryReadable = false, memoryReading = false, memoryRequest = 0, memoryVersion = 0, memoryError = "", memorySourcesError = "";
     const memoryEvidence = new Map(), memoryCards = new Map(), memorySuffixes = new Map(), memorySuffixCache = new Map();
     const requestNodes = new Map(), toolNodes = new Map(), burned = new Set(); let digests = new Map(), displayScope = null;
@@ -98,9 +100,11 @@
     }) : null;
     if (textPicker) composerActions.replaceChildren(textPicker.root, sendButton);
     function memoryBlocked() { return !enabled || destroyed || writing || openingForSend || !!pending || storageInvalid || configurationBarrier() || attachmentBarrier() || unsettled() || active(); }
-    function memoryReady() { return selectedMemory === null || memoryReadable && memoryRows.some(row => row.mode === "read_only" && canonical(row) === canonical(selectedMemory)); }
+    function memorySelectionReady() { return !memorySelectionUnsupported && (!memorySelection || memorySelection.ready()); }
+    function memoryControlled() { return memorySelectionUnsupported || memorySelection?.controlled() === true; }
+    function memoryReady() { return memorySelectionReady() && (!memorySelection || memorySelection.matchesProfile(selectedMemory)) && (selectedMemory === null || memoryReadable && memoryRows.some(row => row.mode === "read_only" && canonical(row) === canonical(selectedMemory))); }
     memorySelect.addEventListener("change", () => {
-      if (memoryBlocked()) { render(); return; }
+      if (memoryControlled() || memoryBlocked()) { render(); return; }
       const row = memoryRows.find(value => value.id === memorySelect.value && value.mode === "read_only");
       if (memorySelect.value && (!memoryReadable || !row)) { render(); return; }
       const previous = selectedMemory; selectedMemory = row ? selectedMemoryChoice(row) : null; memoryVersion++;
@@ -109,6 +113,7 @@
     });
     async function loadMemoryProfiles() {
       syncWorkspace(); if (destroyed || !enabled || !workspace || writing || !Object.hasOwn(snapshot || {}, "memory_intents")) return;
+      memorySelection?.catalogStarted();
       const stamp = generation, request = ++memoryRequest, writes = writeVersion, version = memoryVersion;
       const current = () => sameScope(stamp) && request === memoryRequest && writes === writeVersion && version === memoryVersion;
       memoryReading = true; render();
@@ -124,9 +129,13 @@
     function selectionReady() { return !selectionUnsupported && (!configurationSelection || configurationSelection.ready()); }
     function selectionControlled() { return selectionUnsupported || configurationSelection?.controlled() === true; }
     function syncConfigurationSelection() {
-      configurationSelection?.synchronize({ blocked: !enabled || destroyed || !readable || writing || posting || textPicker?.busy() || openingForSend || openSendUnconfirmed || !!pending || storageInvalid || !!unsettled() || active() || configurationBarrier() || attachmentBarrier() || snapshot?.disconnect_unconfirmed === true || snapshot?.requests?.some(row => ["pending", "unknown"].includes(row.state)), save,
+      const blocked = !enabled || destroyed || !readable || writing || posting || textPicker?.busy() || openingForSend || openSendUnconfirmed || !!pending || storageInvalid || !!unsettled() || active() || configurationBarrier() || attachmentBarrier() || snapshot?.disconnect_unconfirmed === true || snapshot?.requests?.some(row => ["pending", "unknown"].includes(row.state));
+      configurationSelection?.synchronize({ blocked, save,
         apply: value => { const previous = selectedProfile; selectedProfile = value === null ? null : preference({ id: value.id, revision: value.revision }); if (!save()) { selectedProfile = previous; return false; } composerVersion++; return true; } });
+      memorySelection?.synchronize({ blocked, save,
+        apply: value => { const previous = selectedMemory; selectedMemory = value; if (!save()) { selectedMemory = previous; return false; } memoryVersion++; composerVersion++; return true; } });
       if (configurationSelection?.takeCatalogRefresh(ready() && !writing && !posting && !openingForSend && !profilesReading)) { profilesReadable = false; void loadProfiles(); }
+      if (memorySelection?.takeCatalogRefresh(readable && !writing && !posting && !openingForSend && !memoryReading)) { memoryReadable = false; void loadMemoryProfiles(); }
     }
     function profileReady() { return selectionReady() && (selectedProfile === null ? !configurationSelection || configurationSelection.matchesProfile(null) : profilesReadable && selectedRow()?.available === true && (!configurationSelection || configurationSelection.matchesProfile(selectedRow()))); }
     function materialsReady() { return !draftMaterials.length || materialsEnabled && !!nativeMaterials; }
@@ -138,6 +147,7 @@
       if (!save()) { selectedProfile = previous; profilesError = "浏览器不能保存Hermes配置选择；原选择与草稿保留。"; }
       render();
     });
+    async function loadInitialMemoryProfiles() { if (!memorySelection?.managed() || memorySelection.takeCatalogRefresh(readable)) await loadMemoryProfiles(); }
     async function loadInitialProfiles() { if (!configurationSelection?.managed() || configurationSelection.takeCatalogRefresh(ready())) await loadProfiles(); }
     async function loadProfiles() {
       syncWorkspace(); if (!ready() || writing || profilesReading || !workspace) return;
@@ -160,7 +170,7 @@
     function save() {
       if (!storageKey || storageInvalid) return false;
       const version = selectedMemory || pending?.memory_profile ? 4 : pending && !pending.body_json ? 1 : pending?.material_refs !== undefined || draftMaterials.length ? 3 : 2;
-      try { window.sessionStorage.setItem(storageKey, encode({ version, draft, pending, answer_journal: journal, ...(version >= 2 ? { selected_profile: selectedProfile } : {}), ...(version >= 3 ? { material_refs: draftMaterials } : {}), ...(version === 4 ? { selected_memory: selectedMemory } : {}), ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}) })); return true; } catch (_) { return false; }
+      try { window.sessionStorage.setItem(storageKey, encode({ version, draft, pending, answer_journal: journal, ...(version >= 2 ? { selected_profile: selectedProfile } : {}), ...(version >= 3 ? { material_refs: draftMaterials } : {}), ...(version === 4 ? { selected_memory: selectedMemory } : {}), ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}), ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}) })); return true; } catch (_) { return false; }
     }
     function syncWorkspace() {
       const id = String(getWorkspace() || ""); if (id === workspace) return;
@@ -170,6 +180,7 @@
       selectedMemory = null; memoryRows = []; memoryReadable = memoryReading = false; memoryError = memorySourcesError = ""; memoryRequest++; memoryVersion++; memoryEvidence.clear(); memoryCards.clear(); memorySuffixes.clear(); memorySuffixCache.clear();
       receiptProof = null; receiptError = ""; freshSend = null; historyBefore = null; historyRequest++;
       selectionUnsupported = false; configurationSelection?.reset(undefined, { workspace, chatId });
+      memorySelectionUnsupported = false; memorySelection?.reset(undefined, { workspace, chatId });
       try {
         const saved = storageKey && JSON.parse(window.sessionStorage.getItem(storageKey) || "null");
         if (saved) {
@@ -195,6 +206,7 @@
               }
             }
           }
+          if (Object.hasOwn(saved, "memory_selection")) { if (!memorySelection) throw Error(); memorySelection.reset(saved.memory_selection, { workspace, chatId }); }
           if (!object(saved.answer_journal) || Object.keys(saved.answer_journal).length > 128) throw Error();
           for (const [digest, state] of Object.entries(saved.answer_journal)) { if (!/^[a-f0-9]{64}$/.test(digest) || state !== "submitted_unknown") throw Error(); journal[digest] = state; }
         }
@@ -228,6 +240,7 @@
         const chosen = initialProfileChoice(value.ai_profile); choice = preference({ id: chosen.id, revision: chosen.revision });
       }
       const memory = hasMemory ? value.memory_profile === null ? null : selectedMemoryChoice(value.memory_profile) : selectedMemory;
+      if (hasMemory && memoryControlled() && (!memorySelectionReady() || !memorySelection?.matchesProfile(memory))) throw Error("Hermes下轮记忆由专员管理；交接选择不同或尚未核实，原草稿保留。");
       if (hasMemory && selectedMemory !== null && canonical(memory) !== canonical(selectedMemory)) throw Error("Hermes原生对话已有不同的共享记忆选择；没有覆盖。");
       const text = value.text, refs = materialRefs(value.material_refs);
       if (refs.length && (!materialsEnabled || !nativeMaterials)) throw Error("Hermes材料入口未启用；整份未放入，原选择保留。");
@@ -474,7 +487,7 @@
     function nativeIdle() { const b = snapshot?.binding; return ready() && snapshot?.native_state?.running === false && typeof b?.session_key === "string" && !!b.session_key && typeof b?.runtime_session_id === "string" && !!b.runtime_session_id && !unsettled() && !snapshot.requests.some(r => ["pending", "unknown"].includes(r.state)); }
     function idle() { return nativeIdle() && !configurationBarrier() && !attachmentBarrier(); }
     function eventOwned(event, binding) { return object(event) && typeof event.type === "string" && !!event.type && (!event.session_id || event.session_id === binding?.runtime_session_id); }
-    function canOpenForSend() { return selectionReady() && !textPicker?.busy() && !openSendUnconfirmed && enabled && !destroyed && visible && !root.hidden && !document.hidden && readable && ["not_open", "closed"].includes(snapshot?.connection.state) && snapshot.disconnect_unconfirmed !== true && !snapshot.connection.problem && !pending && !storageInvalid && !unsettled() && !active() && !snapshot?.requests.some(row => ["pending", "unknown"].includes(row.state)) && !configurationBarrier() && !attachmentBarrier(); }
+    function canOpenForSend() { return selectionReady() && memorySelectionReady() && !textPicker?.busy() && !openSendUnconfirmed && enabled && !destroyed && visible && !root.hidden && !document.hidden && readable && ["not_open", "closed"].includes(snapshot?.connection.state) && snapshot.disconnect_unconfirmed !== true && !snapshot.connection.problem && !pending && !storageInvalid && !unsettled() && !active() && !snapshot?.requests.some(row => ["pending", "unknown"].includes(row.state)) && !configurationBarrier() && !attachmentBarrier(); }
     function sendStateReady() { return !textPicker?.busy() && !openSendUnconfirmed && snapshot?.disconnect_unconfirmed !== true && !snapshot?.requests.some(row => ["pending", "unknown"].includes(row.state)) && idle() && profileReady() && materialsReady() && memoryReady(); }
     async function consume(value, stamp, writes = writeVersion) {
       const current = () => sameScope(stamp) && writes === writeVersion;
@@ -514,7 +527,7 @@
         if (!sameScope(stamp) || version !== writeVersion) return;
         const query = [...(pending ? ["client_id=" + pending.client_id] : []), ...(historyBefore === null ? [] : ["before=" + historyBefore])].join("&");
         const value = await api(apiRoot + (query ? "?" + query : "")); if (!sameScope(stamp) || version !== writeVersion || historyTicket !== historyRequest) return; await consume(value, stamp, version);
-        if (sameScope(stamp) && version === writeVersion) { if (configurationSelection) configurationSelection.observe(value); else if (Object.hasOwn(value, "configuration_selection") || Object.hasOwn(value, "configuration_selection_error")) selectionUnsupported = true; }
+        if (sameScope(stamp) && version === writeVersion) { if (configurationSelection) configurationSelection.observe(value); else if (Object.hasOwn(value, "configuration_selection") || Object.hasOwn(value, "configuration_selection_error")) selectionUnsupported = true; if (memorySelection) memorySelection.observe(value); else if (Object.hasOwn(value, "memory_selection") || Object.hasOwn(value, "memory_selection_error")) memorySelectionUnsupported = true; }
       }
       catch (error) { if (sameScope(stamp) && version === writeVersion) { readable = false; fail(error, "Hermes原生状态暂不可读取；原草稿和回执保留。"); } }
       finally { if (sameScope(stamp)) { reading = false; render(); const again = readPending; readPending = false; if (again) await refresh(); else schedule(); } }
@@ -541,7 +554,7 @@
           if (pending.body_json && (pending.configuration_preparation || freshSend?.client_id === body.client_id && freshSend.generation === stamp && configurationErrors.has(error.code))) { pending.configuration_preparation = true; save(); }
           else if (freshSend?.client_id === body.client_id && freshSend.generation === stamp) { const old = pending; pending = null; if (!save()) pending = old; }
         } fail(error, "结果仍待核对，没有自动重复提交。"); } return null; }
-      finally { if (kind === "send" && freshSend?.client_id === body.client_id && freshSend.generation === stamp) freshSend = null; if (sameScope(stamp)) { writing = posting = false; render(); await refresh(); if (kind === "open" && ready()) { await loadInitialProfiles(); await loadMemoryProfiles(); } } }
+      finally { if (kind === "send" && freshSend?.client_id === body.client_id && freshSend.generation === stamp) freshSend = null; if (sameScope(stamp)) { writing = posting = false; render(); await refresh(); if (kind === "open" && ready()) { await loadInitialProfiles(); await loadInitialMemoryProfiles(); } } }
     }
     async function send() {
       syncWorkspace(); if (openingForSend || writing || pending || storageInvalid || !visible || root.hidden || document.hidden || !validText(draft) || !draft.trim() || draft.length > 200000 || !(sendStateReady() || canOpenForSend())) return;
@@ -705,7 +718,7 @@
       statusCard.hidden = typeof renderStatus !== "function"; connection.hidden = !statusCard.hidden;
       if (fallbackTitle) fallbackTitle.textContent = tr("备用选择", "Fallback choices");
       if (statusCard.hidden) return;
-      const status = !selectionReady() || selectedProfile !== null && !profileReady() || selectedMemory !== null && !memoryReady() || !readable || storageInvalid || openSendUnconfirmed || snapshot?.disconnect_unconfirmed === true || configurationBarrier() || attachmentBarrier() ? tr("待核对", "Needs verification")
+      const status = !selectionReady() || !memorySelectionReady() || selectedProfile !== null && !profileReady() || selectedMemory !== null && !memoryReady() || !readable || storageInvalid || openSendUnconfirmed || snapshot?.disconnect_unconfirmed === true || configurationBarrier() || attachmentBarrier() ? tr("待核对", "Needs verification")
         : openingForSend || snapshot?.connection.state === "opening" ? tr("正在连接", "Connecting")
         : snapshot?.connection.state === "failed" ? tr("连接失败", "Connection failed")
         : snapshot?.requests?.some(row => ["pending", "unknown"].includes(row.state)) ? tr("等待确认", "Waiting for confirmation")
@@ -713,8 +726,8 @@
         : pending || unsettled() ? tr("待核对", "Needs verification")
         : nativeIdle() ? tr("空闲", "Idle")
         : ["not_open", "closed"].includes(snapshot?.connection.state) ? tr("未连接", "Not connected") : tr("待核对", "Needs verification");
-      const chosen = profileReady() ? selectedRow() : null, inherited = tr("沿用原生配置", "Use native settings"), unverified = tr("原选配置待核对", "Saved configuration needs verification");
-      renderStatus(statusCard, { agent: "Hermes", model: selectedProfile === null ? inherited : !chosen ? unverified : !chosen.model_id ? inherited : chosen.model_id.includes("/native/") ? tr("已选原生模型 · ", "Selected native model · ") + chosen.name : chosen.model_id.slice("local/hermes/".length), effort: selectedProfile === null || !chosen ? null : chosen.reasoning_effort === "none" ? tr("none（原生关闭请求，提供商可能映射）", "none (native disable request; providers may map it)") : chosen.reasoning_effort ?? null,
+      const chosen = profileReady() ? selectedRow() : null, unverified = tr("原选配置待核对", "Saved configuration needs verification");
+      renderStatus(statusCard, { agent: "Hermes", model: selectedProfile !== null && !chosen ? unverified : chosen?.model_id || null, effort: chosen?.reasoning_effort ?? null,
         memory: selectedMemory ? `${selectedMemory.name} · ${tr("只读", "Read only")}${memoryReady() ? "" : tr("（待核对）", " (needs verification)")}` : tr("不附加共享记忆", "No added shared memory"),
         status, observed: readable ? checkedModelReport(snapshot) : "", language });
     }
@@ -744,10 +757,11 @@
       const memoryStale = selectedMemory !== null && !memoryReady(), savedMemory = selectedMemory && "saved:" + selectedMemory.id + ":" + selectedMemory.revision;
       if (memoryStale) { const option = node("option", "", selectedMemory.name + tr(" · 原选第 ", " · saved v") + selectedMemory.revision + tr(" 版（待重新选择）", " (review required)")); option.value = savedMemory; option.disabled = true; memorySelect.append(option); }
       for (const row of memoryRows) { const option = node("option", "", row.name + tr(" · 第 ", " · v") + row.revision + tr(" 版", "") + (row.mode === "read_only" ? tr(" · 只读", " · read only") : tr(" · 本入口不支持读写", " · read-write unavailable here"))); option.value = row.id; option.disabled = !memoryReadable || row.mode !== "read_only"; memorySelect.append(option); }
-      memorySelect.value = memoryStale ? savedMemory : selectedMemory?.id || ""; memorySelect.disabled = memoryBlocked();
+      memorySelect.value = memoryStale ? savedMemory : selectedMemory?.id || ""; memorySelect.disabled = memoryControlled() || memoryBlocked();
       memoryRefresh.disabled = !enabled || destroyed || writing || memoryReading;
-      memoryInfo.textContent = [tr("Hermes 原生记忆照常；这里只为下一次发送附加只读资料，不保存本轮交互。不附加不会清除原生上文。", "Hermes native memory stays unchanged. Selected read-only context is added for the next send without saving this interaction. Choosing none does not erase earlier context."), memoryStale ? tr("原选版本已变化或尚未核实，请重新选择；原稿保留。", "The saved version changed or is unverified. Choose explicitly; the draft remains.") : "", memoryReading ? tr("正在读取保存的参数…", "Reading saved parameters…") : "", memoryError].filter(Boolean).join(" ");
-      memoryLabel.hidden = memoryRefresh.hidden = memoryInfo.hidden = !Object.hasOwn(snapshot || {}, "memory_intents") && !selectedMemory && !pending?.memory_profile;
+      memoryInfo.textContent = [memorySelection?.message(language), memorySelectionUnsupported ? tr("记忆配置状态组件未就绪；原草稿保留。", "Memory configuration state is unavailable; the original draft remains.") : "", tr("Hermes 原生记忆照常；这里只为下一次发送附加只读资料，不保存本轮交互。不附加不会清除原生上文。", "Hermes native memory stays unchanged. Selected read-only context is added for the next send without saving this interaction. Choosing none does not erase earlier context."), memoryStale ? tr("原选版本已变化或尚未核实，请重新选择；原稿保留。", "The saved version changed or is unverified. Choose explicitly; the draft remains.") : "", memoryReading ? tr("正在读取保存的参数…", "Reading saved parameters…") : "", memoryError].filter(Boolean).join(" ");
+      memoryRefresh.hidden = memoryInfo.hidden = !Object.hasOwn(snapshot || {}, "memory_intents") && !selectedMemory && !pending?.memory_profile && !memoryControlled();
+      memoryLabel.hidden = memoryRefresh.hidden || memoryControlled();
       openButton.hidden = ready(); openButton.disabled = !enabled || destroyed || !readable || writing || openingForSend || attachmentBarrier(); 
       let preparation = null; try { if (readable && pending?.configuration_preparation) preparation = matchingApplication(snapshot); } catch (_) { /* Only checked matching proof can authorize recovery. */ }
       const failedPreparation = preparation?.phase === "failed";
@@ -805,8 +819,8 @@
       const value = historyView.getTextRecords(snapshot);
       return { native_identity, records: value.records, incomplete: value.incomplete || active() };
     }
-    async function show() { if (destroyed || !enabled) return; visible = true; root.hidden = false; syncWorkspace(); render(); await refresh(); if (ready()) await loadInitialProfiles(); await loadMemoryProfiles(); }
-    async function showSettings() { if (destroyed || !enabled) return; composerVersion++; visible = true; root.hidden = true; syncWorkspace(); render(); await refresh(); if (ready()) await loadInitialProfiles(); await loadMemoryProfiles(); }
+    async function show() { if (destroyed || !enabled) return; visible = true; root.hidden = false; syncWorkspace(); render(); await refresh(); if (ready()) await loadInitialProfiles(); await loadInitialMemoryProfiles(); }
+    async function showSettings() { if (destroyed || !enabled) return; composerVersion++; visible = true; root.hidden = true; syncWorkspace(); render(); await refresh(); if (ready()) await loadInitialProfiles(); await loadInitialMemoryProfiles(); }
     function hide() { composerVersion++; visible = false; root.hidden = true; clearTimeout(timer); timer = null; save(); }
     function destroy() { hide(); destroyed = true; settingsPanel?.remove(); generation++; readPending = false; freshSend = null; memorySuffixes.clear(); memorySuffixCache.clear(); historyView?.destroy(); document.removeEventListener?.("visibilitychange", visibility); }
     function setLanguage(value) { language = value === "en" ? "en" : "zh-CN"; render(); }

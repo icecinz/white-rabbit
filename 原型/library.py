@@ -66,6 +66,46 @@ def _library_keys(values):
     return tuple(sorted(set(values)))
 
 
+def conversation_query(query='', agent='all', offset=0, limit=20):
+    """Bound the specialist directory using the existing search rules."""
+    if (type(query) is not str or len(query) > 400
+            or any(ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in query)
+            or type(offset) is not int or not 0 <= offset <= 1000000
+            or type(limit) is not int or not 1 <= limit <= 50):
+        raise ValueError('对话查询参数无效。')
+    return dict(query=query.strip(), agent=_agent(agent), offset=offset, limit=limit)
+
+
+def conversation_directory(page, *, workspace_id, options):
+    """Project library metadata; never return matches or source bodies."""
+    items = []
+    for row in page['items']:
+        key, kind, title = row['key'], row['kind'], row['title']
+        _library_keys([key])
+        if type(title) is not str or '\0' in title:
+            raise ValueError('对话名称暂不能核对。')
+        title.encode('utf-8', 'strict')
+        agent, chat_id, session_id = None, None, None
+        if kind == 'chat':
+            chat_id = native_chat_id(row['id'])
+            expected = 'chat:' + chat_id
+        elif kind == 'native':
+            agent, chat_id = _agent(row['agent'], allow_all=False), native_chat_id(row['id'])
+            expected = 'native:' + agent + ':' + chat_id
+        elif kind == 'history':
+            agent, session_id = LibraryView._source_pair((row['agent'], row['session_id']))
+            expected = 'history:' + agent + ':' + session_id
+        else:
+            raise ValueError('对话来源类型暂不能核对。')
+        if key != expected:
+            raise ValueError('对话身份暂不能核对。')
+        items.append(dict(key=key, kind=kind, title=title[:512], title_truncated=len(title) > 512,
+            agent=agent, chat_id=chat_id, session_id=session_id))
+    return dict(workspace_id=workspace_id, scope='conversation_directory', inference_performed=False,
+        **options, revision=page['revision'], history_index_available=not bool(page.get('notice')),
+        items=items, total=page['total'], next_offset=page['next_offset'])
+
+
 class _CollectAgents:
     def __init__(self, object_reader=_object):
         self.values = set()

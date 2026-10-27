@@ -19,6 +19,20 @@
 
 文件检查、严格JSON、模型参数校验分别由公开子模块提供。通用工具只有一份实现；宿主可以使用自己的HTTP、内容库和记忆系统，不需要导入小白兔服务。
 
+## 可选外部工作读取
+
+`rabbit_runtime.hapi_work`提供独立的`HapiWorkReader`和纯投影函数`project_sessions`，只依赖标准库，没有小白兔宿主依赖。它只读取明确本机Hub的固定工作列表；构造不会联网，不读取账号或配置文件。
+
+```python
+from rabbit_runtime.hapi_work import HapiWorkReader, HapiWorkError
+
+snapshot = HapiWorkReader(origin, jwt).snapshot()  # 调用者提供地址和内存JWT
+```
+
+结果范围为`hapi_hub_summary`，状态仅代表Hub所报；保留原生身份未知，不提供发送、审批、停止或恢复。失败抛固定错误代码，不返回缓存。JWT的取得与更新、原网页登录和手机可达性归宿主处理。本模块不启用HAPI，也不改变现有运行核心。
+
+固定HAPI 0.30.7的实际列表投影及隔离安装已验证。正式宿主现通过独立的 `external_work.py` 调用本模块，手动绑定和刷新；不改变运行核心或 SDK 工作进程。最初合同与宿主接线分别记录。
+
 ## 装配例子
 
 ```python
@@ -90,7 +104,9 @@ Pi保留原生配置、工具、扩展询问和原始事件。连接使用明确
 
 `rabbit_runtime.hermes`提供`HermesNativeConnection`、`HermesRpc`、`HermesNativeStore`、模型／消息codec与原生修订核验。宿主明确提供Node、原有Hermes Python、源码根、工作目录和可选home、commit及扩展开关。原生配置、profile初始化、工具、审批和后台服务仍由Hermes决定；启动原生连接不等于只读操作。
 
-连接按包内相邻路径启动`worker.mjs`，保留官方gateway客户端和原进程组关闭检查。可选`native_bootstrap.py`继续由所选Hermes Python直接执行，先以原生源码为导入来源、完成原profile环境初始化，再按相邻路径加载`session_settings.py`与`image_queue.py`。它们保持自包含，不要求给Hermes解释器安装运行包，也不新增`-I`、环境修复或替代Agent循环。
+连接按包内相邻路径启动`worker.mjs`，保留官方gateway客户端和原进程组关闭检查。可选`native_bootstrap.py`继续由所选Hermes Python直接执行，先以原生源码为导入来源、完成原profile环境初始化，再按相邻路径加载`session_settings.py`、`image_queue.py`与可选`result_cache.py`。它们保持自包含，不要求给Hermes解释器安装运行包，也不新增`-I`、环境修复或替代Agent循环。
+
+普通聊天继续使用原`prompt.submit`。交办任务可先探测当前连接结果扩展，再用单次提交编号读取原生完成文本；缓存不提供跨重启恢复或耐久去重。扩展与原生工作树不兼容时，已有设置、图片和普通聊天继续运行；交办任务不得自动降级补发。
 
 账本公开`validate_session_id`，消息codec公开`reference_value`，都沿用原有算法与错误类型。`maintenance_state()`只读原`hermes_operations`的pending计数，继续使用原锁和文件身份；未知请求不重发。对话、HTTP、profile／材料／记忆事务、附件协调与历史adoption仍归宿主。
 
@@ -105,3 +121,5 @@ Pi保留原生配置、工具、扩展询问和原始事件。连接使用明确
 - 模型目录刷新只观察已经打开的连接，前后核对同一身份；不会为了列模型创建会话。
 
 小白兔宿主仍管理聊天目录、五种Agent的HTTP入口、各Agent上层持有者和配置／材料／记忆协调、专员角色和设备连接。底座独立不等于上层发送协调已独立；本包独立也不代表整个模块3已拆完，或所有Agent能力均已验收。
+
+> 公开说明：内部验收记录不随公开源码分发。

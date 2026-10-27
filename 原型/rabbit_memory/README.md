@@ -1,6 +1,12 @@
 # rabbit-memory
 
-长期记忆核心的独立包：版本化配置及创建回执、固定原生来源绑定、Hindsight 有界传输、原生只读检索、配置管理和连接状态核对。仅用 Python 标准库，不包含 Hindsight 服务本身。可在本目录执行 pip install .，需要 Python 3.11+。
+长期记忆接口的独立包：版本化配置及回执、固定来源绑定、Hindsight、Hermes 文档记忆及可选 Mem0 只读连接。宿主负责明确提供数据目录、原核心和凭据配置；包不发现 HOME，也不自行安装服务。基础包仅用 Python 标准库，Python 3.11+。
+
+HermesFilesMemory(root, core_factory=..., core_scope=...)复用宿主提供的原 MemoryStore。每配置一个独立 home，只开放 MEMORY.md／USER.md；显式创建、手动文档编辑和只读载入分开。保存与原核心使用同一文件锁，检查 SHA 并保留旧版，保证合作写者之间的版本核对；不宣称锁住任意外部编辑器，也不自动写回聊天。
+
+Mem0Memory(python=..., config_path=..., root=..., worker_path=...)只在真正检索时启动固定 SDK worker。缺凭据或独立环境时不可用；元数据检查不构造 Mem0、不调用模型。固定 Mem0 2.2.1，配置模板见mem0-config.example.json；可选依赖见mem0-requirements.txt。程序不借用Hindsight或环境中的Key，状态可用也不证明外部调用已通过。只读查询输出同一有界事实包；异步写入队列仍仅供 Hindsight 使用。
+
+MemoryProfiles构造器在自己持有的连接中升级旧Hindsight单程序约束，保留行、回执、关联、索引和触发器；失败整笔回滚。initialize_schema(db)仍只参加调用者已有事务，不在调用者事务内切换外键设置。旧快照保持原九字段和原哈希口径。
 
 从 rabbit_memory 导入 MemoryProfiles、NativeMemoryBindings、HindsightMemory、NativeHindsightReadOnly、对应错误和校验函数。原有六个同名子模块保留为公开合同；配置数据库格式与既有实现一致。
 

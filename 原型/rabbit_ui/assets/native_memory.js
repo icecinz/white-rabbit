@@ -9,13 +9,14 @@
   const memorySnapshotFields = memoryFields.slice(0, 8), shaPattern = /^[a-f0-9]{64}$/, isSHA = value => typeof value === "string" && shaPattern.test(value);
   const exact = (value, fields) => object(value) && Object.keys(value).length === fields.length && fields.every(key => Object.hasOwn(value, key));
   const memoryText = (value, max, multiline = false) => validText(value) && Array.from(value).length <= max && !(multiline ? /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/ : /[\x00-\x1f\x7f]/).test(value);
+  const memoryConnections = Object.freeze({ hindsight: "local/hindsight", hermes_files: "local/hermes-files", mem0: "local/mem0" });
   function memoryChoice(value, { readOnly = false } = {}) {
     if (!exact(value, memoryFields) || !uuid(value.id) || !Number.isSafeInteger(value.revision) || value.revision < 1
         || !memoryText(value.name, 40) || !value.name.trim() || !memoryText(value.description, 200, true) || !memoryText(value.habits, 4000, true)
-        || value.program !== "hindsight" || value.connection_id !== "local/hindsight" || !["read_only", "read_write"].includes(value.mode)
+        || !Object.hasOwn(memoryConnections, value.program) || value.connection_id !== memoryConnections[value.program] || !["read_only", "read_write"].includes(value.mode) || value.program !== "hindsight" && value.mode !== "read_only"
         || value.bank_ref !== "mem_" + value.id.replace(/-/g, "") || typeof value.locked_mode !== "boolean"
         || !["owned", "hermes_hindsight_readonly"].includes(value.source_kind) || value.locked_mode !== (value.source_kind === "hermes_hindsight_readonly")
-        || value.locked_mode && value.mode !== "read_only") throw Error("共享记忆配置没有读完整；原选择保留。");
+        || value.locked_mode && (value.mode !== "read_only" || value.program !== "hindsight")) throw Error("共享记忆配置没有读完整；原选择保留。");
     if (readOnly && value.mode !== "read_only") throw Error("原生对话本轮仅支持只读共享记忆。");
     return Object.fromEntries(memoryFields.map(key => [key, value[key]]));
   }

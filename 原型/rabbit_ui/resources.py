@@ -1,6 +1,7 @@
 """Read fixed public assets; HTTP policy and business APIs belong to the host."""
 import base64
 from dataclasses import dataclass
+from html import escape
 import json
 import os
 from pathlib import Path
@@ -9,23 +10,24 @@ import secrets
 import stat
 
 
-INLINE_STYLES = ('style.css', 'workspace.css', 'specialist.css')
+INLINE_STYLES = ('style.css', 'workspace.css', 'specialist.css', 'work_status.css')
 INLINE_SCRIPTS = (
     'agents.js', 'markdown-it.min.js', 'rich_text.js', 'materials.js',
-    'profiles.js', 'native_memory.js', 'workspace.js', 'browser_state.js',
+    'profiles.js', 'native_memory.js', 'work_status.js', 'workspace.js', 'browser_state.js',
     'text_file_download.js', 'file_tasks.js', 'file_materials.js',
     'project_publish.js', 'markdown_chats.js', 'conversation_groups.js',
     'history_quotes.js', 'native_materials.js', 'handoff_view.js',
-    'specialist_tools.js', 'specialist.js', 'pi_native_history.js',
+    'specialist_context.js', 'specialist_tools.js', 'specialist.js', 'pi_native_history.js',
     'pi_native.js', 'hermes_native_history.js', 'hermes_attachment_state.js',
     'hermes_native.js', 'claude_material_draft.js', 'claude_native.js',
     'dsh_material_draft.js', 'dsh_native.js', 'native_chats.js',
     'native_handoff.js', 'native_adoption.js', 'native_text_quote.js',
     'native_file_quote.js', 'app.js',
 )
-INLINE_ASSETS = frozenset(('index.html', 'rabbit-app-1024.png') + INLINE_STYLES + INLINE_SCRIPTS)
+HELP_FILES = ('manual.md', 'specialist-guide.md')
+INLINE_ASSETS = frozenset(('index.html', 'rabbit-app-1024.png') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES)
 ASSET_FILES = ('index.html', 'rabbit-app-1024.png', 'app.webmanifest',
-               'markdown-it.LICENSE') + INLINE_STYLES + INLINE_SCRIPTS
+               'markdown-it.LICENSE') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES
 MAX_INLINE_ASSET_BYTES = 2 * 1024 * 1024
 _ROUTES = {'/': 'index.html', **{'/' + name: name for name in ASSET_FILES if name != 'markdown-it.LICENSE'}}
 _CONTENT_TYPES = {
@@ -34,6 +36,7 @@ _CONTENT_TYPES = {
     '.js': 'text/javascript; charset=utf-8',
     '.png': 'image/png',
     '.webmanifest': 'application/manifest+json; charset=utf-8',
+    '.md': 'text/markdown; charset=utf-8',
 }
 
 
@@ -167,7 +170,15 @@ def self_contained_document(web_root, *, agent_bootstrap):
     if html.lower().count('</head>') != 1 or html.lower().count('</body>') != 1:
         raise ValueError('界面结构不完整。')
     html = re.sub(r'</head>', lambda _match: style_bootstrap + '</head>', html, count=1, flags=re.I)
-    html = re.sub(r'</body>', lambda _match: script_bootstrap + '</body>', html, count=1, flags=re.I)
+    if re.search(r'\bid\s*=\s*([\"\'])rabbit-help-data\1', html, flags=re.I):
+        raise ValueError('界面帮助入口重复。')
+    help_texts = {'manual': asset('manual.md', text=True),
+                  'guide': asset('specialist-guide.md', text=True)}
+    if any(not value.strip() for value in help_texts.values()):
+        raise ValueError('界面帮助正文为空。')
+    help_data = json.dumps(help_texts, ensure_ascii=False)
+    help_template = '<template id="rabbit-help-data">' + escape(help_data, quote=False) + '</template>'
+    html = re.sub(r'</body>', lambda _match: help_template + script_bootstrap + '</body>', html, count=1, flags=re.I)
     return html.encode('utf-8'), nonce
 
 
@@ -181,7 +192,7 @@ def read_resource(route, *, agent_bootstrap):
     if name == 'index.html':
         data, nonce = self_contained_document(root, agent_bootstrap=agent_bootstrap)
     else:
-        raw = _asset(_root(root), name, text=name.endswith(('.js', '.css', '.webmanifest')))
+        raw = _asset(_root(root), name, text=name.endswith(('.js', '.css', '.webmanifest', '.md')))
         data = ((agent_bootstrap if name == 'agents.js' else '') + raw).encode('utf-8') if type(raw) is str else raw
         nonce = None
     return Resource(data, _CONTENT_TYPES[Path(name).suffix], nonce)

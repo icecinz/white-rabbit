@@ -19,7 +19,7 @@ CATALOG_PATH = '/api/management/native-model-catalog'
 SPECIALIST_CATALOG_PATH = '/api/management/specialist-model-catalog'
 PREPARATION_PATH = '/api/management/native-model-preparation'
 _AGENTS = (('codex', 'native_chats', 2), ('pi', 'pi_native_chats', 1),
-           ('hermes', 'hermes_native_chats', 1))
+           ('hermes', 'hermes_native_chats', 1), ('claude', 'claude_native_chats', 1))
 _EPOCH = re.compile(r'[0-9a-f]{32}\Z')
 
 
@@ -93,6 +93,7 @@ def prepare(service, fields):
         'codex': ('native_chat_request', '/api/native-chats/'),
         'pi': ('pi_native_request', '/api/pi-chats/'),
         'hermes': ('hermes_native_request', '/api/hermes-chats/'),
+        'claude': ('claude_native_request', '/api/claude-chats/'),
     }[agent]
     try:
         opened = getattr(service, route_name)('POST', root + identity + '/open', body={})
@@ -122,7 +123,7 @@ def prepare(service, fields):
 def _manager(service, agent):
     name = next(row[1] for row in _AGENTS if row[0] == agent)
     manager = getattr(service, name, None)
-    if agent == 'hermes' and manager is not None and not manager.profiles_enabled:
+    if agent in ('hermes', 'claude') and manager is not None and not manager.profiles_enabled:
         return None
     return manager
 
@@ -160,12 +161,20 @@ def _action_scope(agent, owner):
 
 
 def _identity_locked(agent, holder):
-    """Pi/Hermes RAM only; Codex state stays inside its runtime adapter."""
+    """RAM identity only; Codex state stays inside its runtime adapter."""
     if (holder._state != 'ready' or getattr(holder, '_closed', False)
             or holder._rpc is None or not _EPOCH.fullmatch(holder._epoch or '')
             or holder._reader is None or not holder._reader.is_alive()):
         return None
-    if agent == 'pi':
+    if agent == 'claude':
+        info = holder._info
+        if (holder.profile_intents is None or type(info) is not dict
+                or type(info.get('configured_session_id')) is not str
+                or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', info['configured_session_id'])
+                or getattr(holder._rpc, 'running', False) is not True):
+            return None
+        native = (info['configured_session_id'], info.get('cwd'))
+    elif agent == 'pi':
         if not holder._profiles_enabled or type(holder._live_identity) is not dict:
             return None
         native = (holder._live_identity.get('session_id'), holder._live_identity.get('session_file'))
@@ -200,7 +209,8 @@ def _observe(manager, agent, identity, owner, *, observation=None, expected=None
             raise _error('busy')
         with _registered_owner(manager, identity, owner):
             current = _identity_locked(agent, holder)
-            if expected is not None and current != expected:
+            if expected is not None and (current != expected or agent == 'claude' and current is not None
+                    and (current[1] is not expected[1] or current[2] is not expected[2])):
                 raise _error('changed')
             if remember is not None:
                 manager._remember_catalogue(identity, remember)
@@ -307,9 +317,14 @@ def refresh(service, fields):
             raise _error('changed')
         holder = _holder(agent, owner)
         try:
-            # Pi/Hermes normally remember at their original profiles endpoint.
+            # Native holders normally remember at their profiles endpoint.
             # This endpoint commits only after its stronger identity recheck.
-            catalogue = holder.models() if agent == 'codex' else holder.models(remember=False, refresh_state=False)
+            if agent == 'codex':
+                catalogue = holder.models()
+            elif agent == 'claude':
+                catalogue = holder.models(remember=False)
+            else:
+                catalogue = holder.models(remember=False, refresh_state=False)
             if type(catalogue) is not dict:
                 raise ValueError('Incomplete model directory.')
         except Exception:

@@ -19,10 +19,18 @@
     const bytes = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
     return [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, "0")).join("");
   }
+  const profile = value => {
+    if (!window.RabbitProfiles) fail();
+    if (!object(value) || Object.keys(value).sort().join(",") !== "agent_instance_id,device_id,id,model_id,name,reasoning_effort,revision") fail();
+    const result = window.RabbitProfiles.profile(value, false);
+    if (result.agent_instance_id !== "local/claude" || result.device_id !== "local" || result.reasoning_effort !== null) fail();
+    return result;
+  };
+  const options = value => value.model_id ? { model: value.model_id.slice("local/claude/".length) } : {};
   const memory = value => { if (!window.RabbitNativeMemory) fail(); return window.RabbitNativeMemory.choice(value, { readOnly: true }); };
-  const body = pending => ({ client_id: pending.client_id, message: pending.message, ...(pending.material_refs.length ? { material_refs: refs(pending.material_refs) } : {}), ...(pending.memory_profile ? { memory_profile_id: pending.memory_profile.id, memory_profile_revision: pending.memory_profile.revision } : {}) });
+  const body = pending => ({ client_id: pending.client_id, message: pending.message, ...(pending.material_refs.length ? { material_refs: refs(pending.material_refs) } : {}), ...(pending.memory_profile ? { memory_profile_id: pending.memory_profile.id, memory_profile_revision: pending.memory_profile.revision } : {}), ...(pending.ai_profile ? { ai_profile_id: pending.ai_profile.id, ai_profile_revision: pending.ai_profile.revision } : {}) });
   const binding = pending => ({ workspace_id: pending.workspace_id, chat_id: pending.chat_id, client_id: pending.client_id,
-    session_id: pending.session_id, raw_request_sha256: pending.raw_request_sha256, material_refs: pending.material_refs, request_sha256: pending.request_sha256, ...(pending.memory_profile ? { memory_profile: pending.memory_profile } : {}) });
+    session_id: pending.session_id, raw_request_sha256: pending.raw_request_sha256, material_refs: pending.material_refs, request_sha256: pending.request_sha256, ...(pending.memory_profile ? { memory_profile: pending.memory_profile } : {}), ...(pending.ai_profile ? { ai_profile: pending.ai_profile } : {}) });
   function restore(value, workspace, chatId) {
     if (!object(value) || value.workspace_id !== workspace || value.chat_id !== chatId || !uuid(value.client_id) || !uuid(value.session_id)
         || !text(value.message) || !value.message.trim() || new TextEncoder().encode(value.message).length > 131072
@@ -32,10 +40,11 @@
         || (value.request_sha256 === null) !== (value.binding_sha256 === null) || !text(value.body_json)) fail();
     const material_refs = refs(value.material_refs);
     const memory_profile = value.memory_profile === undefined ? null : memory(value.memory_profile);
-    if (!material_refs.length && !memory_profile || value.body_json !== JSON.stringify(body({ ...value, material_refs, memory_profile }))) fail();
+    const ai_profile = value.ai_profile === undefined ? null : profile(value.ai_profile);
+    if (!material_refs.length && !memory_profile && !ai_profile || value.body_json !== JSON.stringify(body({ ...value, material_refs, memory_profile, ai_profile }))) fail();
     const result = { client_id: value.client_id, message: value.message, material_refs, workspace_id: workspace, chat_id: chatId,
       session_id: value.session_id, draft_revision: value.draft_revision, body_json: value.body_json, raw_request_sha256: value.raw_request_sha256,
-      request_sha256: value.request_sha256, binding_sha256: value.binding_sha256, status: value.status, ...(memory_profile ? { memory_profile } : {}) };
+      request_sha256: value.request_sha256, binding_sha256: value.binding_sha256, status: value.status, ...(memory_profile ? { memory_profile } : {}), ...(ai_profile ? { ai_profile } : {}) };
     if (!same(value, result)) fail();
     return result;
   }
@@ -45,9 +54,9 @@
         || result.request_sha256 !== null && await hash(canonical(binding(result))) !== result.binding_sha256) fail();
     return result;
   }
-  async function prepare(client, message, material_refs, workspace, chatId, sessionId, revision, selectedMemory = null) {
+  async function prepare(client, message, material_refs, workspace, chatId, sessionId, revision, selectedMemory = null, selectedProfile = null) {
     const result = { client_id: client, message, material_refs: refs(material_refs), workspace_id: workspace, chat_id: chatId,
-      session_id: sessionId, draft_revision: revision, body_json: "", raw_request_sha256: "", request_sha256: null, binding_sha256: null, status: "submitted_unknown", ...(selectedMemory ? { memory_profile: memory(selectedMemory) } : {}) };
+      session_id: sessionId, draft_revision: revision, body_json: "", raw_request_sha256: "", request_sha256: null, binding_sha256: null, status: "submitted_unknown", ...(selectedMemory ? { memory_profile: memory(selectedMemory) } : {}), ...(selectedProfile ? { ai_profile: profile(selectedProfile) } : {}) };
     result.body_json = JSON.stringify(body(result)); result.raw_request_sha256 = await hash(canonical(body(result)));
     return restore(result, workspace, chatId);
   }
@@ -56,6 +65,14 @@
     if (!object(value) || exact && (value.workspace_id !== workspace || value.chat_id !== chatId || value.session_id !== checked.session_id)) fail();
     const intent = value.material_intent, operation = value.operation;
     let derived = null, memory_intent = null;
+    if (checked.ai_profile) {
+      const frozen = value.profile_intent;
+      if (!object(frozen) || Object.keys(frozen).sort().join(",") !== "ai_profile,chat_id,client_id,created_at,native_options,request_sha256,workspace_id"
+          || frozen.workspace_id !== workspace || frozen.chat_id !== chatId || frozen.client_id !== checked.client_id
+          || frozen.request_sha256 !== checked.raw_request_sha256 || !same(profile(frozen.ai_profile), checked.ai_profile)
+          || !same(frozen.ai_profile, checked.ai_profile) || !same(frozen.native_options, options(checked.ai_profile))
+          || !text(frozen.created_at) || !frozen.created_at || frozen.created_at.length > 64) fail();
+    }
     if (checked.memory_profile) {
       if (!window.RabbitNativeMemory) fail();
       memory_intent = window.RabbitNativeMemory.intent(value.memory_intent, { workspaceId: workspace, chatId, clientKind: "uuid" });
@@ -77,6 +94,7 @@
       if (checked.memory_profile && intent.request_sha256 !== derived && operation !== null) fail();
       if (!checked.memory_profile) derived = intent.request_sha256;
     } else if (intent != null) fail();
+    if (!checked.memory_profile && !checked.material_refs.length && checked.ai_profile) derived = await hash(JSON.stringify({ message: checked.message, type: "prompt" }));
     if (checked.request_sha256 !== null && derived !== checked.request_sha256) fail();
     if (operation === null) return null;
     if (!object(operation) || operation.kind !== "prompt" || operation.chat_id !== chatId || operation.client_id !== checked.client_id || operation.session_id !== checked.session_id
@@ -89,5 +107,5 @@
   function context(value) {
     return window.RabbitNativeMaterials?.context(value) ?? null;
   }
-  window.RabbitClaudeMaterialDraft = Object.freeze({ refs, prepare, restore, verify, confirm, context });
+  window.RabbitClaudeMaterialDraft = Object.freeze({ refs, prepare, restore, verify, confirm, context, profileInputs: true });
 })();

@@ -63,6 +63,11 @@ class HermesNativeConnection:
         if self.home is not None:
             object.__setattr__(self, 'home', _directory(self.home))
 
+    @property
+    def task_results_supported(self):
+        """This SDK can probe the guarded extension; installation is checked by RPC."""
+        return self.session_settings_guard and self.native_commit == NATIVE_SETTINGS_COMMIT
+
     def create_rpc(self, *, cwd, home=None):
         directory = _directory(cwd)
         selected = self.home if home is None else _directory(home)

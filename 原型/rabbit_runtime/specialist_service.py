@@ -4,7 +4,7 @@ The caller owns the existing NativeSessionStore. This module owns one lazy
 transport/session and exactly one event consumer. Codex remains the transcript
 store; RAM is a bounded display projection, never a replacement prompt.
 
-Public methods: open(), view(cursor=None, turn_id=None, after_seq=None, include_items=True),
+Public methods: observe_work(), open(), view(cursor=None, turn_id=None, after_seq=None, include_items=True),
 models(), send(client_id, inputs, options=None), answer(token, result),
 control(action, client_id, turn_id=None), disconnect(), close(). Only explicit open starts or
 resumes a connection. Opening an unbound session never creates an empty thread.
@@ -201,6 +201,7 @@ class SpecialistService:
         self._clients = OrderedDict()
         self._turn_state = None
         self._turn_client_id = None
+        self._turn_observed_client_id = None
 
     def maintenance_state(self, *, include_ledger=True):
         from .maintenance import codex_holder_state
@@ -208,6 +209,105 @@ class SpecialistService:
         if self._disconnect_unconfirmed:
             result['complete'] = False
         return result
+
+    def observe_work(self):
+        """Observe this holder's metadata, never a native process or transcript.
+
+        This is not admission or proof of background-tool exit. Locks are
+        nonblocking; only a prospective idle result reads bounded ledger counts.
+        Missing identity, stale turn projection or an unresolved operation stays
+        unknown. No RPC, session recovery, approval capability or model claim is
+        produced here.
+        """
+        from .maintenance import count_rows, try_locks
+        result = {'complete': False, 'reason': 'lock_busy', 'status': 'unknown',
+            'connection_state': 'unknown', 'epoch': None,
+            'native_session_id': None, 'pending_requests': None}
+        with try_locks(self._actions) as acquired:
+            if not acquired:
+                return result
+            with try_locks(self._cache) as acquired:
+                if not acquired:
+                    return result
+                state = self._state
+                if state in ('not_open', 'opening', 'ready', 'failed', 'closed'):
+                    result['connection_state'] = state
+                epoch = self._epoch
+                if (type(epoch) is str and len(epoch) == 32
+                        and all(c in '0123456789abcdef' for c in epoch)):
+                    result['epoch'] = epoch
+                session = self._session
+                if state != 'ready' or self._closed or self._disconnect_unconfirmed or self._error:
+                    result['reason'] = 'connection_unavailable'
+                    return result
+                if (self._rpc is None or session is None or self._reader is None
+                        or not self._reader.is_alive() or self._stop is None or self._stop.is_set()):
+                    result['reason'] = 'reader_unavailable'
+                    return result
+                with try_locks(session._lock) as acquired:
+                    if not acquired:
+                        return result
+                    binding = session._bound
+                    if (result['epoch'] is None or type(binding) is not dict
+                            or not _model_string(binding.get('thread_id'))
+                            or (binding.get('session_id') is not None
+                                and not _model_string(binding['session_id']))
+                            or session.session_key != self.session_key or not session._initialized
+                            or session.rpc is not self._rpc):
+                        result['reason'] = 'identity_unavailable'
+                        return result
+                    # thread_id is Codex's authoritative source identity. Its
+                    # separate sessionId is optional in valid native replies.
+                    result['native_session_id'] = binding['thread_id']
+                    count = len(session._requests)
+                    if count > MAX_REQUESTS:
+                        result['reason'] = 'requests_unavailable'
+                        return result
+                    result['pending_requests'] = count
+                    unknown_answer = any(not row.get('resolved_by_server', False)
+                        and (token in self._tokens or token in self._submitted_keys.values())
+                        for token, row in self._answers.items())
+                    if unknown_answer or any(not owner.get('confirmed', False)
+                            for owner in session._request_owners.values()):
+                        result['reason'] = 'interaction_unconfirmed'
+                        return result
+                    if count:
+                        return dict(result, complete=True, reason=None, status='needs_user')
+                    turn = self._turn_state
+                    if (type(turn) is not dict or not self._turn_client_id
+                            or self._turn_observed_client_id != self._turn_client_id):
+                        result['reason'] = 'turn_unconfirmed'
+                        return result
+                    if turn.get('status') in ('accepted', 'inProgress'):
+                        return dict(result, complete=True, reason=None, status='running')
+                    if turn.get('status') not in ('completed', 'failed', 'interrupted'):
+                        result['reason'] = 'turn_unconfirmed'
+                        return result
+                    observed = (session, epoch, self._turn_client_id, turn)
+            # Keep actions serialized, but never hold the reader/cache/session
+            # locks during this existing 25ms-budget metadata-only SQL helper.
+            counts = count_rows(self.store.path, {'unfinished': ('native_operations',
+                "session_key=? AND (status='submitted_unknown' OR (kind='turn_start' AND status='accepted'))",
+                (self.session_key,))}, lock=self.store.lock,
+                expected_identity=self.store._file_identity, check_path=self.store._check_path,
+                flock_fd=self.store._lock_fd)
+            if not counts['complete']:
+                return dict(result, reason='metadata_unavailable')
+            if counts['counts']['unfinished']:
+                return dict(result, reason='operation_unconfirmed')
+            with try_locks(self._cache, session._lock) as acquired:
+                if not acquired:
+                    return dict(result, reason='lock_busy')
+                if (self._session is not observed[0] or self._epoch != observed[1]
+                        or self._turn_client_id != observed[2] or self._turn_state != observed[3]
+                        or self._state != 'ready' or self._error or self._reader is None
+                        or not self._reader.is_alive() or self._stop.is_set()
+                        or session._requests or session._request_owners
+                        or any(not row.get('resolved_by_server', False)
+                            and (token in self._tokens or token in self._submitted_keys.values())
+                            for token, row in self._answers.items())):
+                    return dict(result, reason='observation_changed')
+                return dict(result, complete=True, reason=None, status='idle')
 
     @property
     def fixed_model_options(self):
@@ -264,6 +364,7 @@ class SpecialistService:
         active = [row for row in rows.values() if row['status'] == 'accepted']
         if len(active) > 1:
             self._turn_state = None
+            self._turn_observed_client_id = None
             return
         row = active[0] if active else rows.get(self._turn_client_id)
         current = self._turn_state
@@ -282,6 +383,7 @@ class SpecialistService:
         self._turn_client_id = row['client_id']
         self._turn_state = {'turn_id': row['turn_id'], 'status': row['status'],
                             'background_tools_exit_verified': False}
+        self._turn_observed_client_id = row['client_id']
 
     def _dispose(self, *, retain_on_error=False):
         if self._stop is not None:
@@ -343,7 +445,7 @@ class SpecialistService:
                 self._request_revision += 1
                 self._events.clear(); self._event_bytes = 0
                 self._live.clear(); self._live_bytes = 0; self._live_incomplete = False
-                self._turn_state = self._turn_client_id = None
+                self._turn_state = self._turn_client_id = self._turn_observed_client_id = None
             try:
                 self._rpc = self._factory()
                 self._session = CodexNativeSession(self._rpc, self.store,
@@ -573,6 +675,7 @@ class SpecialistService:
                         if terminal and terminal['client_id'] == self._turn_client_id:
                             self._turn_state = {'turn_id': terminal['turn_id'], 'status': terminal['status'],
                                                 'background_tools_exit_verified': False}
+                            self._turn_observed_client_id = terminal['client_id']
                         if method == 'serverRequest/resolved':
                             key = _request_key(params.get('requestId'))
                             submitted = self._submitted_keys.pop(key, None)
@@ -798,6 +901,7 @@ class SpecialistService:
                         status = result.get('native', {}).get('turn', {}).get('status', receipt['status'])
                         self._turn_state = {'turn_id': receipt['turn_id'], 'status': status,
                                             'background_tools_exit_verified': False}
+                        self._turn_observed_client_id = client_id
             return result
 
     def answer(self, token, result):
@@ -873,6 +977,7 @@ class SpecialistService:
                         self._turn_client_id = result['receipt']['client_id']
                         self._turn_state = {'turn_id': proof.get('turn_id'),
                             'status': proof.get('native_status'), 'background_tools_exit_verified': False}
+                        self._turn_observed_client_id = result['receipt']['client_id']
             return dict(result, background_tools_exit_verified=False)
 
     def close(self):

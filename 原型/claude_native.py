@@ -6,6 +6,7 @@ The event reader alone consumes the worker stream; navigation never closes it.
 """
 from collections import OrderedDict
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -23,6 +24,11 @@ from rabbit_runtime.claude.rpc import ClaudeRpcError, ClaudeRemoteError
 from claude_material_intents import ClaudeMaterialIntents, ClaudeMaterialIntentError
 from native_materials import NativeMaterialError, validate_refs
 from native_memory_intents import NativeMemoryIntents, NativeMemoryIntentError, validate_selection
+from native_memory_selection import NativeMemorySelections
+from native_profile_intents import NativeProfileIntents, NativeProfileIntentError
+from native_profile_catalog import (NativeProfileUnavailable, normalize_claude_catalogue,
+    resolve_claude_profile, project_claude_profiles)
+from profiles import AIProfiles
 from memory_context import selected_memory_block
 from rabbit_runtime.claude.message_view import original_record, original_image, ClaudeMessageViewError
 from rabbit_runtime.claude.material_protocol import (canonical_metadata, user_content, ClaudeMaterialProtocolError,
@@ -97,10 +103,11 @@ def _unsubmitted_memory(record):
         '原发送编号已有共享记忆准备记录，尚无原生回执；保留待核对状态，没有重新检索或发送。', result_unknown=True)
 
 
-def _recover_send(store, material_intents, memory_intents, identity, body):
+def _recover_send(store, material_intents, memory_intents, identity, body, profile_intents=None):
     """Saved local identities only; no owner, source read, SDK or recall."""
     client = body['client_id']
     operation = store.lookup(client)
+    profile = profile_intents.lookup(identity, body) if profile_intents is not None else None
     memory = memory_intents.read(identity, client) if memory_intents is not None else None
     intent = material_intents.lookup(identity, client) if material_intents is not None else None
     if memory is not None and memory['raw_request_sha256'] != request_sha256(body):
@@ -112,6 +119,8 @@ def _recover_send(store, material_intents, memory_intents, identity, body):
     if operation is not None:
         if operation['chat_id'] != identity:
             raise _error('request_conflict', '原回执属于不同Claude对话。', unsent=False)
+        if 'ai_profile_id' in body and profile is None:
+            raise _error('profile_request_conflict', '原回执没有这份模型配置意图，未重新发送。', unsent=False)
         selected = validate_selection(body) is not None
         if selected or memory is not None:
             if (memory is None or memory['state'] != 'ready' or not memory['derived_inputs_sha256']
@@ -125,6 +134,7 @@ def _recover_send(store, material_intents, memory_intents, identity, body):
         if intent is not None and intent['request_sha256'] != operation['request_sha256']:
             raise _error('request_conflict', '原材料输入与原生回执不匹配。', unsent=False)
         return {'operation': operation, **({'material_intent': intent} if intent is not None else {}),
+            **({'profile_intent': profile} if profile is not None else {}),
             **({'memory_intent': memory_intents.public(memory)} if memory is not None else {}), 'reused': True}
     if memory is not None: _unsubmitted_memory(memory)
     return None
@@ -148,11 +158,14 @@ def _with_memory(message, prepared, memory):
 
 class ClaudeNativeHolder:
     def __init__(self, store, identity, connection, *, workspace_id, materials=None, material_intents=None,
-                 memory_intents=None, memory_recall=None):
+                 memory_intents=None, memory_recall=None, memory_selections=None,
+                 profile_intents=None, catalogue_observer=None):
         self.store, self.identity, self.connection = store, chat_id(identity), connection
         self.workspace_id = workspace_id
         self.materials, self.material_intents = materials, material_intents
         self.memory_intents, self.memory_recall = memory_intents, memory_recall
+        self.memory_selections = memory_selections
+        self.profile_intents, self._catalogue_observer = profile_intents, catalogue_observer
         self._action = threading.RLock()
         self._cache = threading.Condition(threading.RLock())
         self._rpc = self._reader = None
@@ -302,7 +315,8 @@ class ClaudeNativeHolder:
                     raise ValueError('Result does not prove the active original query.')
                 status = 'failed' if data.get('is_error') is True else 'completed'
                 if data.get('terminal_reason') in ('aborted_streaming', 'aborted_tools'): status = 'interrupted'
-                self.store.finish(client, binding['session_id'], self._epoch, data.get('uuid'), status=status)
+                self.store.finish(client, binding['session_id'], self._epoch, data.get('uuid'),
+                                  status=status, result=record)
                 self._active = None
         elif kind == 'prompt.accepted':
             if client != self._active: raise ValueError('Foreign prompt acknowledgement.')
@@ -336,8 +350,31 @@ class ClaudeNativeHolder:
         else:
             self._record({'sdk_type': 'WorkerEvent', 'data': deepcopy(event)})
 
+    def models(self, *, remember=True):
+        """Observe initialize candidates on this already-open SDK connection."""
+        with self._action:
+            with self._cache:
+                if self._state != 'ready' or self._rpc is None or not self._rpc.running or type(self._info) is not dict:
+                    raise _error('models_not_open', '请先明确连接这段Claude原生对话，再更新模型目录。')
+                scope = (self._epoch, self._rpc, self._reader, self._info.get('configured_session_id'), self._info.get('cwd'))
+            try:
+                raw = scope[1].request('model.options', {'session_id': scope[3]}, timeout=20)
+            except ClaudeRpcError:
+                raise NativeProfileUnavailable('Claude SDK 模型目录暂时无法读取，未替换原目录。') from None
+            with self._cache:
+                current = (self._epoch, self._rpc, self._reader,
+                    self._info.get('configured_session_id') if type(self._info) is dict else None,
+                    self._info.get('cwd') if type(self._info) is dict else None)
+                if self._state != 'ready' or current != scope or not self._rpc.running:
+                    raise _error('models_changed', 'Claude连接已变化，目录未替换，请重新核对。', unsent=False)
+            catalogue = normalize_claude_catalogue(raw)
+            if remember and callable(self._catalogue_observer):
+                self._catalogue_observer(self.identity, catalogue)
+            return catalogue
+
     def send(self, client_id, message, material_refs=_MISSING,
-             memory_profile_id=_MISSING, memory_profile_revision=_MISSING):
+             memory_profile_id=_MISSING, memory_profile_revision=_MISSING,
+             ai_profile_id=_MISSING, ai_profile_revision=_MISSING):
         client_id, message = _uuid(client_id), _message(message)
         body = {'client_id': client_id, 'message': message}
         refs = []
@@ -348,9 +385,12 @@ class ClaudeNativeHolder:
             body['material_refs'] = refs
         if memory_profile_id is not _MISSING: body['memory_profile_id'] = memory_profile_id
         if memory_profile_revision is not _MISSING: body['memory_profile_revision'] = memory_profile_revision
+        if ai_profile_id is not _MISSING: body['ai_profile_id'] = ai_profile_id
+        if ai_profile_revision is not _MISSING: body['ai_profile_revision'] = ai_profile_revision
+        NativeProfileIntents._request_identity(body, 'claude')
         selected = validate_selection(body) is not None
         with self._action:
-            replay = _recover_send(self.store, self.material_intents, self.memory_intents, self.identity, body)
+            replay = _recover_send(self.store, self.material_intents, self.memory_intents, self.identity, body, self.profile_intents)
             if replay is not None: return replay
             self._barrier()
             if self._state != 'ready' or self._rpc is None or not self._rpc.running:
@@ -360,6 +400,16 @@ class ClaudeNativeHolder:
                     raise _error('busy', '原生任务或审批尚未结束。')
             if self.store.active_for_chat(self.identity) is not None:
                 raise _error('busy', 'Claude还有待确认的原发送回执，尚未读取或发送新材料。')
+            profile_intent = None
+            legacy_material = (refs and 'ai_profile_id' not in body and self.material_intents is not None
+                and self.material_intents.lookup(self.identity, client_id) is not None
+                and (self.profile_intents is None or self.profile_intents.lookup(self.identity, body) is None))
+            if self.profile_intents is not None and not legacy_material:
+                def resolve(profile):
+                    return resolve_claude_profile(profile, self.models() if profile['model_id'] else None)
+                profile_intent = self.profile_intents.freeze(self.identity, body, resolve)
+            elif 'ai_profile_id' in body:
+                raise _error('profiles_unavailable', '这条Claude入口尚未启用原生模型配置，消息尚未发送。')
             memory = None
             if selected:
                 if self.memory_intents is None or not callable(self.memory_recall):
@@ -387,25 +437,54 @@ class ClaudeNativeHolder:
                 memory = self.memory_intents.bind_claude_request(self.identity, body, prepared['request'])
             if intent is not None:
                 intent = self.material_intents.bind_request(self.identity, client_id, intent['raw_request_sha256'], prepared['request_sha256'])
-            receipt = self.store.begin(self.identity, client_id, message, self._epoch,
-                                       **({'request': prepared['request']} if prepared is not None else {}))
-            if not receipt['created']: return {'operation': receipt}
+            try:
+                if prepared is None and profile_intent is None and self.memory_selections is not None:
+                    with self.memory_selections.none_fence('claude', self.identity) as assert_none:
+                        replay = _recover_send(self.store, self.material_intents, self.memory_intents, self.identity, body, self.profile_intents)
+                        if replay is not None:
+                            return replay
+                        assert_none()
+                        receipt = self.store.begin(self.identity, client_id, message, self._epoch)
+                else:
+                    receipt = self.store.begin(self.identity, client_id, message, self._epoch,
+                        **({'request': prepared['request']} if prepared is not None else {}))
+            except BaseException:
+                try:
+                    reserved = self.store.lookup(client_id)
+                except Exception:
+                    reserved = True
+                if reserved is not None:
+                    raise _error('submission_unknown', '原请求已登记，提交尚未确认；请核对原回执，不自动重发。', unsent=False) from None
+                raise
+            metadata = {**({'profile_intent': profile_intent} if profile_intent is not None else {}),
+                **({'material_intent': intent} if intent is not None else {}),
+                **({'memory_intent': self.memory_intents.public(memory)} if memory is not None else {})}
+            if not receipt['created']: return {'operation': receipt, **metadata}
             with self._cache: self._active = client_id
             try:
                 value = self._rpc.request('prompt.submit', {'session_id': receipt['session_id'],
                     'client_id': client_id, 'message': message,
+                    **(profile_intent['native_options'] if profile_intent is not None else {}),
                     **({'material_input': prepared['material_input']} if prepared is not None else {})}, timeout=20)
                 if type(value) is not dict or value.get('submitted') is not True or value.get('client_id') != client_id or value.get('session_id') != receipt['session_id']:
                     raise ValueError('Invalid prompt acknowledgement.')
                 self._barrier()
-                return {'operation': self.store.lookup(client_id), **({'material_intent': intent} if intent is not None else {}),
-                    **({'memory_intent': self.memory_intents.public(memory)} if memory is not None else {})}
-            except BaseException:
+                return {'operation': self.store.lookup(client_id), **metadata}
+            except BaseException as error:
                 self._barrier()
+                if isinstance(error, ClaudeRemoteError) and error.code == 'model_apply_unconfirmed' and error.result_unknown is False:
+                    try:
+                        rejected = self.store.rejected(client_id, receipt['session_id'], self._epoch)
+                    except Exception:
+                        pass  # Contradictory native evidence keeps the original unknown barrier.
+                    else:
+                        with self._cache:
+                            if self._active == client_id:
+                                self._active = None
+                        return {'operation': rejected, **metadata}
                 current = self.store.lookup(client_id)
-                if current['status'] in ('accepted', 'completed', 'failed', 'interrupted'):
-                    return {'operation': current, **({'material_intent': intent} if intent is not None else {}),
-                        **({'memory_intent': self.memory_intents.public(memory)} if memory is not None else {})}
+                if current['status'] in ('accepted', 'rejected', 'completed', 'failed', 'interrupted'):
+                    return {'operation': current, **metadata}
                 raise _error('submission_unknown', '这次原生提交结果不明；原请求已保留，只核对，不自动重发。', unsent=False) from None
 
     def _history_ready(self):
@@ -585,6 +664,10 @@ class ClaudeNativeHolder:
                 value['operation_lookup'] = {'client_id': client_id, 'checked': True, 'found': operation is not None}
             if memories or self.memory_intents is not None and callable(self.memory_recall):
                 value['memory_intents'] = memories
+            if self.profile_intents is not None:
+                clients = list(dict.fromkeys([row['client_id'] for row in operations] +
+                    ([client_id] if client_id is not None else [])))
+                value['profile_intents'] = self.profile_intents.list_for_chat(self.identity, clients)
             return value
 
     def disconnect(self):
@@ -624,6 +707,13 @@ class ClaudeNativeChats:
         # retain the old no-memory path; real Service workspaces are 64 hex.
         self.memory_intents = NativeMemoryIntents(catalogue_path, workspace_id=workspace_id,
             request_kind='claude', query_filter=memory_query_filter) if len(workspace_id) == 64 or callable(memory_recall) else None
+        self.memory_selections = NativeMemorySelections(catalogue_path,
+            workspace_id=workspace_id) if len(workspace_id) == 64 else None
+        self.profiles_enabled = len(workspace_id) == 64
+        self.profiles = AIProfiles(catalogue_path) if self.profiles_enabled else None
+        self.profile_intents = NativeProfileIntents(catalogue_path, workspace_id=workspace_id,
+            request_kind='claude') if self.profiles_enabled else None
+        self._catalogue_lock, self._model_catalogue = threading.Lock(), None
         self.admission = admission
         self.adopted_open_checker = None
         self._lock, self._owners = threading.RLock(), {}
@@ -648,8 +738,22 @@ class ClaudeNativeChats:
                 self._prepare(identity)
                 self._owners[identity] = ClaudeNativeHolder(self.store, identity, self.connection,
                     workspace_id=self.workspace_id, materials=self.materials, material_intents=self.material_intents,
-                    memory_intents=self.memory_intents, memory_recall=self.memory_recall)
+                    memory_intents=self.memory_intents, memory_recall=self.memory_recall,
+                    memory_selections=self.memory_selections, profile_intents=self.profile_intents,
+                    catalogue_observer=self._remember_catalogue)
             return self._owners[identity]
+
+    def catalogue_snapshot(self):
+        with self._catalogue_lock:
+            return deepcopy(self._model_catalogue)
+
+    def _remember_catalogue(self, identity, catalogue):
+        snapshot = {'workspace_id': self.workspace_id, 'source_chat_id': identity,
+            'observed_at': datetime.now(timezone.utc).isoformat(),
+            'catalogue': normalize_claude_catalogue(catalogue)}
+        with self._catalogue_lock:
+            self._model_catalogue = snapshot
+        return True
 
     def sources(self):
         return [('claude', row['session_id']) for row in self.store.bindings() if row.get('native_file') is not None]
@@ -662,13 +766,18 @@ class ClaudeNativeChats:
         try:
             return self._dispatch(method, path, query=query, body=body)
         except (SpecialistHTTPError, ClaudeMaterialIntentError, NativeMaterialError, ClaudeMessageViewError,
-                ClaudeMaterialProtocolError, NativeMemoryIntentError) as error:
+                ClaudeMaterialProtocolError, NativeMemoryIntentError, NativeProfileIntentError,
+                NativeProfileUnavailable) as error:
             if isinstance(error, SpecialistHTTPError):
                 failure = error
             elif isinstance(error, NativeMemoryIntentError):
                 failure = _error('memory_' + error.code, str(error),
                     status=503 if error.code == 'invalid_record' else 409,
                     unsent=method != 'GET' and error.code != 'invalid_record')
+            elif isinstance(error, (NativeProfileIntentError, NativeProfileUnavailable)):
+                code = getattr(error, 'code', 'unavailable')
+                failure = _error('profile_' + code, str(error), status=503 if code == 'invalid_record' else 400 if code == 'invalid_request' else 409,
+                    unsent=method != 'GET' and code != 'invalid_record')
             elif isinstance(error, ClaudeMaterialIntentError) and error.code == 'invalid_record':
                 failure = _error('material_metadata_unavailable', str(error), status=503, unsent=False)
             else:
@@ -732,6 +841,8 @@ class ClaudeNativeChats:
                     raise _error('memory_request_conflict', 'Claude共享记忆与原回执不一致。', unsent=False)
                 return {'workspace_id': self.workspace_id, 'chat_id': identity,
                         'session_id': binding['session_id'], 'operation': operation, 'material_intent': intent,
+                        **({'profile_intent': next(iter(self.profile_intents.list_for_chat(identity, [client])), None)}
+                            if self.profile_intents is not None else {}),
                         **({'memory_intent': memory} if memory is not None else {})}
             fields = ('offset',) if action == 'history' else ('offset', 'uuid', 'sha256') + (('part_index',) if action == 'image' else ())
             args = _read_query(query, fields, defaults={'offset': '0'} if action == 'history' else None)
@@ -755,6 +866,25 @@ class ClaudeNativeChats:
                         raise _error('owner_changed', 'Claude连接已变化，请刷新后读取。', unsent=False)
                 if action == 'history': return owner.read_history(offset)
                 return owner.read_history_record(offset, args['uuid'] or None, args['sha256'], part_index=part_index)
+        if action == 'profiles':
+            if method != 'GET' or body is not None or query:
+                raise _error('profiles_invalid', 'Claude模型目录只接受无参数GET。', status=400)
+            if not self.profiles_enabled:
+                raise _error('profiles_unavailable', '这条Claude入口尚未启用原生模型配置。')
+            with self._lock:
+                self._available(); self.catalogue.get(identity)
+                owner = self._owners.get(identity)
+            if owner is None:
+                raise _error('models_not_open', '请先明确连接这段Claude原生对话。')
+            with owner._action:
+                with self._lock:
+                    self._available()
+                    if self._owners.get(identity) is not owner:
+                        raise _error('owner_changed', 'Claude连接已变化，请重新核对。')
+                catalogue = owner.models()
+                return {'workspace_id': self.workspace_id, 'chat_id': identity,
+                    'native_catalog_ready': True,
+                    'profiles': project_claude_profiles(self.profiles.list()['profiles'], catalogue)}
         if action is None:
             if method != 'GET' or body is not None: raise _error('method', '请使用原生记录读取入口。', status=405)
             parsed = parse_qs(query, keep_blank_values=True, strict_parsing=True) if query else {}
@@ -766,15 +896,17 @@ class ClaudeNativeChats:
                         'interrupt': ('client_id',), 'disconnect': ()}
             if action not in required: raise _error('route', '没有这个Claude原生操作。', status=404)
             if method != 'POST' or query: raise _error('method', '请使用原生对话页面的固定操作。', status=405)
-            fields = _fields(body, required[action], ('material_refs', 'memory_profile_id', 'memory_profile_revision') if action == 'send' else ())
+            fields = _fields(body, required[action], ('material_refs', 'memory_profile_id', 'memory_profile_revision',
+                'ai_profile_id', 'ai_profile_revision') if action == 'send' else ())
             if action == 'send':
                 _uuid(fields['client_id']); _message(fields['message'])
                 validate_selection(fields)
+                NativeProfileIntents._request_identity(fields, 'claude')
                 if 'material_refs' in fields:
                     if not validate_refs(fields['material_refs']):
                         raise _error('invalid_materials', '没有所选材料时请使用普通文字入口。', status=400)
                 self.catalogue.get(identity)
-                replay = _recover_send(self.store, self.material_intents, self.memory_intents, identity, fields)
+                replay = _recover_send(self.store, self.material_intents, self.memory_intents, identity, fields, self.profile_intents)
                 if replay is not None: return replay
             if action == 'interrupt': _uuid(fields['client_id'])
         owner = self._owner(identity)
@@ -801,7 +933,8 @@ class ClaudeNativeChats:
             if action is None: return owner.view(client)
             if action == 'open': return owner.open()
             if action == 'send': return owner.send(fields['client_id'], fields['message'],
-                **{key: fields[key] for key in ('material_refs', 'memory_profile_id', 'memory_profile_revision') if key in fields})
+                **{key: fields[key] for key in ('material_refs', 'memory_profile_id', 'memory_profile_revision',
+                    'ai_profile_id', 'ai_profile_revision') if key in fields})
             if action == 'answer': return owner.answer(fields['token'], fields['epoch'], fields['result'])
             if action == 'interrupt': return owner.interrupt(fields['client_id'])
             result = owner.disconnect()

@@ -14,8 +14,8 @@
   const english = Object.freeze({
     "对话": "Chats", "新对话": "New chat", "小白兔专员": "Rabbit specialist", "管理": "Manage", "设置": "Settings", "通用设置": "General", "Agent 会话": "Agent session", "先从对话列表选择一段 Agent 对话": "Select an Agent chat from the chat list first", "专员设置尚未接入。": "Specialist settings are not connected yet.", "聊天": "Chat", "外观": "Appearance", "数据": "Data", "设备": "Devices", "大模型": "Models", "AI 配置": "AI profiles", "记忆配置": "Memory profiles", "管理分类": "Management tabs", "设置分类": "Settings tabs", "管理和设置": "Management and settings", "AI 配置 · 记忆配置 · 接入连接": "AI profiles · Memory profiles · Connections", "让小白兔更适合你": "Make Rabbit work for you",
     "更多": "More", "本机 Agent": "Local Agent", "检测说明": "Status notes", "连接与手机入口": "Connection and phone access", "刷新检测": "Refresh status", "正在检测…": "Checking…", "关闭详情": "Close details", "查看设备详情": "Device details", "查看接入详情": "Connection details", "重试读取设置": "Retry settings",
-    "当前可用": "Available", "当前不可用": "Unavailable", "请求验证通过": "Request verified", "可选择 · 发送时验证": "Selectable · checked on send", "本机服务在线": "Local service online", "状态未知": "Status unknown",
-    "用于下一条回复": "Use for next reply", "下一条回复已选": "Selected for next reply", "用它新建 AI 配置": "Create AI profile", "固定使用此模型": "Use this model", "跟随当前 Agent 默认模型": "Follow Agent default", "已跟随当前 Agent 默认模型": "Following Agent default", "新建跟随默认的配置": "Create default-follow profile", "☆ 收藏": "☆ Favorite", "★ 已收藏": "★ Favorited", "全部": "All", "收藏": "Favorites",
+    "当前可用": "Available", "当前不可用": "Unavailable", "可用": "Available", "不可用": "Unavailable", "备注": "Notes", "使用手册": "Manual", "请求验证通过": "Request verified", "可选择 · 发送时验证": "Selectable · checked on send", "本机服务在线": "Local service online", "状态未知": "Status unknown",
+    "固定使用此模型": "Use this model", "跟随当前 Agent 默认模型": "Follow Agent default", "已跟随当前 Agent 默认模型": "Following Agent default", "新建跟随默认的配置": "Create default-follow profile", "☆ 收藏": "☆ Favorite", "★ 已收藏": "★ Favorited", "全部": "All", "收藏": "Favorites",
     "搜索模型、连接或 Agent": "Search models, connections or Agents", "搜索大模型": "Search models", "跟随 Agent": "Follow Agent", "手机入口": "Phone access", "打开 IM.codes": "Open IM.codes", "如何打开正式聊天": "How to open your chats",
     "新对话默认 AI 配置": "Default AI profile", "新对话默认 Agent": "Default Agent", "管理 AI 配置": "Manage AI profiles", "发送快捷键": "Send shortcut", "Enter 发送": "Enter to send", "Ctrl / ⌘ + Enter 发送": "Ctrl / ⌘ + Enter to send",
     "主题": "Theme", "跟随系统": "System", "浅色": "Light", "深色": "Dark", "布局密度": "Layout density", "舒适": "Comfortable", "紧凑": "Compact", "统一 Markdown 排版": "Render Markdown", "显示内部记录": "Show internal records", "导出当前对话": "Export current chat", "保存位置": "Storage location",
@@ -25,6 +25,9 @@
     "Markdown排版": "Markdown formatting", "是否将回答显示为Markdown；只影响显示，不修改原文。": "Show replies as Markdown. This changes the display without changing the original text.", "只显示已接入文字索引的内部记录，不扩展读取原生工具或推理正文。": "Show internal records already included in the text index. This does not add native tool or reasoning content.", "偏好保存在这台电脑；界面语言仅保存在当前浏览器。": "Preferences are saved on this computer; the interface language is saved only in this browser.",
     "Enter发送，或Ctrl/⌘+Enter发送；输入法确认不发送。": "Use Enter or Ctrl / ⌘ + Enter to send. Confirming input-method suggestions does not send a message.", "用 Enter 发送消息": "Send messages with Enter", "用 Ctrl / ⌘ + Enter 发送消息": "Send messages with Ctrl / ⌘ + Enter", "把布局改为舒适留白": "Use the comfortable layout with more space", "把布局改为紧凑排列": "Use the compact layout",
     "在 AI 配置卡片上设为默认；不会改变已经打开的对话。": "Set the default on an AI profile card. Existing chats keep their selection.", "沿用 Agent 默认模型和参数。": "Use the Agent's default model and parameters.", "输入中文时，候选词确认不会发送。": "Confirming input-method suggestions will not send a message.", "跟随系统会随着系统明暗模式切换。": "System theme follows your device's light or dark mode.", "舒适留白或紧凑排列。": "Choose more space or a compact layout.", "关闭后按原始文字显示，不修改保存的内容。": "Turn off to show plain text. Saved content stays unchanged.", "只包括已接入文字索引的子代理协作、自动审批记录；不含系统、工具和推理正文。关闭只是隐藏，不会删除。": "Includes indexed subagent and approval records, without system, tool or reasoning bodies. Turning off hides records without deleting them.", "回到“对话”，打开一段共同对话，使用右上方“导出”下载 Markdown。": "Open a shared chat in Chats and use Export to download Markdown.", "共同对话保存在本机数据库；原有记录只读接入。": "Shared chats are stored in a local database; native records are read-only.", "这些偏好会保存到本机小白兔，刷新后仍保留。": "These preferences are saved on this computer and survive refresh.",
+    "当前工作": "Current work", "仅观察小白兔已连接的工作；不包括原应用中的其他工作。": "Rabbit-owned connections only; other work in the original apps is not observed.",
+    "处理中": "Working", "等待确认": "Needs attention", "本连接空闲": "Connection idle", "状态待核对": "Status unknown", "尚未连接": "Not connected", "正在连接": "Connecting", "连接异常": "Connection error", "连接已关闭": "Connection closed", "连接中的对话": "Connected chat", "部分工作状态未知": "Some work states are unknown", "暂无已连接的工作": "No connected work",
+    "HAPI报告的工作": "HAPI-reported work", "Hub 查询时间": "Hub query time", "非原生实时状态": "Not native real-time status", "Hub 活跃": "Hub active", "Hub 思考中": "Hub thinking", "Hub 等待确认": "Hub needs attention", "Hub 非活跃": "Hub inactive", "未命名工作": "Unnamed work", "Agent 未报告": "Agent unreported", "Hub 未列出工作": "No work reported by Hub", "HAPI状态待核对": "HAPI status unknown", "HAPI尚未核对，点“刷新检测”读取。": "HAPI is unverified. Use Refresh status to query it.", "只显示 Hub 报告；不证明原生执行者实时状态，也不能在此发送或审批。": "Hub reports only; native executor state is unverified. No sending or approval here.",
     "＋ 添加 Agent": "＋ Add Agent", "＋ 添加模型": "＋ Add model", "尚未配置；请按手动指南完成原生安装与连接检测。": "Not configured. Follow the manual guide to install the native Agent and check its connection.", "打开手动接入指南；原生安装、凭据和检测完成后才可接入。": "Open the manual setup guide. Native installation, credentials and connection checks are required.", "配置指导暂时打不开；现有连接保持原样。": "Setup guidance could not be opened. Existing connections stay unchanged.", "目录名称匹配，不代表已验证实际模型相同；每条连接沿用各自的状态。": "Catalog names match; this does not verify that the actual models are identical. Each connection keeps its own status.", "本机发现的模型。展开只查看，能否使用在发送时确认。": "Models found on this computer. Expand to view; availability is checked when you send.", "目录暂未报告模型。": "No models reported by the catalog yet."
   });
   let interfaceLanguage = "zh-CN";
@@ -79,20 +82,22 @@
     return control;
   }
 
-  function create({ root, api, getWorkspace = () => "", getSelection, selectBackend, selectModel, profiles = null, profilesEnabled = () => false, onNavigate = null, onSectionChange = () => {}, renderSpecialistSettings = null, renderNativeSettings = null, onPreferences = () => {}, onManagement = () => {}, onLanguageChange = () => {}, onAddResource = null }) {
+  function create({ root, api, getWorkspace = () => "", getSelection, profiles = null, profilesEnabled = () => false, workStatus = null, onNavigate = null, onSectionChange = () => {}, renderSpecialistSettings = null, renderNativeSettings = null, onPreferences = () => {}, onManagement = () => {}, onLanguageChange = () => {}, onAddResource = null, onManual = null }) {
     if (!root || typeof api !== "function") throw new Error("小白兔管理界面缺少入口或接口。");
     let page = "management", tab = "devices", visible = false;
     let prefs = normalized({}), confirmed = normalized({}), prefsReady = false, prefsLoading = false, prefsLoadVersion = 0, mutationVersion = 0;
     let saving = false, saveError = "", preferenceMessage = "", pending = new Map(), keyVersions = new Map(), metadataVersion = 0;
     let management = null, managementLoading = false, managementError = "", managementVersion = 0, managementPromise = null;
-    let modelFilter = "all", modelQuery = "", selectedBusy = false, selectionMessage = "", detail = null;
+    let modelFilter = "all", modelQuery = "", detail = null;
     let statusNode = null, cardsNode = null;
     let languageSaved = true, resourceMessage = "", resourceBusy = false;
-    let settings = null, settingsLoading = false, settingsError = "", settingsVersion = 0, settingsDetailsOpen = true;
+    let settings = null, settingsLoading = false, settingsError = "", settingsVersion = 0;
     const settingsFieldVersions = new Map();
     const pageTabs = () => profilesEnabled() && profiles ? [["ai-profiles", "AI 配置"], ["memory-profiles", "记忆配置"], ["agents", "Agent"], ["models", "大模型"], ["devices", "设备"]] : managementTabs;
     function getNavigation(nextPage = page) { return (nextPage === "settings" ? settingsTabs : pageTabs()).map(([id, label]) => ({ id, label: translate(label) })); }
     function getSection() { return { page, tab }; }
+    // Manual navigation uses a stable topic, never a project-document path.
+    function manualTopic() { return page === "settings" ? tab === "native-chats" ? "native" : tab === "specialist" ? "specialist" : "settings" : tab === "devices" ? "devices" : "ai"; }
     const media = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
 
     function applyAppearance() {
@@ -213,7 +218,7 @@
             if (!saved || saved.version !== version) next[key] = prefs[key];
           }
           prefs = next;
-          preferenceMessage = pending.size ? "正在保存下一项…" : "已保存到这台电脑。";
+          preferenceMessage = pending.size ? "正在保存下一项…" : "";
         } catch (error) {
           if (managed) {
             for (const key of Object.keys(settingValues)) pending.delete(key);
@@ -248,8 +253,9 @@
       if (!statusNode) return;
       const showPreferenceNotice = (page === "settings" || /保存/.test(preferenceMessage)) && preferenceMessage !== "设置已从这台电脑读取。";
       const preferenceNotice = saveError || (showPreferenceNotice ? preferenceMessage : "");
-      const messages = [preferenceNotice, selectionMessage, managementError, page === "management" ? resourceMessage : ""].filter(Boolean);
+      const messages = [preferenceNotice, managementError, page === "management" ? resourceMessage : ""].filter(Boolean);
       statusNode.textContent = messages.map(translate).join(" ");
+      statusNode.hidden = !messages.length;
       statusNode.classList.toggle("rbw-error", Boolean(saveError || managementError || page === "management" && resourceMessage));
     }
     async function loadManagement() {
@@ -272,23 +278,9 @@
       managementPromise = operation;
       return operation;
     }
-    async function chooseAgent(id, label) {
-      if (selectedBusy) return;
-      selectedBusy = true;
-      selectionMessage = "正在切换下一条回复…";
-      render();
-      try {
-        const selected = await selectBackend(id);
-        selectionMessage = selected === false ? "没有完成切换，当前组合保留。" : `下一条回复使用 ${label || id}，模型跟随这位 Agent。`;
-      } catch (error) { selectionMessage = readableError(error, "没有完成切换，当前组合和草稿保留。"); }
-      finally { selectedBusy = false; if (visible) render(); }
-    }
-    async function chooseModel(model) {
-      if (selectedBusy || typeof selectModel !== "function") return;
-      selectedBusy = true; selectionMessage = "正在选择下一轮模型…"; render();
-      try { const changed = await selectModel(model.id, model.agent_id); selectionMessage = changed === false ? "没有完成选择，原组合和草稿保留。" : `下一条回复使用 ${model.name || model.model || model.id} · ${agents.labels[model.agent_id] || model.agent_id}。`; }
-      catch (error) { selectionMessage = readableError(error, "没有完成选择，原组合和草稿保留。"); }
-      finally { selectedBusy = false; if (visible) render(); }
+    function refreshDetection() {
+      const external = visible && page === "management" && tab === "agents" ? workStatus?.refreshExternal?.() : null;
+      return Promise.allSettled([loadManagement(), external]);
     }
     function status(label, available) {
       const item = node("span", `rbw-state ${available ? "rbw-online" : "rbw-unavailable"}`);
@@ -298,7 +290,9 @@
     function card(title, subtitle, available, label, lines) {
       const article = node("article", "rbw-card");
       article.dataset.controlInterface = "ai";
-      article.append(node("h3", "", title), node("p", "rbw-muted rbw-small", subtitle), status(label, available));
+      article.append(node("h3", "", title));
+      if (subtitle) article.append(node("p", "rbw-muted rbw-small", subtitle));
+      article.append(status(label, available));
       for (const line of lines.filter(Boolean)) article.append(node("p", "rbw-card-meta", line));
       return article;
     }
@@ -313,16 +307,7 @@
     function selection() {
       const current = typeof getSelection === "function" ? getSelection() || {} : {};
       const agent = management && management.agents.find((value) => value.id === current.backend);
-      const chosenModel = management && management.models.find(model => model.id === current.model_id && model.agent_id === current.backend);
-      return { ...current, agent, chosenModel };
-    }
-    function routeSummary() {
-      const current = selection();
-      const box = node("div", "rbw-route");
-      box.append(node("span", "rbw-muted rbw-small", current.chatId || current.chatTitle ? `本对话 · ${current.chatTitle || "当前对话"} · 下一条回复` : "新对话 · 下一条回复"));
-      const device = management && management.device;
-      box.append(node("strong", "", `${device && device.name || "这台电脑"} / ${current.agent && current.agent.name || (agents.labels[current.backend] || current.backend)} / ${current.model_id ? current.chosenModel && (current.chosenModel.model || current.chosenModel.name) || current.model_id.slice((agents.instanceId(current.backend) + "/").length) : `跟随默认 · ${current.agent && current.agent.model || "Agent 配置"}`}`));
-      return box;
+      return { ...current, agent };
     }
     function detailPanel(heading, entries) {
       const panel = node("section", "rbw-detail");
@@ -343,19 +328,17 @@
       if (typeof model.provider !== "string" || !model.provider || typeof model.model !== "string" || !model.model) return directory.filter(candidate => candidate.id === model.id);
       return directory.filter(candidate => candidate.id === model.id || candidate.provider === model.provider && candidate.model === model.model);
     }
-    function catalogDetails(kind, rows, { collapsed = true } = {}) {
+    function catalogDetails(rows, { collapsed = true } = {}) {
       const box = node(collapsed ? "details" : "section", "rbw-catalog");
       box.dataset.controlInterface = "ai";
-      const title = kind === "models" ? language() === "en" ? `Catalog models (${rows.length})` : `目录模型（${rows.length}）` : language() === "en" ? `Catalog Agent connections (${rows.length})` : `目录 Agent 连接（${rows.length}）`;
-      box.append(node(collapsed ? "summary" : "h4", "", title), node("p", "rbw-muted rbw-small", translate(kind === "models" ? "本机发现的模型。展开只查看，能否使用在发送时确认。" : "目录名称匹配，不代表已验证实际模型相同；每条连接沿用各自的状态。")));
+      const title = language() === "en" ? `Models (${rows.length})` : `模型（${rows.length}）`;
+      box.append(node(collapsed ? "summary" : "h4", "", title));
       const list = node("ul", "rbw-catalog-list");
       for (const model of rows) {
         const item = node("li", "rbw-catalog-item");
-        const agent = management.agents.find(candidate => candidate.id === model.agent_id);
-        const label = kind === "models" ? model.name || model.model || model.id : agent && agent.name || agents.labels[model.agent_id] || model.agent_id;
+        const label = model.name || model.model || "模型";
         item.append(node("strong", "", label));
-        if (kind === "connections") item.append(node("span", "rbw-muted rbw-small", `${model.model || model.name || model.id} · ${model.provider || model.connection_label || "Agent"}`));
-        item.append(status(model.status === "verified" ? "请求验证通过" : model.available === true ? "可选择 · 发送时验证" : "当前不可用", model.available === true));
+        item.append(status(model.available === true ? "可用" : "不可用", model.available === true));
         list.append(item);
       }
       if (rows.length) box.append(list);
@@ -377,7 +360,6 @@
       return button;
     }
     function devicesPage(container) {
-      container.append(node("p", "rbw-description", "AI 在这台电脑上运行。手机和其他浏览器可打开同一个入口，其他电脑尚未接入。"));
       const device = management && management.device;
       if (!device) return;
       const grid = node("div", "rbw-grid");
@@ -388,73 +370,59 @@
       if (detail === "device") container.append(detailPanel("本机设备详情", [["设备", device.name], ["系统", device.platform === "Darwin" ? "macOS" : device.platform], ["用途", "执行设备"], ["连接", device.online === true ? "当前请求已到达本机服务" : "未确认"], ["Agent", configured || "没有报告可用 Agent"], ["远程切换与唤醒", "后续接入；当前没有验证其他电脑的连接"]]));
     }
     function agentsPage(container) {
-      container.append(node("p", "rbw-description", profilesEnabled() ? "查看这台电脑上已连接的 Agent，新建 AI 配置时从中选择。" : "切换只影响本对话下一轮回复。每位 Agent 沿用现有登录和模型配置。"));
-      const toolbar = node("div", "rbw-toolbar"); toolbar.append(addResourceButton("agent")); container.append(toolbar);
       const grid = node("div", "rbw-grid"), current = selection();
       for (const agent of management.agents) {
         const item = card(agent.name || agent.id, translate("本机 Agent"), agent.available === true, agent.available ? "当前可用" : "当前不可用", [`默认模型：${agent.model || "未报告"}`, !agent.available ? agent.reason || "接入条件尚未满足" : ""]);
         item.dataset.selected = String(current.backend === agent.id);
-        const controls = node("div", "rbw-card-actions");
-        const choose = action(profilesEnabled() ? "用它新建 AI 配置" : current.backend === agent.id ? "下一条回复已选" : "用于下一条回复", () => chooseAgent(agent.id, agent.name), "rbw-button rbw-primary");
-        choose.disabled = !agent.available || selectedBusy || !profilesEnabled() && current.backend === agent.id && current.model_id === (prefs.default_models[agent.id] || "");
-        controls.append(choose);
-        item.append(controls, foldedDetails("更多", [
+        item.append(foldedDetails("备注", [
           ...(agent.provider ? [node("p", "rbw-card-meta", `连接：${agent.provider}`)] : []),
-          action("查看接入详情", () => { detail = detail === agent.id ? null : agent.id; render(); }, "rbw-button rbw-subtle"),
-          catalogDetails("models", catalogModels().filter(model => model.agent_id === agent.id), { collapsed: false })
+          catalogDetails(catalogModels().filter(model => model.agent_id === agent.id), { collapsed: false })
         ])); grid.append(item);
       }
       container.append(grid);
-      const found = management.agents.find((agent) => agent.id === detail);
-      if (found) container.append(detailPanel(`${found.name || found.id} 接入详情`, [["执行设备", management.device && management.device.name], ["对话接入", "小白兔统一文字接入器"], ["当前检测", found.available ? "接入器报告当前可用；真正发送时再次验证" : found.reason || "当前不可用"], ["模型", found.model], ["提供方", found.provider], ["部署范围", "只报告当前电脑，不推断其他电脑的配置状态"]]));
     }
     function modelMatches(model) {
       const query = modelQuery.trim().toLocaleLowerCase();
-      const searchable = [model.name, model.connection, model.provider, model.agent_id].filter(Boolean).join(" ").toLocaleLowerCase();
-      return (!query || searchable.includes(query)) && (modelFilter !== "favorites" || prefs.favorites.includes(model.id)) && (modelFilter !== "available" || model.available === true);
+      const searchable = [model.name, model.model, model.connection, model.provider, model.agent_id].filter(Boolean).join(" ").toLocaleLowerCase();
+      return !query || searchable.includes(query);
     }
     function renderModels() {
       if (!cardsNode) return;
       cardsNode.replaceChildren();
-      const current = selection();
-      const available = management.models.filter(modelMatches);
-      if (!available.length) cardsNode.append(node("p", "rbw-empty", modelFilter === "favorites" ? "还没有收藏与当前搜索匹配的模型。" : "没有与当前筛选匹配的模型。"));
-      for (const model of available) {
-        const agent = management.agents.find((value) => value.id === model.agent_id);
-        const label = model.status === "verified" ? "请求验证通过" : model.available ? "可选择 · 发送时验证" : "当前不可用";
-        const item = card(model.name || model.model || "Agent 默认模型", model.connection_label || model.provider || "Agent 现有连接", model.available === true, label, [`Agent：${agent && agent.name || model.agent_id}`, model.is_default ? "Agent 当前默认模型" : "", model.image_input === "supported" ? "支持图像输入" : model.image_input === "unsupported" ? "不支持图像输入" : "图像能力尚未确认", !model.available ? model.reason || "" : ""]);
-        const selected = current.backend === model.agent_id && current.model_id === model.id;
-        item.dataset.selected = String(selected || !current.model_id && current.backend === model.agent_id && model.is_default === true); item.dataset.modelId = model.id;
-        const controls = node("div", "rbw-card-actions");
-        const choose = action(profilesEnabled() ? "用它新建 AI 配置" : selected ? "下一条回复已选" : !current.model_id && current.backend === model.agent_id && model.is_default === true ? "固定使用此模型" : "用于下一条回复", () => chooseModel(model), "rbw-button rbw-primary");
-        choose.disabled = !model.available || !agent || !agent.available || selectedBusy || !profilesEnabled() && selected || typeof selectModel !== "function";
-        const favorite = action(prefs.favorites.includes(model.id) ? "★ 已收藏" : "☆ 收藏", () => { const ids = prefs.favorites.includes(model.id) ? prefs.favorites.filter((id) => id !== model.id) : [...prefs.favorites, model.id]; setPreference("favorites", ids); renderModels(); }, "rbw-button rbw-subtle");
-        aiControl(favorite);
-        favorite.disabled = !prefsReady;
-        favorite.setAttribute("aria-pressed", String(prefs.favorites.includes(model.id)));
-        controls.append(choose, favorite);
-        const metadata = [model.model ? `请求模型：${model.model}` : "", model.image_input_source || "", model.detail || ""].filter(Boolean).map(text => node("p", "rbw-card-meta", text));
-        item.append(controls, foldedDetails("更多", [...metadata, catalogDetails("connections", modelConnections(model), { collapsed: false })])); cardsNode.append(item);
+      const seen = new Set();
+      for (const model of catalogModels()) {
+        if (seen.has(model.id)) continue;
+        const connections = modelConnections(model);
+        for (const connection of connections) seen.add(connection.id);
+        const available = connections.some(connection => connection.available === true);
+        if (!connections.some(modelMatches) || modelFilter === "available" && !available) continue;
+        const item = card(model.name || model.model || "模型", "", available, available ? "可用" : "不可用", []);
+        item.dataset.modelId = model.id;
+        const list = node("ul", "rbw-model-agents"), agentNames = new Map();
+        for (const connection of connections) {
+          const agent = management.agents.find(value => value.id === connection.agent_id);
+          const name = agent?.name || agents.labels[connection.agent_id] || connection.agent_id;
+          agentNames.set(name, agentNames.get(name) === true || connection.available === true);
+        }
+        for (const [name, connected] of agentNames) list.append(node("li", "", name + (connected ? "" : " · " + translate("不可用"))));
+        item.append(list);
+        const notes = [...new Set(connections.filter(connection => connection.available !== true && typeof connection.reason === "string" && connection.reason.trim()).map(connection => Array.from(connection.reason.trim()).slice(0, 160).join("")))];
+        if (notes.length) item.append(foldedDetails("备注", notes.map(note => node("p", "rbw-card-meta", note))));
+        cardsNode.append(item);
       }
+      if (!cardsNode.children.length) cardsNode.append(node("p", "rbw-empty", "没有与当前筛选匹配的模型。"));
     }
     function modelsPage(container) {
-      container.append(node("p", "rbw-description", profilesEnabled() ? "从这里选择模型，新建 AI 配置。能否使用在发送时确认。" : "选择模型和支持它的 Agent，用于下一条回复。原有配置保留，能否使用在发送时确认。"));
       const toolbar = node("div", "rbw-toolbar"), search = node("input", "rbw-search");
       search.type = "search"; search.placeholder = translate("搜索模型、连接或 Agent"); search.value = modelQuery; search.setAttribute("aria-label", translate("搜索大模型"));
       search.addEventListener("input", () => { modelQuery = search.value; renderModels(); });
       const filters = node("div", "rbw-filters");
-      for (const [id, label] of [["all", "全部"], ["favorites", "收藏"], ["available", "当前可用"]]) {
+      for (const [id, label] of [["all", "全部"], ["available", "当前可用"]]) {
         const control = action(label, () => { modelFilter = id; for (const child of filters.children) child.setAttribute("aria-pressed", String(child.dataset.filter === id)); renderModels(); }, "rbw-button rbw-subtle");
         control.dataset.filter = id; control.setAttribute("aria-pressed", String(modelFilter === id)); filters.append(control);
       }
-      toolbar.append(search, filters, addResourceButton("model")); container.append(toolbar);
-      const follow = node("div", "rbw-follow");
-      const current = selection();
-      const followButton = action(current.model_id ? "跟随当前 Agent 默认模型" : "已跟随当前 Agent 默认模型", () => chooseModel({ id: "", agent_id: current.backend, name: "Agent 默认模型" }), "rbw-button rbw-primary");
-      followButton.textContent = profilesEnabled() ? translate("新建跟随默认的配置") : followButton.textContent;
-      followButton.disabled = selectedBusy || !current.agent || !current.agent.available || !profilesEnabled() && !current.model_id || typeof selectModel !== "function";
-      follow.append(node("strong", "", translate("跟随 Agent")), node("span", "rbw-muted rbw-small", "使用这位 Agent 已配置的默认模型。候选模型不会因浏览或选择而自动请求。"), followButton);
-      container.append(follow);
+      const actions = node("div", "rbw-action-group"); actions.append(filters, addResourceButton("model"));
+      toolbar.append(search, actions); container.append(toolbar);
       cardsNode = node("div", "rbw-grid"); container.append(cardsNode); renderModels();
     }
     function settingRow(title, description, control) {
@@ -494,24 +462,22 @@
       return control;
     }
     function aiSettingsDirectory() {
-      const details = node("details", "rbw-ai-settings"); details.open = settingsDetailsOpen; details.dataset.controlInterface = "ai";
-      details.addEventListener("toggle", () => { settingsDetailsOpen = details.open; });
-      details.append(node("summary", "", translate("交给 AI 的设置")), node("p", "rbw-muted rbw-small", translate("这些设置只由专员或受支持的程序接口修改；这里仅展示，不提供逐项开关。")));
+      const details = node("section", "rbw-ai-settings"); details.dataset.controlInterface = "ai";
       if (settings) {
         const list = node("div", "rbw-ai-settings-list");
         const entries = [
-          ["send_shortcut", { enter: "Enter 发送", "ctrl-enter": "Ctrl / ⌘ + Enter 发送" }, { enter: "用 Enter 发送消息", "ctrl-enter": "用 Ctrl / ⌘ + Enter 发送消息" }],
-          ["density", { comfortable: "舒适", compact: "紧凑" }, { comfortable: "把布局改为舒适留白", compact: "把布局改为紧凑排列" }],
-          ["markdown", { false: "原始文字", true: "Markdown 排版" }, { false: "把回答改成原始文本显示", true: "把回答显示为 Markdown 排版" }],
-          ["show_internal", { false: "隐藏", true: "显示" }, { false: "隐藏已索引的协作和审批记录", true: "显示已索引的协作和审批记录" }],
+          ["send_shortcut", { enter: "Enter 发送", "ctrl-enter": "Ctrl / ⌘ + Enter 发送" }],
+          ["density", { comfortable: "舒适", compact: "紧凑" }],
+          ["markdown", { false: "原始文字", true: "Markdown 排版" }],
+          ["show_internal", { false: "隐藏", true: "显示" }],
         ];
-        for (const [key, labels, phrases] of entries) {
+        for (const [key, labels] of entries) {
           const field = settings.fields.find(value => value.key === key);
           const item = node("section", "rbw-ai-setting"); item.dataset.settingKey = field.key; item.dataset.controlInterface = "ai";
-          const current = prefsReady ? prefs[field.key] : settings.settings[field.key], example = field.example.patch[field.key];
-          item.append(node("h3", "", translate(field.label)), node("p", "rbw-muted rbw-small", translate(field.description)), node("p", "rbw-small", translate("当前：") + translate(labels[current])), node("p", "rbw-muted rbw-small", translate("可以这样说：") + "“" + translate(phrases[example]) + "”")); list.append(item);
+          const current = prefsReady ? prefs[field.key] : settings.settings[field.key];
+          item.append(node("h3", "", translate(field.label)), node("p", "rbw-small", translate("当前：") + translate(labels[current]))); list.append(item);
         }
-        details.append(list, node("p", "rbw-muted rbw-small", translate("主题保留在通用设置，也可请 AI 修改。界面语言由你在当前浏览器切换。")));
+        details.append(list);
       } else details.append(node("p", "rbw-muted rbw-small", translate(settingsLoading ? "正在读取 AI 设置目录…" : settingsError || "目录尚未读取。")));
       const refresh = action(settingsLoading ? "正在读取 AI 设置目录…" : "读取最新设置目录", () => loadSettings({ apply: true }), "rbw-button rbw-subtle"); refresh.disabled = settingsLoading; refresh.dataset.controlInterface = "ai"; details.append(refresh);
       return details;
@@ -553,24 +519,28 @@
       }
       const box = node("div", "rbw-settings-box");
       box.append(
-        settingRow("主题", "跟随系统会随着系统明暗模式切换。", selectSetting("theme", [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]])),
-        settingRow("界面语言", languageSaved ? "仅基础导航、管理和设置标签；其他界面、原文和配置名保持原样。语言只保存在当前浏览器。" : "当前页面已切换；浏览器未能保存，刷新后可能恢复中文。", languageSetting())
+        settingRow("主题", "", selectSetting("theme", [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]])),
+        settingRow("界面语言", languageSaved ? "" : "当前页面已切换；浏览器未能保存，刷新后可能恢复中文。", languageSetting())
       );
-      container.append(box, node("p", "rbw-hint", translate("偏好保存在这台电脑；界面语言仅保存在当前浏览器。")));
+      container.append(box);
     }
     function render() {
       if (!visible) return;
       cardsNode = null;
       root.setAttribute("lang", language());
-      const wrapper = node("div", "rbw-page");
-      const heading = node("div", "rbw-title-row");
-      heading.append(node("h2", "", translate(page === "management" ? "管理" : "设置")));
-      if (page === "management") { const refresh = action(managementLoading ? "正在检测…" : "刷新检测", () => loadManagement(), "rbw-button rbw-subtle"); refresh.dataset.controlInterface = "ai"; refresh.disabled = managementLoading; heading.append(foldedDetails("更多", [refresh], "rbw-more rbw-page-more")); }
-      wrapper.append(heading); if (page === "management") wrapper.append(routeSummary());
-      wrapper.append(node("p", "rbw-control-legend", translate("紫色条目代表 AI 可直接操作")));
+      const wrapper = node("div", page === "settings" ? "rbw-page rbw-settings-page" : "rbw-page");
+      const heading = node("div", "rbw-toolbar rbw-action-group");
+      const profilePage = page === "management" && profilesEnabled() && profiles && ["ai-profiles", "memory-profiles"].includes(tab);
+      if (page === "management" && !profilePage) { const refresh = action(managementLoading ? "正在检测…" : "刷新检测", refreshDetection, "rbw-button rbw-subtle"); refresh.dataset.controlInterface = "ai"; refresh.disabled = managementLoading; heading.append(refresh); }
+      if (!profilePage && typeof onManual === "function") heading.append(aiControl(action("使用手册", () => onManual(manualTopic()), "rbw-button rbw-subtle")));
+      if (page === "management" && tab === "agents") heading.append(addResourceButton("agent"));
+      if (heading.children.length) wrapper.append(heading);
       statusNode = node("p", "rbw-feedback"); if (page === "settings") statusNode.dataset.controlInterface = "ai"; statusNode.setAttribute("role", "status"); statusNode.setAttribute("aria-live", "polite"); wrapper.append(statusNode); updateStatus();
       if (!prefsReady && !prefsLoading && saveError) wrapper.append(action("重试读取设置", () => loadPreferences(), "rbw-button rbw-subtle"));
       const body = node("div", "rbw-body");
+      if (page === "management" && tab === "agents" && workStatus) {
+        body.append(workStatus.root);
+      } else workStatus?.hide();
       if (page === "management") {
         if (profilesEnabled() && profiles && ["ai-profiles", "memory-profiles"].includes(tab)) profiles.renderManagement(body, tab === "memory-profiles" ? "memory" : "ai");
         else if (!management) body.append(node("p", "rbw-empty", managementLoading ? "正在读取当前电脑的连接状态…" : "连接状态尚未读取。"));
@@ -578,10 +548,10 @@
           if (tab === "devices") devicesPage(body);
           else if (tab === "agents") agentsPage(body);
           else modelsPage(body);
-          const notice = node("p", "rbw-hint", management.notice || "状态由本机连接报告，发送时再次检查。"); notice.dataset.controlInterface = "ai"; body.append(foldedDetails("检测说明", [notice]));
         }
       } else settingsPage(body);
       wrapper.append(body); root.replaceChildren(wrapper);
+      if (page === "management" && tab === "agents") workStatus?.show();
     }
     function show(nextPage, nextTab) {
       page = nextPage === "settings" ? "settings" : "management";
@@ -594,7 +564,7 @@
       else if (page === "settings" && prefsReady && !settings && !settingsLoading) loadSettings();
       if (!management && !managementLoading) loadManagement();
     }
-    function hide() { visible = false; root.hidden = true; }
+    function hide() { visible = false; root.hidden = true; workStatus?.hide(); }
     function selectChanged() { if (visible) render(); }
     return { show, hide, getNavigation, getSection, preferences, loadPreferences, applyPreferences, selectChanged };
   }

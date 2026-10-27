@@ -1,4 +1,4 @@
-"""Owned Claude identities and conservative receipts, never native message bodies.
+"""Owned Claude identities, conservative receipts and bounded final Results.
 
 ``created=True`` is a transient permission to forward a newly committed intent
 once. Reloading submitted_unknown never grants another create/query/interrupt.
@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import errno
 import fcntl
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -24,7 +25,9 @@ from ..native_session_store import (NativeSessionStoreError, open_directory as _
 
 
 APPLICATION_ID = 0x52434E53  # RCNS: distinct from shared, Codex, Pi and Hermes.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+MAX_RESULT_BYTES = 128 * 1024
+_MAX_SAVED_BYTES = MAX_RESULT_BYTES * 6 + 4096
 PENDING = frozenset(('submitted_unknown', 'accepted'))
 TERMINAL = frozenset(('completed', 'failed', 'interrupted'))
 _SHA = re.compile(r'[0-9a-f]{64}\Z')
@@ -68,7 +71,7 @@ def _stamp():
     return datetime.now(timezone.utc).isoformat(timespec='microseconds')
 
 
-_DDL = (
+_DDL_V1 = (
     '''CREATE TABLE claude_bindings (
         chat_id TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE,
         cwd TEXT NOT NULL, cwd_device INTEGER NOT NULL, cwd_inode INTEGER NOT NULL,
@@ -103,6 +106,15 @@ _DDL = (
     '''CREATE UNIQUE INDEX claude_one_interrupt ON claude_controls(active_client_id)
         WHERE status='submitted_unknown' ''',
 )
+_RESULT_DDL = (
+    'ALTER TABLE claude_prompts ADD COLUMN result_json TEXT',
+    'ALTER TABLE claude_prompts ADD COLUMN result_sha256 TEXT',
+)
+_DDL = _DDL_V1 + _RESULT_DDL
+_PROMPT_COLUMNS = ('client_id,chat_id,session_id,epoch,request_sha256,message_sha256,status,'
+                   'native_user_uuid,native_result_uuid,created_at,updated_at')
+_RESULT_IDENTITY = ('chat_id', 'client_id', 'session_id', 'epoch', 'request_sha256',
+                    'message_sha256', 'native_user_uuid', 'native_result_uuid')
 
 
 def _schema(db):
@@ -110,17 +122,50 @@ def _schema(db):
         'SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name'))
 
 
-def _expected_schema():
+def _expected_schema(ddl):
     db = sqlite3.connect(':memory:')
     try:
-        for sql in _DDL:
+        for sql in ddl:
             db.execute(sql)
         return _schema(db)
     finally:
         db.close()
 
 
-_EXPECTED_SCHEMA = _expected_schema()
+_EXPECTED_SCHEMA_V1 = _expected_schema(_DDL_V1)
+_EXPECTED_SCHEMA = _expected_schema(_DDL)
+
+
+def _result_record(receipt, result_uuid, record):
+    """Accept only the original successful top-level SDK Result, without extras."""
+    if (receipt['native_user_uuid'] != receipt['client_id'] or type(record) is not dict
+            or record.get('sdk_type') != 'ResultMessage'
+            or record.get('display_truncated') is not None and record.get('display_truncated') is not False
+            or type(record.get('data')) is not dict):
+        return None
+    data = record['data']
+    origin, text = data.get('origin'), data.get('result')
+    if (data.get('uuid') != result_uuid or data.get('session_id') != receipt['session_id']
+            or data.get('parent_tool_use_id') is not None
+            or data.get('display_truncated') is not None and data.get('display_truncated') is not False
+            or origin is not None and (type(origin) is not dict or origin.get('kind') != 'human')
+            or data.get('subtype') != 'success' or data.get('is_error') is not False
+            or data.get('terminal_reason') not in (None, 'completed') or type(text) is not str):
+        return None
+    try:
+        if not 0 < len(text.encode('utf-8')) <= MAX_RESULT_BYTES:
+            return None
+    except UnicodeError:
+        return None
+    return {'sdk_type': 'ResultMessage', 'data': {
+        'uuid': result_uuid, 'session_id': receipt['session_id'], 'parent_tool_use_id': None,
+        'origin': None if origin is None else {'kind': 'human'}, 'subtype': 'success',
+        'is_error': False, 'terminal_reason': data.get('terminal_reason'), 'result': text}}
+
+
+def _saved_json(receipt, record):
+    value = {'identity': {key: receipt[key] for key in _RESULT_IDENTITY}, 'record': record}
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
 class ClaudeNativeStore:
@@ -164,7 +209,7 @@ class ClaudeNativeStore:
                                         os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self._parent_fd)
             self._regular(os.fstat(self._file_fd))
             self._file_identity = _identity(os.fstat(self._file_fd))
-            with self._db(write=created, initialize=created):
+            with self._db(write=not readonly, initialize=created, migrate=not readonly):
                 pass
         except BaseException as error:
             self.close()
@@ -215,7 +260,7 @@ class ClaudeNativeStore:
                 raise ClaudeStoreError('scope_changed')
 
     @contextmanager
-    def _db(self, *, write=False, initialize=False):
+    def _db(self, *, write=False, initialize=False, migrate=False):
         with self.lock:
             if write and self.readonly:
                 raise ClaudeStoreError('readonly')
@@ -227,22 +272,30 @@ class ClaudeNativeStore:
                 db.row_factory = sqlite3.Row
                 db.execute('PRAGMA foreign_keys=ON')
                 db.execute('PRAGMA trusted_schema=OFF')
+                if not write:
+                    db.execute('PRAGMA query_only=ON')
+                db.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
                 if initialize:
                     if _schema(db):
                         raise ClaudeStoreError('invalid_schema')
-                    db.execute('BEGIN IMMEDIATE')
                     for sql in _DDL:
                         db.execute(sql)
                     db.execute('PRAGMA application_id=' + str(APPLICATION_ID))
                     db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
                 else:
+                    version = db.execute('PRAGMA user_version').fetchone()[0]
+                    expected = {1: _EXPECTED_SCHEMA_V1, 2: _EXPECTED_SCHEMA}.get(version)
                     if (db.execute('PRAGMA application_id').fetchone()[0] != APPLICATION_ID
-                            or db.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION
-                            or _schema(db) != _EXPECTED_SCHEMA):
+                            or expected is None or _schema(db) != expected):
                         raise ClaudeStoreError('invalid_schema')
-                    if not write:
-                        db.execute('PRAGMA query_only=ON')
-                    db.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
+                    if version == 1 and write:
+                        if not migrate:
+                            raise ClaudeStoreError('invalid_schema')
+                        for sql in _RESULT_DDL:
+                            db.execute(sql)
+                        db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
+                        if _schema(db) != _EXPECTED_SCHEMA:
+                            raise ClaudeStoreError('invalid_schema')
                 yield db
                 self._check_path()
                 if write:
@@ -304,7 +357,8 @@ class ClaudeNativeStore:
     @staticmethod
     def _receipt(db, table, key, *, field='client_id'):
         # Table/column names are only private fixed literals from methods below.
-        row = db.execute('SELECT * FROM ' + table + ' WHERE ' + field + '=?', (key,)).fetchone()
+        columns = _PROMPT_COLUMNS if table == 'claude_prompts' else '*'
+        row = db.execute('SELECT ' + columns + ' FROM ' + table + ' WHERE ' + field + '=?', (key,)).fetchone()
         if row is None:
             return None
         result = dict(row)
@@ -522,7 +576,7 @@ class ClaudeNativeStore:
             if self._active(db, chat_id) is not None:
                 raise ClaudeStoreError('busy')
             now = _stamp()
-            db.execute("INSERT INTO claude_prompts VALUES(?,?,?,?,?,?,'submitted_unknown',NULL,NULL,?,?)",
+            db.execute("INSERT INTO claude_prompts (" + _PROMPT_COLUMNS + ") VALUES(?,?,?,?,?,?,'submitted_unknown',NULL,NULL,?,?)",
                        (client_id, chat_id, binding['session_id'], epoch, digest, message_digest, now, now))
             return dict(self._receipt(db, 'claude_prompts', client_id), created=True)
 
@@ -580,19 +634,68 @@ class ClaudeNativeStore:
                        (native_user_uuid, _stamp(), client_id))
             return self._receipt(db, 'claude_prompts', client_id)
 
-    def finish(self, client_id, session_id, epoch, result_uuid, status='completed'):
+    @staticmethod
+    def _saved_result(db, receipt):
+        if db.execute('PRAGMA user_version').fetchone()[0] == 1:
+            return None
+        row = db.execute('''SELECT result_sha256,length(CAST(result_json AS BLOB)) AS size,
+            CASE WHEN length(CAST(result_json AS BLOB))<=? THEN result_json END AS result_json
+            FROM claude_prompts WHERE client_id=?''', (_MAX_SAVED_BYTES, receipt['client_id'])).fetchone()
+        raw, digest, size = row['result_json'], row['result_sha256'], row['size']
+        if raw is None and digest is None and size is None:
+            return None
+        try:
+            if (receipt['status'] != 'completed' or type(raw) is not str or type(digest) is not str
+                    or not _SHA.fullmatch(digest) or not 0 < size <= _MAX_SAVED_BYTES
+                    or hashlib.sha256(raw.encode('utf-8')).hexdigest() != digest):
+                raise ValueError
+            validate_uuid(receipt['native_result_uuid'])
+            value = json.loads(raw)
+            if (type(value) is not dict or set(value) != {'identity', 'record'}
+                    or value['identity'] != {key: receipt[key] for key in _RESULT_IDENTITY}):
+                raise ValueError
+            record = _result_record(receipt, receipt['native_result_uuid'], value['record'])
+            if record is None or record != value['record'] or _saved_json(receipt, record) != raw:
+                raise ValueError
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+            raise ClaudeStoreError('invalid_schema') from None
+        return raw, record
+
+    def completed_result(self, chat_id, client_id):
+        """Read a stored SDK Result from its original epoch, never a live claim."""
+        chat_id, client_id = validate_uuid(chat_id), validate_uuid(client_id)
+        with self._db() as db:
+            receipt = self._receipt(db, 'claude_prompts', client_id)
+            if receipt is None:
+                return None
+            if receipt['chat_id'] != chat_id:
+                raise ClaudeStoreError('conflict')
+            binding = self._binding(db, chat_id)
+            if binding is None or binding['session_id'] != receipt['session_id']:
+                raise ClaudeStoreError('conflict')
+            saved = self._saved_result(db, receipt)
+            return None if saved is None else {'receipt': receipt, 'record': saved[1]}
+
+    def finish(self, client_id, session_id, epoch, result_uuid, status='completed', result=None):
         """Only an exact original Result in this epoch's unique active query."""
         result_uuid = validate_uuid(result_uuid)
         if type(status) is not str or status not in TERMINAL:
             raise ClaudeStoreError('invalid_arguments')
         with self._db(write=True) as db:
             old = self._target(db, client_id, session_id, epoch)
+            record = _result_record(old, result_uuid, result) if status == 'completed' else None
             if (old['status'], old['native_result_uuid']) == (status, result_uuid):
+                saved = self._saved_result(db, old)
+                if saved is not None and result is not None and (record is None or _saved_json(old, record) != saved[0]):
+                    raise ClaudeStoreError('conflict')
                 return old
             if old['status'] not in PENDING or self._active(db, old['chat_id'])['client_id'] != client_id:
                 raise ClaudeStoreError('conflict')
-            db.execute('UPDATE claude_prompts SET status=?,native_result_uuid=?,updated_at=? WHERE client_id=?',
-                       (status, result_uuid, _stamp(), client_id))
+            raw = _saved_json(dict(old, native_result_uuid=result_uuid), record) if record is not None else None
+            digest = hashlib.sha256(raw.encode('utf-8')).hexdigest() if raw is not None else None
+            db.execute('''UPDATE claude_prompts SET status=?,native_result_uuid=?,updated_at=?,
+                result_json=?,result_sha256=? WHERE client_id=?''',
+                (status, result_uuid, _stamp(), raw, digest, client_id))
             return self._receipt(db, 'claude_prompts', client_id)
 
     def rejected(self, client_id, session_id, epoch):

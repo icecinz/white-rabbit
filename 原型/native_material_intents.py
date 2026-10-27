@@ -19,7 +19,9 @@ import weakref
 
 from native_materials import NativeMaterialError, validate_refs
 from rabbit_runtime.native_session_store import NativeSessionStoreError, request_sha256
-from native_memory_intents import validate_selection, NativeMemoryIntentError
+from native_memory_intents import validate_selection, NativeMemoryIntentError, frozen_memory_in
+from native_memory_selection import assert_memory_selection_in
+from profiles import validate_profile_id, validate_profile_revision
 
 
 SCHEMA_VERSION = 1
@@ -30,6 +32,7 @@ _TABLES = {'claude': 'claude_material_intents', 'dsh': 'dsh_material_intents'}
 _LABELS = {'claude': 'Claude', 'dsh': 'DSH'}
 _FIELDS = frozenset(('client_id', 'message', 'material_refs'))
 _MEMORY_FIELDS = frozenset(('memory_profile_id', 'memory_profile_revision'))
+_AI_FIELDS = frozenset(('ai_profile_id', 'ai_profile_revision'))
 _LOCKS_GUARD = threading.Lock()
 _LOCKS = weakref.WeakValueDictionary()
 _ERRORS = {
@@ -274,7 +277,9 @@ class NativeMaterialIntents:
                     db.close()
 
     def _request_identity(self, body):
-        if (type(body) is not dict or not _FIELDS <= body.keys() or body.keys() - (_FIELDS | _MEMORY_FIELDS)
+        allowed = _FIELDS | _MEMORY_FIELDS | (_AI_FIELDS if self.agent == 'claude' else set())
+        if (type(body) is not dict or not _FIELDS <= body.keys() or body.keys() - allowed
+                or ('ai_profile_id' in body) != ('ai_profile_revision' in body)
                 or type(body['message']) is not str or not body['message'].strip()):
             self._fail('invalid_request')
         client_id = self._uuid(body['client_id'])
@@ -283,6 +288,9 @@ class NativeMaterialIntents:
                 self._fail('invalid_request')
             refs = self._refs(body['material_refs'])
             validate_selection(body)
+            if 'ai_profile_id' in body:
+                validate_profile_id(body['ai_profile_id'])
+                validate_profile_revision(body['ai_profile_revision'])
             if not refs:
                 self._fail('invalid_request')
             encoded_refs = _json(refs)
@@ -355,6 +363,15 @@ class NativeMaterialIntents:
             old = self._match(self._read_in(db, client_id), chat_id, digest, refs)
             if old is not None:
                 return dict(old, created=False)
+            selection = validate_selection(body)
+            profile_intent = None
+            if self.agent == 'claude':
+                from native_profile_intents import frozen_claude_profile_in
+                profile_intent = frozen_claude_profile_in(db, self.workspace_id, chat_id, client_id, digest)
+            memory = frozen_memory_in(db, self.workspace_id, chat_id, client_id, digest)
+            if memory is None and profile_intent is None:
+                assert_memory_selection_in(db, self.workspace_id, self.agent, chat_id,
+                    selection['id'] if selection else None, selection['revision'] if selection else None)
             stamp = _stamp()
             db.execute(f'INSERT INTO {self._table} VALUES(?,?,?,?,?,?,?,?,?)',
                 (SCHEMA_VERSION, self.workspace_id, chat_id, client_id, digest, encoded_refs, None, stamp, stamp))

@@ -4,13 +4,14 @@ The running application's existing validation and revisions own every write.
 No redirect, proxy, arbitrary host/path or mutation retry is supported.
 """
 import http.client
+from datetime import datetime, timedelta
 import hashlib
 import json
 import posixpath
 import re
 import unicodedata
 import uuid
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 MAX_RESPONSE_BYTES = 512 * 1024
 MAX_REVISION = 2 ** 53 - 1
@@ -24,15 +25,24 @@ SETTINGS_OPTIONS = {'theme': ('dark', 'light', 'system'), 'density': ('comfortab
                     'show_internal': (False, True)}
 HERMES_EFFORT_SOURCE = 'Hermes 原生 parse_reasoning_effort；原生请求强度，提供商可能映射。'
 NATIVE_CONNECTIONS = '/api/management/native-model-connections'
+WORK_STATUS = '/api/management/work-status'
+EXTERNAL_WORK_STATUS = '/api/management/external-work'
+EXTERNAL_WORK_RESPONSE_BYTES = 4 * 1024 * 1024
+_EXTERNAL_REASONS = frozenset(('auth_required', 'connection_unavailable', 'http_error',
+    'redirect_refused', 'invalid_response', 'response_limit', 'observation_unavailable'))
+_EXTERNAL_CONFLICTS = frozenset('external_work_' + code for code in
+    ('binding_changed', 'revision_conflict', 'refresh_busy', 'unconfigured'))
 NATIVE_CATALOG = '/api/management/native-model-catalog'
 SPECIALIST_MODEL_CATALOG = '/api/management/specialist-model-catalog'
 NATIVE_MODEL_PREPARATION = '/api/management/native-model-preparation'
-_NATIVE_LIMITS = {'codex': 2, 'pi': 1, 'hermes': 1}
+_NATIVE_LIMITS = {'codex': 2, 'pi': 1, 'hermes': 1, 'claude': 1}
 NATIVE_CHAT_NAMES = '/api/management/native-chat-names'
 NATIVE_CHAT_AGENTS = ('codex', 'pi', 'hermes', 'claude', 'dsh')
 NATIVE_CHAT_CONFIGURATION = '/api/management/native-chat-configuration'
 NATIVE_CHAT_MEMORY_CONFIGURATION = '/api/management/native-chat-memory-configuration'
-NATIVE_CHAT_SELECTION_AGENTS = ('codex', 'pi', 'hermes')
+CHAT_CONFIGURATION_SUFFIX = '/profile-selection?metadata_only=1'
+NATIVE_TASKS = '/api/management/native-tasks'
+NATIVE_CHAT_SELECTION_AGENTS = ('codex', 'pi', 'hermes', 'claude')
 _NATIVE_CHAT_SELECTION_ERRORS = frozenset('native_chat_selection_' + code for code in (
     'conflict', 'invalid', 'unavailable', 'not_found', 'corrupt'))
 CODEX_HISTORY_PREVIEW = '/api/native-history/codex/preview'
@@ -54,11 +64,13 @@ MEMORY_PROFILES = '/api/management/memory-profiles'
 MEMORY_OPERATIONS = '/api/management/memory-profile-operations'
 MEMORY_CREATIONS = '/api/management/memory-profile-creations/'
 MEMORY_CONNECTIONS = '/api/management/memory-connections/'
+MEMORY_DOCUMENTS = '/api/management/memory-documents'
 MEMORY_FIELDS = ('name', 'description', 'habits', 'program', 'connection_id', 'mode')
 MEMORY_MUTABLE = ('name', 'description', 'habits', 'mode')
 MEMORY_COLUMNS = ('id', 'revision') + MEMORY_FIELDS + ('bank_ref', 'locked_mode', 'source_kind')
 MEMORY_RESPONSE_BYTES = 3 * 1024 * 1024  # 128 profiles, each up to 4000 Unicode code points.
 MARKDOWN_CHATS = '/api/markdown-chats'
+CONVERSATIONS = '/api/management/conversations'
 MARKDOWN_RESPONSE_BYTES = 3 * 1024 * 1024
 _MARKDOWN_STATES = ('prepared', 'publishing', 'verified', 'conflict', 'blocked')
 _MARKDOWN_UPDATE_ERRORS = frozenset((
@@ -107,6 +119,151 @@ _MARKDOWN_ERRORS = frozenset(
         'depth_capacity',
     )
 ) | _MARKDOWN_UPDATE_ERRORS
+_NATIVE_TASK_EXECUTION = frozenset(('unknown', 'running', 'needs_user', 'completed',
+    'failed', 'interrupted', 'rejected', 'not_open'))
+_NATIVE_TASK_RECEIPT_STATES = frozenset(('submitted_unknown', 'accepted', 'completed',
+    'failed', 'interrupted', 'rejected', 'command_completed'))
+_NATIVE_TASK_RECEIPT_KEYS = frozenset(('client_id', 'chat_id', 'session_key', 'kind',
+    'request_sha256', 'status', 'thread_id', 'session_id', 'turn_id', 'target_turn_id',
+    'rpc_error_code', 'created_at', 'updated_at', 'epoch', 'message_sha256',
+    'native_user_uuid', 'native_result_uuid', 'native_message_id', 'native_insert_seq',
+    'native_turn', 'native_turn_start_seq', 'native_message_seq', 'native_end_seq',
+    'native_reason', 'durable_seq', 'native_command_sha256', 'native_command_kind', 'native_error_code',
+    'native_error_sha256'))
+_NATIVE_TASK_REFERENCE_KEYS = frozenset(('agent', 'thread_id', 'turn_id', 'session_id',
+    'native_user_uuid', 'native_result_uuid', 'native_message_id', 'native_turn',
+    'native_turn_start_seq', 'native_message_seq', 'native_end_seq', 'durable_seq',
+    'evidence_kind', 'reason'))
+_MISSING_NATIVE_TASK_FIELD = object()
+
+
+def validate_native_task(value):
+    """Copy one closed handoff/read request, without reading any source."""
+    if type(value) is not dict or value.get('operation') not in ('send', 'read'):
+        raise ValueError('Invalid native task operation.')
+    base = ('operation', 'agent', 'chat_id', 'client_id')
+    _fields(value, base + (('text',) if value['operation'] == 'send' else ()),
+            ('material_refs',) if value['operation'] == 'send' else ())
+    if type(value['agent']) is not str or value['agent'] not in NATIVE_CHAT_AGENTS:
+        raise ValueError('Invalid native task Agent.')
+    _uuid(value['chat_id']); _uuid(value['client_id'])
+    result = dict(value)
+    if value['operation'] == 'read':
+        return result
+    task = value['text']
+    if (type(task) is not str or not task.strip() or len(task) > 30000
+            or '\0' in task or len(task.encode('utf-8')) > 128 * 1024):
+        raise ValueError('Invalid native task text.')
+    if 'material_refs' in value:
+        refs = value['material_refs']
+        if type(refs) is not list or len(refs) > 8:
+            raise ValueError('Invalid native task material references.')
+        copied, seen, counts = [], set(), {'image': 0, 'text': 0}
+        for ref in refs:
+            if type(ref) is not dict or ref.get('kind') not in counts:
+                raise ValueError('Invalid native task material reference.')
+            kind = ref['kind']
+            _fields(ref, ('kind', 'id', 'sha256'), ('source_chat_id',) if kind == 'text' else ())
+            if (type(ref['sha256']) is not str or re.fullmatch(r'[a-f0-9]{64}', ref['sha256']) is None
+                    or kind == 'image' and (type(ref['id']) is not str
+                        or re.fullmatch(r'img_[a-f0-9]{32}', ref['id']) is None)
+                    or kind == 'image' and value['agent'] in ('claude', 'dsh')):
+                raise ValueError('Invalid native task material identity.')
+            if kind == 'text':
+                _uuid(ref['id'])
+                if 'source_chat_id' in ref:
+                    _uuid(ref['source_chat_id'])
+            identity = kind, ref['id']
+            counts[kind] += 1
+            if identity in seen or counts[kind] > 4:
+                raise ValueError('Duplicate or excessive native task materials.')
+            seen.add(identity); copied.append(dict(ref))
+        result['material_refs'] = copied
+    return result
+
+
+def _native_task_metadata(value, allowed, maximum, *, signed=False):
+    if type(value) is not dict or not value.keys() <= allowed:
+        raise ValueError('Invalid native task metadata fields.')
+    for item in value.values():
+        if type(item) not in (str, int, bool, type(None)):
+            raise ValueError('Invalid native task metadata value.')
+        if type(item) is str:
+            if (len(item) > maximum or item.startswith('/') or re.match(r'^[A-Za-z]:[\\/]', item)
+                    or any(ord(c) < 32 or ord(c) == 127 for c in item)):
+                raise ValueError('Invalid native task metadata text.')
+            item.encode('utf-8')
+        if type(item) is int and not (-MAX_REVISION if signed else 0) <= item <= MAX_REVISION:
+            raise ValueError('Invalid native task metadata integer.')
+
+
+def _native_task_response(value, workspace, fields):
+    _fields(value, ('workspace_id', 'scope', 'agent', 'chat_id', 'client_id', 'forwarded',
+        'receipt', 'execution_state', 'needs_user', 'result', 'native_refresh_performed'))
+    if (value['workspace_id'] != workspace or value['scope'] != 'native_task/v1'
+            or any(value[key] != fields[key] for key in ('agent', 'chat_id', 'client_id'))
+            or any(type(value[key]) is not bool for key in ('forwarded', 'needs_user', 'native_refresh_performed'))
+            or fields['operation'] == 'read' and value['forwarded'] is not False
+            or type(value['execution_state']) is not str or value['execution_state'] not in _NATIVE_TASK_EXECUTION):
+        raise ValueError('Invalid native task response scope.')
+    receipt = value['receipt']
+    if receipt is not None:
+        _native_task_metadata(receipt, _NATIVE_TASK_RECEIPT_KEYS, 512, signed=True)
+        if (not {'client_id', 'status', 'request_sha256'} <= receipt.keys()
+                or receipt['client_id'] != fields['client_id']
+                or receipt['status'] not in _NATIVE_TASK_RECEIPT_STATES
+                or 'chat_id' in receipt and receipt['chat_id'] != fields['chat_id']
+                or type(receipt['request_sha256']) is not str
+                or re.fullmatch(r'[a-f0-9]{64}', receipt['request_sha256']) is None
+                or len(json.dumps(receipt, ensure_ascii=False, allow_nan=False).encode()) > 32 * 1024):
+            raise ValueError('Invalid native task receipt.')
+        if fields['agent'] == 'codex':
+            if receipt.get('kind') != 'turn_start' or receipt.get('session_key') != 'chat/codex/' + fields['chat_id']:
+                raise ValueError('Invalid Codex task receipt scope.')
+        elif (receipt.get('chat_id') != fields['chat_id']
+                or fields['agent'] in ('claude', 'dsh') and receipt.get('kind') != 'prompt'
+                or 'kind' in receipt and receipt['kind'] != 'prompt'):
+            raise ValueError('Invalid native prompt receipt scope.')
+        if 'native_command_kind' in receipt and receipt['native_command_kind'] not in (None, 'success'):
+            raise ValueError('Invalid native command metadata.')
+    terminal = {'completed', 'failed', 'interrupted', 'rejected'}
+    if (value['execution_state'] in terminal and (receipt is None or receipt['status'] != value['execution_state'])
+            or receipt is not None and receipt['status'] in terminal and value['execution_state'] != receipt['status']
+            or value['execution_state'] == 'needs_user' and not value['needs_user']):
+        raise ValueError('Native task execution is not proved by its own receipt.')
+    result = value['result']; _fields(result, ('state', 'messages', 'references'))
+    if type(result['state']) is not str or result['state'] not in ('available', 'incomplete', 'unavailable'):
+        raise ValueError('Invalid native result state.')
+    _native_task_metadata(result['references'], _NATIVE_TASK_REFERENCE_KEYS, 256)
+    references = result['references']
+    if (type(references.get('reason')) is not str
+            or re.fullmatch(r'[a-z][a-z0-9_]{0,127}', references['reason']) is None
+            or 'agent' in references and references['agent'] != fields['agent']):
+        raise ValueError('Invalid native result references.')
+    if receipt is not None and any(key in references and key in receipt
+            and references[key] != receipt[key] for key in ('thread_id', 'turn_id', 'session_id',
+                'native_user_uuid', 'native_result_uuid', 'native_message_id')):
+        raise ValueError('Native result references conflict with the original receipt.')
+    if type(result['messages']) is not list or len(result['messages']) > 1000:
+        raise ValueError('Invalid native result messages.')
+    seen, total = set(), 0
+    for row in result['messages']:
+        _fields(row, ('id', 'text', 'phase'))
+        if (type(row['id']) is not str or not 0 < len(row['id']) <= 256 or row['id'] in seen
+                or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in row['id'])
+                or type(row['text']) is not str
+                or row['phase'] != ('final_answer' if fields['agent'] == 'codex' else None)):
+            raise ValueError('Invalid native result message.')
+        row['id'].encode('utf-8'); total += len(row['text'].encode('utf-8')); seen.add(row['id'])
+    if total > 128 * 1024:
+        raise ValueError('Native result exceeds the complete-text bound.')
+    if result['state'] == 'available':
+        if (value['execution_state'] != 'completed' or receipt is None or receipt['status'] != 'completed'
+                or not result['messages'] or not total or references['reason'] != 'verified_native_result'):
+            raise ValueError('Native result is not proved complete.')
+    elif result['messages']:
+        raise ValueError('Incomplete or unavailable native output cannot impersonate a full result.')
+    return value
 
 
 def _markdown_revision(value):
@@ -154,6 +311,92 @@ def _markdown_folder_path(value, *, create=False):
     return value
 
 
+def _markdown_move_target(value):
+    source = _markdown_path(value['source_path'], target=True)
+    parts = source.split('/')
+    folder = value['target_folder']
+    if folder != '':
+        _markdown_folder_path(folder, create=True)
+    target = '/'.join((folder, parts[-1])) if folder else parts[-1]
+    _markdown_path(target, target=True)
+    if target == source:
+        raise ValueError('The Markdown move destination is unchanged.')
+    if (type(value['source_sha256']) is not str
+            or re.fullmatch(r'[0-9a-f]{64}', value['source_sha256']) is None):
+        raise ValueError('Invalid Markdown move digest.')
+    return target
+
+
+def validate_conversations_query(query='', agent='all', offset=0, limit=20):
+    """conversation_directory/v1: one bounded metadata page, never a folder/RPC."""
+    _text(query, 400, empty=True)
+    if (type(agent) is not str or agent not in ('all', *NATIVE_CHAT_AGENTS)
+            or type(offset) is not int or not 0 <= offset <= 1000000
+            or type(limit) is not int or not 1 <= limit <= 50):
+        raise ValueError('Invalid conversation directory query.')
+    return dict(query=query.strip(), agent=agent, offset=offset, limit=limit)
+
+
+def _conversation_directory(value, workspace, requested):
+    _fields(value, ('workspace_id', 'scope', 'inference_performed', 'query', 'agent',
+                    'offset', 'limit', 'revision', 'history_index_available',
+                    'items', 'total', 'next_offset'))
+    observed = validate_conversations_query(*(value[key] for key in ('query', 'agent', 'offset', 'limit')))
+    if (value['workspace_id'] != workspace or value['scope'] != 'conversation_directory'
+            or value['inference_performed'] is not False or observed != requested
+            or value['query'] != observed['query']
+            or type(value['history_index_available']) is not bool):
+        raise ValueError('Invalid conversation directory scope.')
+    _text(value['revision'], 128)
+    if any(char.isspace() for char in value['revision']):
+        raise ValueError('Invalid conversation directory revision.')
+    total, rows = value['total'], value['items']
+    if (type(total) is not int or not 0 <= total <= MAX_REVISION
+            or type(rows) is not list
+            or len(rows) != min(requested['limit'], max(0, total - requested['offset']))):
+        raise ValueError('Invalid conversation directory page.')
+    seen = set()
+    for row in rows:
+        _fields(row, ('key', 'kind', 'title', 'title_truncated', 'agent', 'chat_id', 'session_id'))
+        title = row['title']
+        if (type(title) is not str or len(title) > 512 or '\0' in title
+                or type(row['title_truncated']) is not bool
+                or row['title_truncated'] and len(title) != 512):
+            raise ValueError('Invalid conversation title.')
+        title.encode('utf-8')
+        agent, kind = row['agent'], row['kind']
+        if kind == 'chat':
+            _uuid(row['chat_id'])
+            if agent is not None or row['session_id'] is not None:
+                raise ValueError('Invalid common conversation identity.')
+            key = 'chat:' + row['chat_id']
+        elif kind in ('native', 'history'):
+            if (type(agent) is not str or agent not in NATIVE_CHAT_AGENTS
+                    or requested['agent'] != 'all' and agent != requested['agent']):
+                raise ValueError('Invalid source Agent.')
+            if kind == 'native':
+                _uuid(row['chat_id'])
+                if row['session_id'] is not None:
+                    raise ValueError('Native directory IDs are not native session IDs.')
+                key = 'native:' + agent + ':' + row['chat_id']
+            else:
+                _markdown_reference_session_id(row['session_id'])
+                if row['chat_id'] is not None or not value['history_index_available']:
+                    raise ValueError('Invalid indexed conversation identity.')
+                key = 'history:' + agent + ':' + row['session_id']
+        else:
+            raise ValueError('Invalid conversation kind.')
+        if row['key'] != key or key in seen:
+            raise ValueError('Invalid or duplicate conversation key.')
+        seen.add(key)
+    following = requested['offset'] + len(rows)
+    expected = following if following < total else None
+    if (value['next_offset'] != expected
+            or value['next_offset'] is not None and type(value['next_offset']) is not int):
+        raise ValueError('Invalid conversation continuation.')
+    return value
+
+
 def validate_markdown_operation(value):
     if type(value) is not dict or type(value.get('action')) is not str:
         raise ValueError('Invalid Markdown operation.')
@@ -169,6 +412,8 @@ def validate_markdown_operation(value):
         'sync_confirm': ('action', 'update_id', 'client_id'),
         'sync_receipt': ('action', 'client_id'),
         'create_folder': ('action', 'path'),
+        'move': ('action', 'binding_id', 'expected_head_id', 'source_path',
+                 'source_sha256', 'target_folder'),
     }.get(value['action'])
     if required is None:
         raise ValueError('Invalid Markdown action.')
@@ -186,6 +431,8 @@ def validate_markdown_operation(value):
         _markdown_path(value['target_path'], target=True)
     elif value['action'] == 'create_folder':
         _markdown_folder_path(value['path'], create=True)
+    elif value['action'] == 'move':
+        _markdown_move_target(value)
     return dict(value)
 
 
@@ -599,6 +846,50 @@ def _native_chat_scope(value):
         raise ValueError('Invalid native chat names scope.')
 
 
+def validate_chat_configuration(value):
+    """Only a common chat's saved selection; omitted fields remain unchanged."""
+    if type(value) is not dict:
+        raise ValueError('Invalid chat configuration operation.')
+    operation = value.get('operation')
+    required = ('operation', 'chat_id')
+    optional = ()
+    if operation == 'select':
+        required += ('expected_revision',)
+        optional = ('ai_profile_id', 'memory_profile_id')
+        if not set(optional).intersection(value):
+            raise ValueError('An explicit configuration selection is required.')
+        _revision(value.get('expected_revision'), minimum=0)
+    elif operation != 'read':
+        raise ValueError('Invalid chat configuration operation.')
+    _fields(value, required, optional)
+    _uuid(value['chat_id'])
+    if 'ai_profile_id' in value and value['ai_profile_id'] is not None:
+        _uuid(value['ai_profile_id'])
+    if 'memory_profile_id' in value and value['memory_profile_id'] != 'none':
+        _uuid(value['memory_profile_id'])
+    return dict(value)
+
+
+def _chat_configuration(value, workspace, chat_id):
+    _fields(value, ('workspace_id', 'scope', 'chat_id', 'profile_selection',
+                    'inference_performed', 'connection_checked'))
+    if (value['workspace_id'] != workspace or value['scope'] != 'chat_configuration'
+            or value['chat_id'] != chat_id or value['inference_performed'] is not False
+            or value['connection_checked'] is not False):
+        raise ValueError('Invalid chat configuration scope.')
+    selection = value['profile_selection']
+    _fields(selection, ('revision', 'ai_profile_id', 'memory_profile_id'))
+    _revision(selection['revision'], minimum=0)
+    if selection['ai_profile_id'] is not None:
+        _uuid(selection['ai_profile_id'])
+    if selection['memory_profile_id'] != 'none':
+        _uuid(selection['memory_profile_id'])
+    if selection['revision'] == 0 and (selection['ai_profile_id'] is not None
+            or selection['memory_profile_id'] != 'none'):
+        raise ValueError('Invalid initial chat configuration.')
+    return dict(value, profile_selection=dict(selection))
+
+
 def validate_native_chat_configuration(value):
     """One ordinary native chat's saved next-turn selection, never an Agent run."""
     if type(value) is not dict or type(value.get('operation')) is not str:
@@ -661,7 +952,7 @@ def _native_chat_configuration(value, workspace, agent, chat_id):
 
 
 def validate_native_chat_memory_configuration(value):
-    """An ordinary Codex chat's additional read-only memory for its next turn."""
+    """An ordinary native chat's additional read-only memory for its next turn."""
     if type(value) is not dict or type(value.get('operation')) is not str:
         raise ValueError('Invalid native chat memory operation.')
     operation = value['operation']
@@ -671,7 +962,7 @@ def validate_native_chat_memory_configuration(value):
     elif operation != 'read':
         raise ValueError('Invalid native chat memory operation.')
     _fields(value, required)
-    if type(value['agent']) is not str or value['agent'] != 'codex':
+    if type(value['agent']) is not str or value['agent'] not in ('codex', 'pi', 'hermes', 'claude', 'dsh'):
         raise ValueError('Invalid native chat memory agent.')
     _uuid(value['chat_id'])
     if operation == 'select':
@@ -839,18 +1130,17 @@ def _settings(value):
 def _native_capabilities(value):
     """Historical native candidates, independent of text-route availability.
 
-    Only known public projections enter the management tool. Native references are
-    recomputed from the exact provider/model pair; they never become a text
-    model name or imply API entitlement.
+    Only known public projections enter the management tool. Native references
+    retain each Agent's identity rules and do not imply API entitlement.
     """
-    _fields(value, (), ('codex', 'pi', 'hermes'))
+    _fields(value, (), ('codex', 'pi', 'hermes', 'claude'))
     for backend, source in value.items():
         _fields(source, ('enabled', 'source', 'catalogue_available', 'observed_at', 'source_chat_id', 'models'))
         expected = {'codex': 'codex/model/list', 'pi': 'pi/get_available_models',
-                    'hermes': 'hermes/model.options'}[backend]
+                    'hermes': 'hermes/model.options', 'claude': 'claude/sdk-initialize'}[backend]
         if (type(source['enabled']) is not bool or type(source['catalogue_available']) is not bool
                 or source['source'] != expected or type(source['models']) is not list
-                or len(source['models']) > (800 if backend == 'codex' else 4096)):
+                or len(source['models']) > {'codex': 800, 'pi': 4096, 'hermes': 4096, 'claude': 256}[backend]):
             raise ValueError('Invalid native candidates.')
         if source['catalogue_available']:
             if not source['enabled']:
@@ -866,12 +1156,12 @@ def _native_capabilities(value):
         for row in source['models']:
             columns = ('id', 'agent_id', 'model', 'name', 'supported_efforts', 'default_effort', 'explicit_effort_supported')
             extra = {'codex': (), 'pi': ('provider', 'native_thinking_levels', 'effort_source'),
-                     'hermes': ('provider', 'effort_source')}[backend]
+                     'hermes': ('provider', 'effort_source'), 'claude': ()}[backend]
             _fields(row, columns + extra, ('input',) if backend == 'pi' else ())
             if 'input' in row and (type(row['input']) is not list or any(
                     type(item) is not str or item not in ('text', 'image') for item in row['input'])):
                 raise ValueError('Invalid native input modalities.')
-            model = _text(row['model'], 192 if backend == 'codex' else 1024)
+            model = _text(row['model'], 192 if backend in ('codex', 'claude') else 1024)
             if (row['agent_id'] != backend or type(row['id']) is not str or row['id'] in seen
                     or type(row['explicit_effort_supported']) is not bool
                     or type(row['supported_efforts']) is not list or len(row['supported_efforts']) > 64):
@@ -882,6 +1172,12 @@ def _native_capabilities(value):
             if (len(set(row['supported_efforts'])) != len(row['supported_efforts'])
                     or row['explicit_effort_supported'] != bool(row['supported_efforts'])):
                 raise ValueError('Invalid native effort candidates.')
+            if backend == 'claude':
+                if (not re.fullmatch(r'[^\x00-\x20\x7f]{1,192}', model) or row['id'] != 'local/claude/' + model
+                        or row['supported_efforts'] != [] or row['default_effort'] is not None
+                        or row['explicit_effort_supported'] is not False):
+                    raise ValueError('Invalid Claude model-only candidate.')
+                continue
             if backend == 'codex':
                 if not re.fullmatch(r'[^\x00-\x20\x7f]{1,192}', model) or row['id'] != 'local/codex/'+model:
                     raise ValueError('Invalid Codex model identity.')
@@ -981,10 +1277,16 @@ def _memory_fields(value, *, partial=False):
                 or any((ord(c) < 32 and ord(c) not in (9, 10, 13)) or ord(c) == 127 for c in text)):
             raise ValueError('Invalid memory text.')
         text.encode('utf-8', 'strict')
-    for key, allowed in (('program', ('hindsight',)), ('connection_id', ('local/hindsight',)),
+    for key, allowed in (('program', ('hindsight', 'hermes_files', 'mem0')),
+                         ('connection_id', ('local/hindsight', 'local/hermes-files', 'local/mem0')),
                          ('mode', ('read_only', 'read_write'))):
         if key in result and (type(result[key]) is not str or result[key] not in allowed):
             raise ValueError('Invalid memory binding.')
+    if not partial:
+        connections = {'hindsight': 'local/hindsight', 'hermes_files': 'local/hermes-files', 'mem0': 'local/mem0'}
+        if (result['connection_id'] != connections[result['program']] or
+                result['program'] != 'hindsight' and result['mode'] != 'read_only'):
+            raise ValueError('Invalid memory program binding.')
     return result
 
 
@@ -1075,6 +1377,94 @@ class ManagementClientError(RuntimeError):
         return value
 
 
+def _external_origin(value):
+    match = re.fullmatch(r'http://127\.0\.0\.1:([1-9][0-9]{0,4})', value) if type(value) is str else None
+    if match is None or int(match[1]) > 65535:
+        raise ValueError('Invalid external work origin.')
+
+
+def _external_text(value, maximum, *, required=False):
+    if value is None and not required:
+        return
+    if (type(value) is not str or len(value) > maximum or required and not value
+            or any(ord(c) < 32 or ord(c) == 127 or 0xd800 <= ord(c) <= 0xdfff for c in value)):
+        raise ValueError('Invalid external work text.')
+
+
+def _external_report(value, origin):
+    _fields(value, ('schema_version', 'provider', 'scope', 'origin', 'snapshot_at',
+        'native_event_freshness', 'native_executor_verified', 'capabilities', 'complete', 'reason', 'works'))
+    if (type(value['schema_version']) is not int or value['schema_version'] != 1
+            or value['provider'] != 'hapi' or value['scope'] != 'hapi_hub_summary'
+            or value['origin'] != origin or value['native_event_freshness'] != 'unknown'
+            or value['native_executor_verified'] is not False or value['complete'] is not True
+            or value['reason'] is not None):
+        raise ValueError('Invalid external work report scope.')
+    _fields(value['capabilities'], ('send', 'approve', 'stop'))
+    if any(item is not False for item in value['capabilities'].values()):
+        raise ValueError('Unproven external work action.')
+    stamp = value['snapshot_at']
+    _external_text(stamp, 40, required=True)
+    if (not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)', stamp)
+            or datetime.fromisoformat(stamp.replace('Z', '+00:00')).utcoffset() != timedelta(0)):
+        raise ValueError('Invalid external work observation time.')
+    if type(value['works']) is not list or len(value['works']) > 500:
+        raise ValueError('Invalid external work count.')
+    seen = set()
+    for row in value['works']:
+        _fields(row, ('id', 'metadata', 'active', 'thinking', 'activeAt', 'updatedAt',
+            'pendingRequestsCount', 'backgroundTaskCount', 'model', 'modelReasoningEffort', 'effort',
+            'reported_status', 'url'))
+        _external_text(row['id'], 256, required=True)
+        if row['id'] in seen or row['id'] in ('.', '..'):
+            raise ValueError('Invalid external session identity.')
+        seen.add(row['id'])
+        metadata = row['metadata']
+        if metadata is not None:
+            _fields(metadata, ('name', 'path', 'flavor', 'agentSessionId'))
+            for key, limit in (('name', 512), ('path', 4096), ('flavor', 64), ('agentSessionId', 256)):
+                _external_text(metadata[key], limit)
+        if type(row['active']) is not bool or type(row['thinking']) is not bool:
+            raise ValueError('Invalid external reported state.')
+        for key in ('activeAt', 'updatedAt', 'pendingRequestsCount', 'backgroundTaskCount'):
+            number = row[key]
+            counter = key.endswith('Count')
+            if (type(number) not in (int, float) or not 0 <= number <= (1_000_000 if counter else MAX_REVISION)
+                    or counter and type(number) is not int):
+                raise ValueError('Invalid external report number.')
+        for key in ('model', 'modelReasoningEffort', 'effort'):
+            _external_text(row[key], 256)
+        status = ('inactive' if not row['active'] else 'needs_user' if row['pendingRequestsCount']
+                  else 'thinking' if row['thinking'] else 'active')
+        if row['reported_status'] != status or row['url'] != origin+'/sessions/'+quote(row['id'], safe=''):
+            raise ValueError('Invalid external reported status or session URL.')
+
+
+def _external_work(value, workspace):
+    _fields(value, ('schema_version', 'workspace_id', 'provider', 'scope', 'revision',
+                    'origin', 'state', 'reason', 'report'))
+    if (type(value['schema_version']) is not int or value['schema_version'] != 1
+            or value['workspace_id'] != workspace or value['provider'] != 'hapi'
+            or value['scope'] != 'external_hub' or type(value['revision']) is not int
+            or not 0 <= value['revision'] <= MAX_REVISION
+            or value['state'] not in ('unconfigured', 'unverified', 'observed', 'unavailable')):
+        raise ValueError('Invalid external work scope.')
+    state = value['state']
+    if state == 'unconfigured':
+        if any(value[key] is not None for key in ('origin', 'reason', 'report')):
+            raise ValueError('Invalid unconfigured external work.')
+    else:
+        _external_origin(value['origin'])
+        if state == 'observed':
+            if value['reason'] is not None:
+                raise ValueError('Invalid observed external work.')
+            _external_report(value['report'], value['origin'])
+        elif value['report'] is not None or (value['reason'] not in _EXTERNAL_REASONS
+                if state == 'unavailable' else value['reason'] is not None):
+            raise ValueError('Invalid unverified external work.')
+    return value
+
+
 class ManagementClient:
     def __init__(self, *, port, workspace_id):
         if type(port) is not int or not 1 <= port <= 65535:
@@ -1091,7 +1481,8 @@ class ManagementClient:
         if mutation:
             headers.update({'Content-Type': 'application/json',
                 'Origin': 'http://127.0.0.1:' + str(self.port), 'X-OneAI-CSRF': csrf})
-        timeout = 60 if method == 'POST' and path == NATIVE_MODEL_PREPARATION else 10
+        timeout = 60 if (method == 'POST' and path == NATIVE_MODEL_PREPARATION
+            or path.split('?', 1)[0] == NATIVE_TASKS) else 10
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=timeout)
         try:
             connection.request(method, path, body=data, headers=headers)
@@ -1099,6 +1490,8 @@ class ManagementClient:
             limit = (
                 MARKDOWN_RESPONSE_BYTES
                 if _markdown_route(path)
+                else EXTERNAL_WORK_RESPONSE_BYTES
+                if path == EXTERNAL_WORK_STATUS
                 else MEMORY_RESPONSE_BYTES
                 if path == MEMORY_PROFILES
                 else MAX_RESPONSE_BYTES
@@ -1111,6 +1504,24 @@ class ManagementClient:
             if type(value) is not dict:
                 raise ValueError('Invalid local response.')
             if not 200 <= response.status < 300:
+                if path == EXTERNAL_WORK_STATUS:
+                    outcome = 'unknown' if mutation else 'unavailable'
+                    if 'workspace_id' in value and value['workspace_id'] != self.workspace_id:
+                        raise ManagementClientError('workspace_changed', outcome)
+                    code = value.get('code')
+                    raise ManagementClientError(code if value.get('workspace_id') == self.workspace_id
+                        and response.status == 409 and type(code) is str
+                        and code in _EXTERNAL_CONFLICTS else 'external_work_unavailable', outcome)
+                if re.fullmatch(r'/api/chats/[0-9a-f-]{36}' + re.escape(CHAT_CONFIGURATION_SUFFIX), path):
+                    # Legacy errors carry no scoped configuration identity.
+                    # Never expose them or treat a failed PUT as proof of no write.
+                    raise ManagementClientError('chat_configuration_unconfirmed',
+                        'unknown' if mutation else 'unavailable')
+                if path.split('?', 1)[0] == NATIVE_TASKS:
+                    outcome = 'unknown' if mutation else 'unavailable'
+                    if 'workspace_id' in value and value['workspace_id'] != self.workspace_id:
+                        raise ManagementClientError('workspace_changed', outcome)
+                    raise ManagementClientError('native_task_unavailable', outcome)
                 if path.split('?', 1)[0] == NATIVE_CHAT_MEMORY_CONFIGURATION:
                     outcome = 'unknown' if mutation else 'unavailable'
                     if value.get('workspace_id') != self.workspace_id:
@@ -1313,6 +1724,36 @@ class ManagementClient:
             raise ManagementClientError('service_identity_unavailable', 'not_sent')
         return token
 
+    def native_task(self, operation, agent, chat_id, client_id, *,
+                    text=_MISSING_NATIVE_TASK_FIELD, material_refs=_MISSING_NATIVE_TASK_FIELD):
+        fields = dict(operation=operation, agent=agent, chat_id=chat_id, client_id=client_id)
+        if text is not _MISSING_NATIVE_TASK_FIELD:
+            fields['text'] = text
+        if material_refs is not _MISSING_NATIVE_TASK_FIELD:
+            fields['material_refs'] = material_refs
+        try:
+            fields = validate_native_task(fields)
+        except (ValueError, TypeError, UnicodeError, AttributeError):
+            raise ManagementClientError('invalid_native_task_arguments', 'not_sent') from None
+        writing = operation == 'send'
+        try:
+            token = self._binding()
+        except ManagementClientError as error:
+            raise ManagementClientError(error.code, 'not_sent' if writing else 'unavailable') from None
+        if writing:
+            value = self._request('POST', NATIVE_TASKS,
+                body={key: item for key, item in fields.items() if key != 'operation'}, csrf=token)
+        else:
+            value = self._request('GET', NATIVE_TASKS + '?' + urlencode({
+                key: fields[key] for key in ('agent', 'chat_id', 'client_id')}))
+        outcome = 'unknown' if writing else 'unavailable'
+        if value.get('workspace_id') != self.workspace_id:
+            raise ManagementClientError('workspace_changed', outcome)
+        try:
+            return _native_task_response(value, self.workspace_id, fields)
+        except (ValueError, TypeError, UnicodeError, AttributeError, KeyError, OverflowError):
+            raise ManagementClientError('invalid_native_task_response', outcome) from None
+
     def _inventory(self, value):
         if value.get('workspace_id') != self.workspace_id:
             raise ManagementClientError('workspace_changed', 'unavailable')
@@ -1336,6 +1777,24 @@ class ManagementClient:
     def list_profiles(self):
         self._binding()
         return self._inventory(self._request('GET', '/api/management/ai-profiles'))
+
+    def conversations_list(self, query='', agent='all', offset=0, limit=20):
+        try:
+            fields = validate_conversations_query(query, agent, offset, limit)
+        except (ValueError, TypeError, UnicodeError):
+            raise ManagementClientError('invalid_conversation_directory_arguments', 'not_sent') from None
+        try:
+            self._binding()
+            value = self._request('GET', CONVERSATIONS + '?' + urlencode(fields))
+        except ManagementClientError as error:
+            code = 'workspace_changed' if error.code == 'workspace_changed' else 'conversation_directory_unavailable'
+            raise ManagementClientError(code, 'unavailable') from None
+        if value.get('workspace_id') != self.workspace_id:
+            raise ManagementClientError('workspace_changed', 'unavailable')
+        try:
+            return _conversation_directory(value, self.workspace_id, fields)
+        except (ValueError, TypeError, UnicodeError, KeyError, AttributeError):
+            raise ManagementClientError('invalid_conversation_directory_response', 'unavailable') from None
 
     def markdown_chats_list(self):
         self._binding()
@@ -1363,6 +1822,13 @@ class ManagementClient:
             method = 'POST'
             path = MARKDOWN_CHATS + '/folders'
             body = {'path': fields['path']}
+        elif action == 'move':
+            method = 'POST'
+            path = MARKDOWN_CHATS + '/move'
+            body = {key: fields[key] for key in (
+                'binding_id', 'expected_head_id', 'source_path',
+                'source_sha256', 'target_folder',
+            )}
         elif action == 'preview':
             method = 'POST'
             path = '/api/chats/' + fields['chat_id'] + '/markdown-preview'
@@ -1414,6 +1880,18 @@ class ManagementClient:
                 _markdown_folder_path(folder['path'], create=True)
                 if folder['path'] != fields['path'] or type(folder['created']) is not bool:
                     raise ValueError('The Markdown folder acknowledgement changed.')
+            elif action == 'move':
+                _fields(value, ('workspace_id', 'binding_id', 'head_id',
+                                'from_path', 'to_path', 'sha256', 'size_bytes', 'moved'))
+                if (value['binding_id'] != fields['binding_id']
+                        or value['head_id'] != fields['expected_head_id']
+                        or value['from_path'] != fields['source_path']
+                        or value['to_path'] != _markdown_move_target(fields)
+                        or value['sha256'] != fields['source_sha256']
+                        or type(value['size_bytes']) is not int
+                        or not 0 <= value['size_bytes'] <= 512 * 1024
+                        or value['moved'] is not True):
+                    raise ValueError('The Markdown move acknowledgement changed.')
             elif action in ('sync_preview', 'sync_read'):
                 _fields(value, ('workspace_id', 'update', 'preview'))
                 update = _markdown_update(value['update'], self.workspace_id)
@@ -1479,9 +1957,136 @@ class ManagementClient:
             raise ManagementClientError('invalid_markdown_response', outcome) from None
         return (
             dict(value, ok=True, outcome='acknowledged', automatically_retried=False)
-            if action in ('confirm', 'sync_confirm')
+            if action in ('confirm', 'sync_confirm', 'move')
             else value
         )
+
+    def _external_binding(self, outcome):
+        try:
+            return self._binding()
+        except ManagementClientError as error:
+            raise ManagementClientError('workspace_changed' if error.code == 'workspace_changed'
+                else 'external_work_binding_unavailable', outcome) from None
+
+    def _external_value(self, value, outcome):
+        if type(value) is dict and value.get('workspace_id') != self.workspace_id:
+            raise ManagementClientError('workspace_changed', outcome)
+        try:
+            return _external_work(value, self.workspace_id)
+        except (ValueError, TypeError, UnicodeError, KeyError, AttributeError, OverflowError):
+            raise ManagementClientError('invalid_external_work_response', outcome) from None
+
+    def external_work_status(self, refresh=False):
+        """Read cached Hub metadata; only explicit refresh performs one Hub observation."""
+        if type(refresh) is not bool:
+            raise ManagementClientError('invalid_external_work_arguments', 'not_sent')
+        token = self._external_binding('not_sent' if refresh else 'unavailable')
+        value = self._external_value(self._request('GET', EXTERNAL_WORK_STATUS),
+                                     'not_sent' if refresh else 'unavailable')
+        if not refresh or value['state'] == 'unconfigured':
+            return value
+        observed = self._external_value(self._request('POST', EXTERNAL_WORK_STATUS,
+            body={'operation': 'refresh', 'expected_revision': value['revision']}, csrf=token), 'unknown')
+        if (observed['revision'] != value['revision'] or observed['origin'] != value['origin']
+                or observed['state'] not in ('observed', 'unavailable')):
+            raise ManagementClientError('external_work_refresh_unconfirmed', 'unknown')
+        return observed
+
+    def configure_external_work(self, operation, expected_revision, *, origin=None, bearer_token=None):
+        """Explicit host utility only. Never exposed as an MCP tool or retried."""
+        try:
+            if operation not in ('bind', 'clear'):
+                raise ValueError('Invalid external configuration operation.')
+            _revision(expected_revision, minimum=0)
+            if expected_revision >= MAX_REVISION:
+                raise ValueError('External configuration revision exhausted.')
+            body = {'operation': operation, 'expected_revision': expected_revision}
+            if operation == 'bind':
+                _external_origin(origin)
+                if (type(bearer_token) is not str or not 1 <= len(bearer_token) <= 8192
+                        or any(not 33 <= ord(c) <= 126 for c in bearer_token)):
+                    raise ValueError('Invalid external bearer.')
+                body.update(origin=origin, bearer_token=bearer_token)
+            elif origin is not None or bearer_token is not None:
+                raise ValueError('Unexpected external configuration fields.')
+        except (ValueError, TypeError, UnicodeError):
+            raise ManagementClientError('invalid_external_work_configuration', 'not_sent') from None
+        token = self._external_binding('not_sent')
+        value = self._external_value(self._request('POST', EXTERNAL_WORK_STATUS, body=body, csrf=token), 'unknown')
+        if (value['revision'] != expected_revision+1 or value['origin'] != origin
+                or value['state'] != ('unverified' if operation == 'bind' else 'unconfigured')):
+            raise ManagementClientError('external_work_configuration_unconfirmed', 'unknown')
+        return value
+
+    def work_status(self):
+        """Observe owned execution caches; never open or probe an Agent."""
+        self._binding()
+        value = self._request('GET', WORK_STATUS)
+        if value.get('workspace_id') != self.workspace_id:
+            raise ManagementClientError('workspace_changed', 'unavailable')
+        try:
+            _fields(value, ('schema_version', 'workspace_id', 'scope', 'snapshot_at',
+                'external_work', 'complete', 'agents', 'works'))
+            if (type(value['schema_version']) is not int or value['schema_version'] != 1
+                    or value['scope'] != 'rabbit_owned_cache' or value['external_work'] != 'not_observed'
+                    or type(value['complete']) is not bool):
+                raise ValueError('Invalid work status scope.')
+            stamp = value['snapshot_at']
+            _text(stamp, 40)
+            if datetime.fromisoformat(stamp.replace('Z', '+00:00')).utcoffset() != timedelta(0):
+                raise ValueError('Invalid snapshot time.')
+            agents, works = value['agents'], value['works']
+            if type(agents) is not list or len(agents) != 5 or type(works) is not list or len(works) > 7:
+                raise ValueError('Invalid work list.')
+            by_agent = {}
+            def reason(code):
+                if code is not None and (type(code) is not str or not re.fullmatch(r'[a-z][a-z_]{0,47}', code)):
+                    raise ValueError('Invalid observation reason.')
+            for row in agents:
+                _fields(row, ('agent', 'enabled', 'complete', 'reason'))
+                if (type(row['agent']) is not str or row['agent'] not in NATIVE_CHAT_AGENTS
+                        or row['agent'] in by_agent or type(row['enabled']) is not bool
+                        or type(row['complete']) is not bool):
+                    raise ValueError('Invalid agent observation.')
+                reason(row['reason']); by_agent[row['agent']] = row
+            counts, seen = dict.fromkeys(NATIVE_CHAT_AGENTS, 0), set()
+            for row in works:
+                _fields(row, ('agent', 'role', 'chat_id', 'owner', 'complete', 'reason',
+                    'status', 'connection_state', 'epoch', 'native_session_id', 'pending_requests'))
+                agent, role = row['agent'], row['role']
+                if (type(agent) is not str or agent not in by_agent or not by_agent[agent]['enabled']
+                        or role not in ('chat', 'specialist') or row['owner'] != 'rabbit'
+                        or type(row['complete']) is not bool):
+                    raise ValueError('Invalid owned work.')
+                if role == 'specialist':
+                    if agent != 'codex' or row['chat_id'] is not None: raise ValueError('Invalid specialist.')
+                else:
+                    _uuid(row['chat_id']); counts[agent] += 1
+                    if counts[agent] > (2 if agent == 'codex' else 1): raise ValueError('Work limit.')
+                key = agent, role, row['chat_id']
+                if key in seen: raise ValueError('Duplicate work.')
+                seen.add(key); reason(row['reason'])
+                if (row['status'] not in ('running', 'needs_user', 'idle', 'unknown')
+                        or row['connection_state'] not in ('not_open', 'opening', 'ready', 'failed', 'closed', 'unknown')
+                        or row['epoch'] is not None and (type(row['epoch']) is not str
+                            or not re.fullmatch(r'[a-f0-9]{32}', row['epoch']))
+                        or row['native_session_id'] is not None and (type(row['native_session_id']) is not str
+                            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}', row['native_session_id']))
+                        or row['pending_requests'] is not None and (type(row['pending_requests']) is not int
+                            or not 0 <= row['pending_requests'] <= 129)):
+                    raise ValueError('Invalid work observation.')
+                if (not row['complete'] and row['status'] != 'unknown'
+                        or not row['complete'] and by_agent[agent]['complete']
+                        or row['status'] == 'idle' and (row['connection_state'] != 'ready'
+                            or row['epoch'] is None or row['native_session_id'] is None
+                            or row['pending_requests'] != 0)
+                        or row['status'] == 'needs_user' and not row['pending_requests']):
+                    raise ValueError('Unproven work state.')
+            if value['complete'] != all(row['complete'] for row in agents):
+                raise ValueError('Invalid observation completeness.')
+        except (ValueError, TypeError, UnicodeError, KeyError, AttributeError):
+            raise ManagementClientError('invalid_work_status_response', 'unavailable') from None
+        return value
 
     def list_native_model_connections(self):
         self._binding()
@@ -1502,6 +2107,45 @@ class ManagementClient:
         except (ValueError, TypeError, UnicodeError, AttributeError):
             raise ManagementClientError('invalid_native_model_response', 'unavailable') from None
         return value
+
+    def chat_configuration(self, operation, chat_id, **selection):
+        try:
+            intent = validate_chat_configuration(dict(operation=operation, chat_id=chat_id, **selection))
+        except (ValueError, TypeError, UnicodeError, AttributeError):
+            raise ManagementClientError('invalid_chat_configuration_arguments', 'not_sent') from None
+        mutation = operation == 'select'
+        try:
+            token = self._binding()
+        except ManagementClientError as error:
+            raise ManagementClientError(error.code, 'not_sent' if mutation else 'unavailable') from None
+        path = '/api/chats/' + chat_id + CHAT_CONFIGURATION_SUFFIX
+        try:
+            value = self._request('GET', path)
+        except ManagementClientError as error:
+            raise ManagementClientError(error.code, 'not_sent' if mutation else 'unavailable') from None
+        try:
+            current = _chat_configuration(value, self.workspace_id, chat_id)
+        except (ValueError, TypeError, UnicodeError, AttributeError):
+            raise ManagementClientError('invalid_chat_configuration_response', 'not_sent' if mutation else 'unavailable') from None
+        if not mutation:
+            return current
+        previous = current['profile_selection']
+        if previous['revision'] != intent['expected_revision']:
+            raise ManagementClientError('chat_configuration_conflict', 'rejected', current_configuration=current)
+        chosen = {key: intent.get(key, previous[key]) for key in ('ai_profile_id', 'memory_profile_id')}
+        changed = any(chosen[key] != previous[key] for key in chosen)
+        expected = previous['revision'] + int(changed)
+        if expected > MAX_REVISION:
+            raise ManagementClientError('chat_configuration_revision_limit', 'not_sent')
+        body = {key: item for key, item in intent.items() if key in ('ai_profile_id', 'memory_profile_id')}
+        value = self._request('PUT', path, body=dict(body, revision=previous['revision']), csrf=token)
+        try:
+            saved = _chat_configuration(value, self.workspace_id, chat_id)
+            if saved['profile_selection'] != dict(chosen, revision=expected):
+                raise ValueError('Invalid chat selection acknowledgement.')
+        except (ValueError, TypeError, UnicodeError, AttributeError):
+            raise ManagementClientError('invalid_chat_configuration_response', 'unknown') from None
+        return dict(saved, ok=True, outcome='acknowledged', automatically_retried=False)
 
     def native_chat_configuration(self, operation, agent, chat_id, **selection):
         try:
@@ -1910,6 +2554,46 @@ class ManagementClient:
         except (ValueError, TypeError, UnicodeError, AttributeError):
             raise ManagementClientError('invalid_memory_management_response', 'unavailable') from None
         return value
+
+    def memory_document(self, operation, profile_id, name, *, text=None, expected_sha256=None):
+        """One explicit owned document read/save; no inference and no retry."""
+        writing = operation == 'write'
+        try:
+            _uuid(profile_id)
+            if operation not in ('read', 'write') or name not in ('MEMORY.md', 'USER.md'):
+                raise ValueError('Invalid memory document.')
+            body = dict(profile_id=profile_id, name=name)
+            if writing:
+                if (type(text) is not str or len(text) > 8192 or
+                        any(ord(c) < 32 and c not in '\t\r\n' or ord(c) == 127 for c in text) or
+                        type(expected_sha256) is not str or not re.fullmatch(r'[a-f0-9]{64}', expected_sha256)):
+                    raise ValueError('Invalid memory document save.')
+                text.encode('utf-8', 'strict')
+                body.update(text=text, expected_sha256=expected_sha256)
+            elif text is not None or expected_sha256 is not None:
+                raise ValueError('Unexpected memory document save fields.')
+        except (ValueError, TypeError, UnicodeError):
+            raise ManagementClientError('invalid_memory_document_arguments', 'not_sent') from None
+        token = self._binding()
+        value = self._request('POST', MEMORY_DOCUMENTS, body=body, csrf=token) if writing else self._request(
+            'GET', MEMORY_DOCUMENTS + '?' + urlencode(body))
+        try:
+            _fields(value, ('scope', 'profile_id', 'program', 'document', 'workspace_id'))
+            document = value['document']
+            _fields(document, ('name', 'text', 'sha256', 'size_bytes'))
+            content = document['text']
+            if (value['workspace_id'] != self.workspace_id or value['scope'] != 'memory_document'
+                    or value['profile_id'] != profile_id or value['program'] != 'hermes_files'
+                    or document['name'] != name or type(content) is not str or len(content) > 8192):
+                raise ValueError('Invalid memory document response.')
+            raw = content.encode('utf-8', 'strict')
+            if (document['sha256'] != hashlib.sha256(raw).hexdigest()
+                    or type(document['size_bytes']) is not int or document['size_bytes'] != len(raw)
+                    or writing and content != text):
+                raise ValueError('Invalid memory document receipt.')
+        except (ValueError, TypeError, UnicodeError):
+            raise ManagementClientError('invalid_memory_document_response', 'unknown' if writing else 'unavailable') from None
+        return dict(value, ok=True, outcome='acknowledged' if writing else 'read', automatically_retried=False)
 
     def check_memory_connection(self, profile_id, revision):
         """Read local service metadata once; never provision or recall a Bank."""

@@ -35,6 +35,8 @@
     let enabled = true, visible = false, destroyed = false, language = "zh-CN", generation = 0, writeVersion = 0, reading = false, writing = false, posting = false, readPending = false, timer = null;
     let snapshot = null, readable = false, errorText = "", notice = "", displayScope = null;
     let openingForSend = false, autoOpenBlocked = false, viewVersion = 0, filePicker = null;
+    const memorySelection = window.RabbitProfiles?.createNativeMemorySelection?.({ agent: "dsh" });
+    let memorySelectionUnsupported = false;
     let selectedMemory = null, memoryRows = [], memoryReadable = false, memoryReading = false, memoryRequest = 0, memoryVersion = 0, memoryTextVersion = 0, memoryError = "", memorySourcesError = "";
     const memoryEvidence = new Map(), memoryCards = new Map(), memoryTexts = new Map();
     const requestNodes = new Map(), recordNodes = new Map(), burned = new Set(); let digests = new Map();
@@ -74,11 +76,21 @@
           || snapshot?.activity.state !== "idle" || Object.values(answerJournal).includes("submitted_unknown")) return null;
       return { key: canonical([workspace, chatId, generation, viewVersion, draftRevision, draft, draftMaterials, selectedMemory, memoryVersion, snapshot?.epoch, snapshot?.binding?.sessionId]), refs: materialRefs(draftMaterials) };
     }
-    function save() { if (!storageKey || storageInvalid) return false; try { window.sessionStorage.setItem(storageKey, encode(materialDraft ? { version: 3, draft, pending, answer_journal: answerJournal, selected_memory: selectedMemory, material_refs: draftMaterials, draft_revision: draftRevision } : selectedMemory || pending?.memory_profile ? { version: 2, draft, pending, answer_journal: answerJournal, selected_memory: selectedMemory } : { version: 1, draft, pending, answer_journal: answerJournal })); return true; } catch (_) { return false; } }
+    function save() { if (!storageKey || storageInvalid) return false; try { window.sessionStorage.setItem(storageKey, encode({ ...(materialDraft ? { version: 3, draft, pending, answer_journal: answerJournal, selected_memory: selectedMemory, material_refs: draftMaterials, draft_revision: draftRevision } : selectedMemory || pending?.memory_profile ? { version: 2, draft, pending, answer_journal: answerJournal, selected_memory: selectedMemory } : { version: 1, draft, pending, answer_journal: answerJournal }), ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}) })); return true; } catch (_) { return false; } }
     function materialsReady() { return !draftMaterials.length || !!materialDraft && !!nativeMaterials && materialsEnabled; }
-    function memoryReady() { return selectedMemory === null || !!window.RabbitNativeMemory && Object.hasOwn(snapshot || {}, "memory_intents") && memoryReadable && memoryRows.some(row => row.mode === "read_only" && canonical(row) === canonical(selectedMemory)); }
+    function memorySelectionReady() { return !memorySelectionUnsupported && (!memorySelection || memorySelection.ready()); }
+    function memoryControlled() { return memorySelectionUnsupported || memorySelection?.controlled() === true; }
+    function memoryBlocked() { return !enabled || destroyed || writing || !!pending || storageInvalid || unsettled() || pendingRequest() || snapshot?.activity.state !== "idle"; }
+    function memoryReady() { return memorySelectionReady() && (!memorySelection || memorySelection.matchesProfile(selectedMemory)) && (selectedMemory === null || !!window.RabbitNativeMemory && Object.hasOwn(snapshot || {}, "memory_intents") && memoryReadable && memoryRows.some(row => row.mode === "read_only" && canonical(row) === canonical(selectedMemory))); }
+    function syncMemorySelection() {
+      const blocked = memoryBlocked() || !readable || posting || openingForSend || !!filePicker?.busy() || snapshot?.disconnect_unconfirmed === true;
+      memorySelection?.synchronize({ blocked, save,
+        apply: value => { const previous = selectedMemory; selectedMemory = value; if (!save()) { selectedMemory = previous; return false; } memoryVersion++; return true; } });
+      if (memorySelection?.takeCatalogRefresh(readable && !writing && !posting && !openingForSend && !memoryReading)) { memoryReadable = false; void loadMemoryProfiles(); }
+    }
+    async function loadInitialMemoryProfiles() { if (!memorySelection?.managed() || memorySelection.takeCatalogRefresh(readable)) await loadMemoryProfiles(); }
     memorySelect.addEventListener("change", () => {
-      if (!enabled || destroyed || writing || pending || storageInvalid || unsettled() || pendingRequest() || snapshot?.activity.state !== "idle") { render(); return; }
+      if (memoryControlled() || memoryBlocked()) { render(); return; }
       const row = memoryRows.find(value => value.id === memorySelect.value && value.mode === "read_only");
       if (memorySelect.value && (!memoryReadable || !row)) { render(); return; }
       const previous = selectedMemory; selectedMemory = row ? memoryChoice(row) : null; memoryVersion++;
@@ -86,8 +98,9 @@
     });
     async function loadMemoryProfiles() {
       syncWorkspace(); if (destroyed || !enabled || !workspace || writing || !Object.hasOwn(snapshot || {}, "memory_intents")) return;
-      const stamp = generation, request = ++memoryRequest, writes = writeVersion, version = memoryVersion, identity = encode([snapshot?.epoch, snapshot?.binding?.sessionId]);
-      const current = () => sameScope(stamp) && request === memoryRequest && writes === writeVersion && version === memoryVersion && identity === encode([snapshot?.epoch, snapshot?.binding?.sessionId]);
+      memorySelection?.catalogStarted();
+      const stamp = generation, request = ++memoryRequest, writes = writeVersion, version = memoryVersion;
+      const current = () => sameScope(stamp) && request === memoryRequest && writes === writeVersion && version === memoryVersion;
       memoryReading = true; render();
       try {
         const value = await api("/api/management/memory-profiles"); if (!current()) return;
@@ -103,6 +116,7 @@
       storageKey = value ? "rabbit.dsh-native.page.v1." + encodeURIComponent(value) + "." + chatId : "";
       draft = ""; pending = null; answerJournal = Object.create(null); storageInvalid = false; snapshot = null; readable = false; errorText = notice = ""; reading = writing = posting = readPending = false; digests.clear(); requestNodes.clear(); recordNodes.clear(); burned.clear();
       draftMaterials = []; draftRevision = 0; materialError = ""; materialTexts.clear(); nativeMaterials?.setScope(value);
+      memorySelectionUnsupported = false; memorySelection?.reset(undefined, { workspace, chatId });
       selectedMemory = null; memoryRows = []; memoryReadable = memoryReading = false; memoryError = memorySourcesError = ""; memoryRequest++; memoryVersion++; memoryTextVersion++; memoryEvidence.clear(); memoryCards.clear(); memoryTexts.clear();
       try {
         const stored = storageKey && JSON.parse(window.sessionStorage.getItem(storageKey) || "null");
@@ -120,6 +134,7 @@
               pending = { client_id: item.client_id, message: item.message, request_sha256: item.request_sha256, status: item.status, memory_profile: memoryChoice(item.memory_profile), body_json: item.body_json, intent_sha256: item.intent_sha256, journal_sha256: item.journal_sha256, ...(item.derived_sha256 === undefined ? {} : { derived_sha256: item.derived_sha256 }) };
             } else { if (!sha(item.request_sha256)) throw Error(); pending = { client_id: item.client_id, message: item.message, request_sha256: item.request_sha256, status: item.status }; }
           }
+          if (Object.hasOwn(stored, "memory_selection")) { if (!memorySelection) throw Error(); memorySelection.reset(stored.memory_selection, { workspace, chatId }); }
           for (const [digest, status] of Object.entries(stored.answer_journal)) { if (!sha(digest) || status !== "submitted_unknown") throw Error(); answerJournal[digest] = status; }
         }
       } catch (_) { storageInvalid = true; errorText = "浏览器保存的DSH回执无法读取；原记录保留，尚未提交。"; }
@@ -298,7 +313,7 @@
     function idle() { return ready() && nativeId(snapshot?.binding?.sessionId) && snapshot?.activity.state === "idle" && !unsettled() && !pendingRequest(); }
     // Only the Send gesture may connect a confirmed unopened, idle session.
     function canOpenForSend() {
-      return !filePicker?.busy() && enabled && !destroyed && visible && !root.hidden && !document.hidden && readable && !autoOpenBlocked
+      return memorySelectionReady() && !filePicker?.busy() && enabled && !destroyed && visible && !root.hidden && !document.hidden && readable && !autoOpenBlocked
         && snapshot?.connection.state === "not_open" && !snapshot.connection.problem && snapshot.activity.state === "idle"
         && !pending && !unsettled() && !pendingRequest() && !storageInvalid;
     }
@@ -355,6 +370,7 @@
       await updateMemoryEvidence(value, current); if (!current()) return;
       await updateMaterialEvidence(value, current); if (!current()) return;
       if (snapshot && (snapshot.epoch !== value.epoch || snapshot.binding?.sessionId !== value.binding?.sessionId)) { requestNodes.clear(); burned.clear(); }
+      if (memorySelection) memorySelection.observe(value); else if (Object.hasOwn(value, "memory_selection") || Object.hasOwn(value, "memory_selection_error")) memorySelectionUnsupported = true;
       settle(value); if (!storageInvalid) errorText = ""; snapshot = value; digests = next; readable = true;
     }
     function fail(error, fallback) { const message = String(error?.message || ""); errorText = message && message.length < 300 ? message : fallback; onError(error); }
@@ -414,6 +430,7 @@
       if (!object(value) || value.workspace_id !== workspace || !workspace || value.chat_id !== chatId || !enabled || destroyed || filePicker?.busy() || writing || pending || storageInvalid || unsettled() || pendingRequest() || snapshot?.activity.state === "running" || snapshot?.activity.state === "unknown" || draft !== "" || input.value !== "" || draftMaterials.length) throw Error("DSH原生草稿已有内容、请求尚未结束或所属对话已变化；没有覆盖。");
       if (Object.hasOwn(value, "ai_profile")) throw Error("DSH原生对话沿用本机配置；目标模型配置没有放入草稿。");
       const hasMemory = Object.hasOwn(value, "memory_profile"), memory = hasMemory ? value.memory_profile === null ? null : memoryChoice(value.memory_profile) : selectedMemory;
+      if (hasMemory && memoryControlled() && (!memorySelectionReady() || !memorySelection?.matchesProfile(memory))) throw Error("DSH下轮记忆由专员管理；交接选择不同或尚未核实，原草稿保留。");
       if (hasMemory && selectedMemory !== null && canonical(memory) !== canonical(selectedMemory)) throw Error("DSH原生对话已有不同的共享记忆选择；没有覆盖。");
       const refs = materialRefs(value.material_refs);
       if (!text(value.text) || !(value.text.trim() || value.text === "" && (refs.length || hasMemory)) || typeof TextEncoder !== "function" || new TextEncoder().encode(value.text).length > 128 * 1024) throw Error("交接文字无效或超过DSH发送容量。");
@@ -622,7 +639,7 @@
       statusCard.hidden = typeof renderStatus !== "function"; connection.hidden = !statusCard.hidden;
       if (fallbackTitle) fallbackTitle.textContent = tr("备用选择", "Fallback choices");
       if (statusCard.hidden) return;
-      const status = !readable || storageInvalid || autoOpenBlocked || snapshot?.disconnect_unconfirmed === true ? tr("待核对", "Needs verification")
+      const status = !memorySelectionReady() || selectedMemory !== null && !memoryReady() || !readable || storageInvalid || autoOpenBlocked || snapshot?.disconnect_unconfirmed === true ? tr("待核对", "Needs verification")
         : openingForSend || snapshot?.connection.state === "opening" ? tr("正在连接", "Connecting")
         : snapshot?.connection.state === "failed" ? tr("连接失败", "Connection failed")
         : pendingRequest() ? tr("等待确认", "Waiting for confirmation")
@@ -630,13 +647,12 @@
         : pending || unsettled() ? tr("待核对", "Needs verification")
         : idle() ? tr("空闲", "Idle")
         : ["not_open", "closed"].includes(snapshot?.connection.state) ? tr("未连接", "Not connected") : tr("待核对", "Needs verification");
-      const inherited = tr("沿用原生配置", "Use native settings");
-      renderStatus(statusCard, { agent: "DeepSeek Harness", model: inherited, effort: null,
+      renderStatus(statusCard, { agent: "DeepSeek Harness", model: null, effort: null,
         memory: selectedMemory ? `${selectedMemory.name} · ${tr("只读", "Read only")}${memoryReady() ? "" : tr("（待核对）", " (needs verification)")}` : tr("不附加共享记忆", "No added shared memory"),
         status, observed: "", language });
     }
     function render() {
-      renderProfileStatus();
+      syncMemorySelection(); renderProfileStatus();
       moreSummary.textContent = tr("更多", "More"); operationSummary.textContent = tr("操作记录", "Operation records");
       const scope = encode([workspace, snapshot?.epoch ?? null, snapshot?.binding?.sessionId ?? null]); if (displayScope !== scope) { displayScope = scope; messages.replaceChildren(); historyTools.replaceChildren(); rawRecords.open = false; moreMenu.open = operationRecords.open = false; requestNodes.clear(); recordNodes.clear(); }
       handoffView?.setScope(encode([workspace, chatId, scope])); root.setAttribute("lang", language); settingsPanel?.setAttribute("lang", language);
@@ -648,10 +664,11 @@
       const stale = selectedMemory !== null && !memoryReady(), saved = selectedMemory && "saved:" + selectedMemory.id + ":" + selectedMemory.revision;
       if (stale) { const option = node("option", "", selectedMemory.name + tr(" · 原选第 ", " · saved v") + selectedMemory.revision + tr(" 版（待重新选择）", " (review required)")); option.value = saved; option.disabled = true; memorySelect.append(option); }
       for (const row of memoryRows) { const option = node("option", "", row.name + tr(" · 第 ", " · v") + row.revision + tr(" 版", "") + (row.mode === "read_only" ? tr(" · 只读", " · read only") : tr(" · 本入口不支持读写", " · read-write unavailable here"))); option.value = row.id; option.disabled = !memoryReadable || row.mode !== "read_only"; memorySelect.append(option); }
-      memorySelect.value = stale ? saved : selectedMemory?.id || ""; memorySelect.disabled = !enabled || destroyed || writing || !!pending || storageInvalid || unsettled() || pendingRequest() || snapshot?.activity.state !== "idle";
+      memorySelect.value = stale ? saved : selectedMemory?.id || ""; memorySelect.disabled = memoryControlled() || memoryBlocked();
       memoryRefresh.disabled = !enabled || destroyed || writing || memoryReading;
-      memoryInfo.textContent = [tr("DSH 原生上文、插件与设置照常；这里只为下一次发送附加只读资料，不保存本轮交互。不附加不会清除原生上文。", "DSH native context, plugins and settings stay unchanged. Selected read-only context is added for the next send without saving this interaction. Choosing none does not erase earlier context."), stale ? tr("原选版本已变化或尚未核实，请重新选择；原稿保留。", "The saved version changed or is unverified. Choose explicitly; the draft remains.") : "", memoryReading ? tr("正在读取保存的参数…", "Reading saved parameters…") : "", memoryError].filter(Boolean).join(" ");
-      memoryLabel.hidden = memoryRefresh.hidden = memoryInfo.hidden = !Object.hasOwn(snapshot || {}, "memory_intents") && !selectedMemory && !pending?.memory_profile;
+      memoryInfo.textContent = [memorySelection?.message(language), memorySelectionUnsupported ? tr("记忆配置状态组件未就绪；原草稿保留。", "Memory configuration state is unavailable; the original draft remains.") : "", tr("DSH 原生上文、插件与设置照常；这里只为下一次发送附加只读资料，不保存本轮交互。不附加不会清除原生上文。", "DSH native context, plugins and settings stay unchanged. Selected read-only context is added for the next send without saving this interaction. Choosing none does not erase earlier context."), stale ? tr("原选版本已变化或尚未核实，请重新选择；原稿保留。", "The saved version changed or is unverified. Choose explicitly; the draft remains.") : "", memoryReading ? tr("正在读取保存的参数…", "Reading saved parameters…") : "", memoryError].filter(Boolean).join(" ");
+      memoryRefresh.hidden = memoryInfo.hidden = !Object.hasOwn(snapshot || {}, "memory_intents") && !selectedMemory && !pending?.memory_profile && !memoryControlled();
+      memoryLabel.hidden = memoryRefresh.hidden || memoryControlled();
       openButton.hidden = ready(); openButton.disabled = !enabled || destroyed || !readable || openingForSend || writing || !!pending || unsettled() || pendingRequest();
       if (openingForSend) connection.textContent = tr("正在连接 DSH…", "Connecting DSH…");
       sendButton.disabled = !!filePicker?.busy() || openingForSend || !(idle() || canOpenForSend()) || writing || !!pending || storageInvalid || !materialsReady() || !memoryReady() || !draft.trim(); const stopping = !draft.trim() && snapshot?.activity.state === "running";
@@ -686,8 +703,8 @@
     }
     input.addEventListener("input", () => { draft = input.value; draftRevision++; save(); render(); });
     const visibility = () => { if (document.hidden) { viewVersion++; clearTimeout(timer); timer = null; save(); } else if (visible) refresh(); }; document.addEventListener?.("visibilitychange", visibility);
-    async function show() { if (destroyed || !enabled) return; viewVersion++; visible = true; root.hidden = false; syncWorkspace(); render(); await refresh(); await loadMemoryProfiles(); }
-    async function showSettings() { if (destroyed || !enabled) return; viewVersion++; visible = true; root.hidden = true; syncWorkspace(); render(); await refresh(); await loadMemoryProfiles(); }
+    async function show() { if (destroyed || !enabled) return; viewVersion++; visible = true; root.hidden = false; syncWorkspace(); render(); await refresh(); await loadInitialMemoryProfiles(); }
+    async function showSettings() { if (destroyed || !enabled) return; viewVersion++; visible = true; root.hidden = true; syncWorkspace(); render(); await refresh(); await loadInitialMemoryProfiles(); }
     function hide() { viewVersion++; visible = false; root.hidden = true; clearTimeout(timer); timer = null; save(); }
     function destroy() { hide(); destroyed = true; settingsPanel?.remove(); generation++; readPending = false; document.removeEventListener?.("visibilitychange", visibility); }
     function setLanguage(value) { language = value === "en" ? "en" : "zh-CN"; render(); }

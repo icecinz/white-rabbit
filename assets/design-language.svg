@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="426" viewBox="0 0 1120 426" role="img" aria-labelledby="title description">
+<title id="title">White Rabbit: color describes who can operate</title>
+<desc id="description">Neutral controls are for human interaction. Purple marks content and operations with an implemented interface available to both people and AI. Authorization and approvals remain human decisions.</desc>
+<rect width="1120" height="426" rx="24" fill="#F8F6FA"/>
+<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Noto Sans CJK SC,sans-serif">
+<text x="48" y="58" font-size="26" font-weight="700" fill="#29242E">颜色说明能力，而不只是装饰</text>
+<text x="48" y="89" font-size="17" fill="#6E6873">Color describes the available interface.</text>
+<rect x="40" y="118" width="506" height="196" rx="16" fill="#FFFFFF" stroke="#DCD7E1"/>
+<rect x="574" y="118" width="506" height="196" rx="16" fill="#F1EAF7" stroke="#C9B6DC"/>
+<circle cx="76" cy="157" r="10" fill="#29242E"/>
+<text x="100" y="165" font-size="23" font-weight="700" fill="#29242E">人来操作 · Human controls</text>
+<text x="68" y="205" font-size="18" fill="#45404B">黑色／中性色：当前由人通过界面操作</text>
+<text x="68" y="235" font-size="16" fill="#69616E">Human interaction or explicit human confirmation</text>
+<text x="68" y="279" font-size="16" fill="#45404B">例如：浏览器语言、授权与审批</text>
+<circle cx="610" cy="157" r="10" fill="#6F508B"/>
+<text x="634" y="165" font-size="23" font-weight="700" fill="#6F508B">人 + AI · Human + AI</text>
+<text x="602" y="205" font-size="18" fill="#6F508B">紫色：人和 AI 共用已实现的程序接口</text>
+<text x="602" y="235" font-size="16" fill="#6F508B">The same supported content and operations</text>
+<text x="602" y="279" font-size="16" fill="#6F508B">例如：读取设置、修改配置、整理分组</text>
+<text x="48" y="357" font-size="17" fill="#45404B">小白兔专员理解要求，调用相同业务接口；颜色不会扩大权限。</text>
+<text x="48" y="386" font-size="16" fill="#6E6873">The specialist uses the same application APIs. Color does not grant extra permission.</text>
+</g></svg>

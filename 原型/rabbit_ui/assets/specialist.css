@@ -31,6 +31,7 @@
 .rbs-actions>.rbs-originals{max-width:100%;padding:8px 10px;border-radius:7px;font-size:11px;line-height:1.5}
 .rbs-actions>.rbs-originals[open]{flex-basis:100%}
 .rbs-originals>.rbs-native{max-height:60dvh;overflow:auto}
+.rbs-request>.rbs-call-parameters{max-height:40dvh}
 [data-message-role] :is(.rbs-item-body,.rich-text,.rbh-card){min-width:0;max-width:100%}
 [data-message-role] :is(img,video){max-width:100%;height:auto}
 [data-message-role] :is(pre,.file-task-preview-content){min-width:0;max-width:100%;overflow:auto;overflow-wrap:anywhere}
@@ -52,9 +53,10 @@
 .rbs-operation-records{min-width:0;margin:10px 0;font-size:12px;line-height:1.65;color:var(--ai-control)}
 .rbs-operation-records>summary,.rbs-chat-more>summary{cursor:pointer;width:fit-content;text-underline-offset:3px}
 .rbs-operation-records>summary:hover,.rbs-chat-more>summary:hover{text-decoration:underline}
-.rbs-operation-records>.rbs-item{margin:10px 0}
-.rbs-chat-more{min-width:0;font-size:12px}.rbs-chat-more[open]>.rbs-actions{margin-top:10px}
+.rbs-operation-records>div>.rbs-item{margin:10px 0}
+.rbs-chat-more{min-width:0;font-size:12px}.rbs-chat-more[open]{width:100%}.rbs-chat-more[open]>.rbs-actions{margin-top:10px}
 .rbs-chat-more>.rbs-originals{margin-top:10px}
+.rbs-guide-text{margin:12px 0 16px}.rbs-guide-manual{margin-top:12px}
 .rbs-submit{min-width:60px}.rbs-submit[data-composer-action="stop"]{border-color:var(--ai-control);background:var(--ai-control-soft);color:var(--ai-control)}
 .rbs-guide-check{width:100%;margin-bottom:16px;border-color:var(--ai-control);color:var(--ai-control);background:var(--ai-control-soft);font-weight:550}
 .rbs-guide-check:not(:disabled):hover{background:var(--paper)}

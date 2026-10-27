@@ -13,6 +13,9 @@
   const reservedNativeModel = value => value.startsWith(piNativePrefix) || value.startsWith(hermesNativePrefix);
   const fieldNames = ["name", "agent_instance_id", "device_id", "model_id", "reasoning_effort"];
   const memoryFields = ["name", "description", "habits", "program", "connection_id", "mode"];
+  const memoryPrograms = Object.freeze({ hindsight: { connection: "local/hindsight", label: "Hindsight" }, hermes_files: { connection: "local/hermes-files", label: "Hermes 文档记忆" }, mem0: { connection: "local/mem0", label: "Mem0" } });
+  const memoryProgramLabel = program => memoryPrograms[program]?.label || "记忆程序待核对";
+  const validMemoryProgram = value => Object.hasOwn(memoryPrograms, value.program) && value.connection_id === memoryPrograms[value.program].connection && (value.program === "hindsight" ? memoryModes.has(value.mode) : value.mode === "read_only");
   const memoryModes = new Set(["read_only", "read_write"]), bankStates = new Set(["empty", "ready", "unavailable", "unknown"]);
   const nativeMemorySourceId = "hermes_hindsight_current", nativeMemoryKind = "hermes_hindsight_readonly";
   const nativeSourceRef = /^nativesrc_[a-f0-9]{32}$/;
@@ -20,14 +23,14 @@
   const memoryModeLabel = mode => mode === "read_write" ? "读取并记住" : "只读取";
   function memoryProfile(value, publicFields = true) {
     if (value?.id === "none") return publicFields ? { id: "none", name: "不使用长期记忆", available: true, detail: typeof value.detail === "string" ? value.detail.slice(0, 1000) : "不查询或写入长期记忆；当前聊天的上文照常保留。" } : { id: "none" };
-    if (!value || typeof value.id !== "string" || !uuid.test(value.id) || !Number.isSafeInteger(value.revision) || value.revision < 1 || typeof value.name !== "string" || value.name.length > 80 || !value.name.trim() || Array.from(value.name).length > 40 || /[\x00-\x1f\x7f]/.test(value.name) || typeof value.description !== "string" || value.description.length > 400 || Array.from(value.description).length > 200 || value.description.includes("\0") || typeof value.habits !== "string" || value.habits.length > 8000 || Array.from(value.habits).length > 4000 || value.habits.includes("\0") || value.program !== "hindsight" || value.connection_id !== "local/hindsight" || !memoryModes.has(value.mode) || typeof value.bank_ref !== "string" || !/^mem_[a-f0-9]{32}$/.test(value.bank_ref)) throw new Error("记忆配置没有读完整，请重新读取。");
-    const result = { id: value.id, revision: value.revision, name: value.name, description: value.description, habits: value.habits, program: "hindsight", connection_id: "local/hindsight", mode: value.mode, bank_ref: value.bank_ref };
+    if (!value || typeof value.id !== "string" || !uuid.test(value.id) || !Number.isSafeInteger(value.revision) || value.revision < 1 || typeof value.name !== "string" || value.name.length > 80 || !value.name.trim() || Array.from(value.name).length > 40 || /[\x00-\x1f\x7f]/.test(value.name) || typeof value.description !== "string" || value.description.length > 400 || Array.from(value.description).length > 200 || value.description.includes("\0") || typeof value.habits !== "string" || value.habits.length > 8000 || Array.from(value.habits).length > 4000 || value.habits.includes("\0") || !validMemoryProgram(value) || typeof value.bank_ref !== "string" || !/^mem_[a-f0-9]{32}$/.test(value.bank_ref)) throw new Error("记忆配置没有读完整，请重新读取。");
+    const result = { id: value.id, revision: value.revision, name: value.name, description: value.description, habits: value.habits, program: value.program, connection_id: value.connection_id, mode: value.mode, bank_ref: value.bank_ref };
     if (publicFields) {
       if (typeof value.available !== "boolean" || !bankStates.has(value.bank_state)) throw new Error("记忆配置连接状态没有读完整，请重新读取。");
       result.available = value.available; result.bank_state = value.bank_state;
       for (const field of ["reason", "connection_label", "bank_label", "created_at", "updated_at"]) if (typeof value[field] === "string" && value[field].length <= 500 || value[field] === null) result[field] = value[field];
       if (value.source_kind !== undefined || value.locked_mode !== undefined || value.native_source_ref !== undefined) {
-        if (value.source_kind !== nativeMemoryKind || value.locked_mode !== true || value.mode !== "read_only") throw new Error("原有记忆的只读绑定没有读完整，请重新读取。");
+        if (value.source_kind !== nativeMemoryKind || value.locked_mode !== true || value.mode !== "read_only" || value.program !== "hindsight") throw new Error("原有记忆的只读绑定没有读完整，请重新读取。");
         result.source_kind = nativeMemoryKind; result.locked_mode = true;
         if (value.native_source_ref !== undefined) { if (typeof value.native_source_ref !== "string" || !nativeSourceRef.test(value.native_source_ref)) throw new Error("原有记忆的来源引用没有读完整，请重新读取。"); result.native_source_ref = value.native_source_ref; }
       }
@@ -95,19 +98,29 @@
   }
   function nativeCapabilities(value) {
     if (value === undefined) return undefined;
-    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !["codex", "pi", "hermes"].includes(key))) throw new Error("原生配置能力快照没有读完整。");
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !["codex", "pi", "hermes", "claude"].includes(key))) throw new Error("原生配置能力快照没有读完整。");
     const result = {}, nativeText = (text, limit) => typeof text === "string" && text.trim() && Array.from(text).length <= limit && !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(text);
     const exactFields = (object, fields) => object && typeof object === "object" && !Array.isArray(object) && Object.keys(object).length === fields.length && fields.every(field => Object.hasOwn(object, field));
-    for (const backend of ["codex", "pi", "hermes"]) {
+    for (const backend of ["codex", "pi", "hermes", "claude"]) {
       const source = value[backend]; if (source === undefined) continue;
-      const label = agents.labels[backend], expectedSource = { codex: "codex/model/list", pi: "pi/get_available_models", hermes: "hermes/model.options" }[backend];
+      const label = agents.labels[backend], expectedSource = { codex: "codex/model/list", pi: "pi/get_available_models", hermes: "hermes/model.options", claude: "claude/sdk-initialize" }[backend];
       if (!source || typeof source !== "object" || Array.isArray(source) || source.source !== expectedSource || typeof source.enabled !== "boolean" || typeof source.catalogue_available !== "boolean"
           || source.observed_at !== null && (typeof source.observed_at !== "string" || !source.observed_at || source.observed_at.length > 100 || /[\x00-\x1f\x7f]/.test(source.observed_at))
           || source.source_chat_id !== null && (typeof source.source_chat_id !== "string" || !uuid.test(source.source_chat_id)) || !Array.isArray(source.models) || source.models.length > (backend === "codex" ? 512 : 4096)) throw new Error(`原生 ${label} 目录快照没有读完整。`);
       if (backend === "hermes" && (!exactFields(source, ["enabled", "source", "catalogue_available", "observed_at", "source_chat_id", "models"])
           || source.catalogue_available && (!source.enabled || !nativeText(source.observed_at, 80) || !uuid.test(source.source_chat_id))
           || !source.catalogue_available && (source.models.length || source.observed_at !== null || source.source_chat_id !== null))) throw new Error("原生 Hermes 目录状态没有读完整。");
+      if (backend === "claude" && (!exactFields(source, ["enabled", "source", "catalogue_available", "observed_at", "source_chat_id", "models"])
+          || source.catalogue_available && (!source.enabled || !nativeText(source.observed_at, 80) || !uuid.test(source.source_chat_id))
+          || !source.catalogue_available && (source.models.length || source.observed_at !== null || source.source_chat_id !== null))) throw new Error("原生 Claude 目录状态没有读完整。");
       const models = source.models.map(row => {
+        if (backend === "claude") {
+          if (!exactFields(row, ["id", "agent_id", "model", "name", "supported_efforts", "default_effort", "explicit_effort_supported"])
+              || row.agent_id !== "claude" || !agents.validModelId(row.id, "claude") || row.id !== "local/claude/" + row.model
+              || !nativeText(row.model, 192) || !nativeText(row.name, 512) || !Array.isArray(row.supported_efforts) || row.supported_efforts.length
+              || row.default_effort !== null || row.explicit_effort_supported !== false) throw new Error("原生 Claude 模型候选没有读完整。");
+          return { id: row.id, agent_id: "claude", model: row.model, name: row.name, supported_efforts: [], default_effort: null, explicit_effort_supported: false };
+        }
         if (backend === "hermes") {
           if (!exactFields(row, ["id", "agent_id", "provider", "model", "name", "supported_efforts", "default_effort", "explicit_effort_supported", "effort_source"])
               || row.agent_id !== "hermes" || typeof row.id !== "string" || !hermesNativeReference.test(row.id)
@@ -146,8 +159,8 @@
     const memories = value.memory_profiles.map(row => memoryProfile(row));
     if (new Set(memories.map(row => row.id)).size !== memories.length || !memories.some(row => row.id === "none")) throw new Error("记忆配置列表标识不完整，请重新读取。");
     const connections = value.memory_connections === undefined ? [] : value.memory_connections;
-    if (!Array.isArray(connections) || connections.length > 1 || connections.some(row => row?.id !== "local/hindsight" || row.program !== "hindsight" || typeof row.available !== "boolean")) throw new Error("记忆连接列表没有读完整，请重新读取。");
-    const memory_connections = connections.map(row => { const result = { id: row.id, program: row.program, available: row.available }; for (const field of ["label", "reason", "processing_notice"]) if (typeof row[field] === "string" && row[field].length <= 1000) result[field] = row[field]; return result; });
+    if (!Array.isArray(connections) || connections.length > 3 || connections.some(row => !row || !Object.hasOwn(memoryPrograms, row.program) || row.id !== memoryPrograms[row.program].connection || typeof row.available !== "boolean" || row.write_supported !== undefined && typeof row.write_supported !== "boolean" || row.program !== "hindsight" && row.write_supported === true) || new Set(connections.map(row => row.id)).size !== connections.length) throw new Error("记忆连接列表没有读完整，请重新读取。");
+    const memory_connections = connections.map(row => { const result = { id: row.id, program: row.program, available: row.available, write_supported: row.write_supported ?? row.program === "hindsight" }; for (const field of ["label", "reason", "processing_notice"]) if (typeof row[field] === "string" && row[field].length <= 1000) result[field] = row[field]; return result; });
     const nativeSources = value.native_memory_sources === undefined ? [] : value.native_memory_sources;
     if (!Array.isArray(nativeSources) || nativeSources.length > 1) throw new Error("原有记忆来源列表没有读完整，请刷新配置。");
     const native_memory_sources = nativeSources.map(nativeMemorySource);
@@ -156,7 +169,7 @@
     if (native_profile_capabilities !== undefined && !value.workspace_id) throw new Error("原生配置能力快照缺少所属工作区。");
     return { ai_profiles: rows, memory_profiles: memories, memory_connections, native_memory_sources, default_ai_profile_id: value.default_ai_profile_id, default_ai_profile_revision: defaultRevision, default_memory_profile_id: "none", revision: value.revision, ...(value.workspace_id === undefined ? {} : { workspace_id: value.workspace_id }), ...(native_profile_capabilities === undefined ? {} : { native_profile_capabilities }) };
   }
-  function create({ api, root, getSelection, onChoose, onManage, onCatalog = () => {}, getInventory = () => null, getCapabilities = () => ({}), getWorkspace = () => "", getNativeAgents = () => [], onChooseNative = null }) {
+  function create({ api, root, getSelection, onChoose, onManage, onCatalog = () => {}, getInventory = () => null, getCapabilities = () => ({}), getWorkspace = () => "", getNativeAgents = () => [], onChooseNative = null, onMemoryManual = null }) {
     let data = null, loading = null, requestVersion = 0, picker = null, editor = null, manager = null, managerKind = "ai", returnFocus = null;
     let workspace = "", pendingCreation = null, creationBusy = false, creationInvalid = false, creationNotice = "", defaultBusy = false, defaultBlocked = false, defaultNotice = "";
     const nativeAttach = { saving: false, unknownSources: new Set(), confirmedProfileId: null, confirmedSourceRef: undefined, errorSourceRef: undefined, error: "", notice: "" };
@@ -194,7 +207,7 @@
       workspace = id; requestVersion++; loading = null; data = null;
       resetNativeRefresh();
       pendingCreation = null; creationBusy = creationInvalid = false; creationNotice = ""; defaultBusy = defaultBlocked = false; defaultNotice = "";
-      if (editor?.kind === "ai") editor = null;
+      editor = null;
       if (id) try { const saved = window.sessionStorage.getItem(creationKey()); if (saved !== null) pendingCreation = creationRecord(JSON.parse(saved)); }
       catch (_) { creationInvalid = true; creationNotice = "浏览器的待核创建记录无法读取；尚未提交新的创建或复制，请先保留并核对原记录。"; }
     }
@@ -271,7 +284,7 @@
     }
     function get(id) { return data?.ai_profiles.find(row => row.id === id) || null; }
     function getMemory(id) { return data?.memory_profiles.find(row => row.id === id) || null; }
-    function memoryEnabled() { return getCapabilities().memory === "hindsight" || !!data?.memory_profiles.some(row => row.id !== "none"); }
+    function memoryEnabled() { return getCapabilities().memory === "hindsight" || !!data?.memory_connections.length || !!data?.memory_profiles.some(row => row.id !== "none"); }
     function current() { return getSelection() || {}; }
     async function load(force = false) {
       syncWorkspace();
@@ -314,7 +327,7 @@
       for (const row of list) {
         const selected = row.id === captured.selected;
         const control = action("", () => { captured.selected = row.id; renderPicker(); }, "profile-choice"); control.setAttribute("aria-pressed", String(selected)); control.disabled = row.available !== true || captured.saving;
-        control.append(node("strong", "", nativeMemory && row.id === "none" ? "不额外带入共享记忆" : row.name), node("span", "profile-note", captured.kind === "memory" ? row.id === "none" ? nativeMemory ? "不额外带入共享记忆；原 Agent 自身记忆沿用原配置。" : row.detail : `Hindsight · ${memoryModeLabel(row.mode)} · 第 ${row.revision} 版${row.available ? "" : ` · ${row.reason || "目前不可用"}`}` : `${row.available ? "可选择 · 发送时验证" : row.reason || "目前不可用"} · 第 ${row.revision} 版`)); collection.append(control);
+        control.append(node("strong", "", nativeMemory && row.id === "none" ? "不额外带入共享记忆" : row.name), node("span", "profile-note", captured.kind === "memory" ? row.id === "none" ? nativeMemory ? "不额外带入共享记忆；原 Agent 自身记忆沿用原配置。" : row.detail : `${memoryProgramLabel(row.program)} · ${memoryModeLabel(row.mode)} · 第 ${row.revision} 版${row.available ? "" : ` · ${row.reason || "目前不可用"}`}` : `${row.available ? "可选择 · 发送时验证" : row.reason || "目前不可用"} · 第 ${row.revision} 版`)); collection.append(control);
       }
       const native = nativeChoices(captured);
       let savedHost = panel;
@@ -355,7 +368,7 @@
     }
     function nativeSavedChoices(captured) {
       const available = new Set(nativeChoices(captured).map(row => row.agent));
-      return (data?.ai_profiles || []).filter(row => row.native_available === true && ["codex", "pi", "hermes"].includes(agents.backendOfInstance(row.agent_instance_id)) && available.has(agents.backendOfInstance(row.agent_instance_id)));
+      return (data?.ai_profiles || []).filter(row => row.native_available === true && ["codex", "pi", "hermes", "claude"].includes(agents.backendOfInstance(row.agent_instance_id)) && available.has(agents.backendOfInstance(row.agent_instance_id)));
     }
     async function applyNative(captured, agent, saved = null) {
       if (picker !== captured || captured.saving || captured.nativeAttempted || current().busy || current().view !== captured.view || !nativeChoices(captured).some(row => row.agent === agent)) return;
@@ -407,8 +420,8 @@
     const nativeConnectionKey = row => `${row.agent}:${row.chat_id}:${row.epoch}`;
     function nativeConnectionRows(value, scope) {
       const exact = (row, keys) => row && typeof row === "object" && !Array.isArray(row) && Object.keys(row).length === keys.length && keys.every(key => Object.hasOwn(row, key));
-      if (!exact(value, ["workspace_id", "connections"]) || value.workspace_id !== scope || !Array.isArray(value.connections) || value.connections.length > 4) throw Error("原生连接列表身份或格式不完整，请重新读取。");
-      const seen = new Set(), counts = { codex: 0, pi: 0, hermes: 0 };
+      if (!exact(value, ["workspace_id", "connections"]) || value.workspace_id !== scope || !Array.isArray(value.connections) || value.connections.length > 5) throw Error("原生连接列表身份或格式不完整，请重新读取。");
+      const seen = new Set(), counts = { codex: 0, pi: 0, hermes: 0, claude: 0 };
       return value.connections.map(row => {
         if (!exact(row, ["agent", "chat_id", "title", "epoch"]) || typeof row.agent !== "string" || !Object.hasOwn(counts, row.agent)
             || nativeSource(row.agent)?.enabled !== true || typeof row.chat_id !== "string" || row.chat_id.length !== 36 || !uuid.test(row.chat_id)
@@ -488,7 +501,7 @@
     }
     function connectedAgents() {
       const rows = (inventory().agents || []).filter(row => agents.has(row?.id)).map(row => ({ ...row }));
-      for (const backend of ["codex", "pi", "hermes"]) if (nativeSource(backend)?.enabled === true) { const row = rows.find(row => row.id === backend); if (row) row.available = true; else rows.push({ id: backend, available: true }); }
+      for (const backend of ["codex", "pi", "hermes", "claude"]) if (nativeSource(backend)?.enabled === true) { const row = rows.find(row => row.id === backend); if (row) row.available = true; else rows.push({ id: backend, available: true }); }
       return rows;
     }
     function modelFor(value) { const backend = agents.backendOfInstance(value.agent_instance_id); return value.model_id ? inventory().models?.find(row => row.id === value.model_id && row.agent_id === backend) : inventory().agents?.find(row => row.id === backend); }
@@ -522,6 +535,7 @@
       control.value = value; control.addEventListener("change", () => change(control.value)); field.append(control); return field;
     }
     function openEditor(existing = null, copy = false) {
+      if (editor?.kind === "memory" && memoryEditorBusy(editor)) { manager?.append(node("p", "profile-error", "请先回到记忆配置，处理未保存或待核对的文档。")); return false; }
       syncWorkspace(); if ((!existing || copy) && (pendingCreation || creationInvalid || creationBusy)) return false;
       const original = existing ? profile(existing) : null;
       const connections = connectedAgents(), first = connections.find(row => row.available === true) || connections[0];
@@ -592,38 +606,130 @@
     }
     function memoryEditFields(value) { return Object.fromEntries(memoryFields.map(key => [key, value[key]])); }
     function openMemoryEditor(existing = null, copy = false) {
+      syncWorkspace();
+      if (editor?.kind === "memory" && memoryEditorBusy(editor)) return;
       const original = existing ? memoryProfile(existing) : null;
-      editor = { kind: "memory", original, copy, lockedMode: !copy && original?.locked_mode === true, saving: false, error: "", uncertain: false, value: original ? memoryEditFields(original) : { name: "", description: "", habits: "", program: "hindsight", connection_id: "local/hindsight", mode: "read_only" } };
+      const connection = data?.memory_connections.find(row => row.available) || data?.memory_connections[0];
+      editor = { kind: "memory", workspace, original, copy, document: null, lockedMode: !copy && original?.locked_mode === true, saving: false, error: "", uncertain: false, value: original ? memoryEditFields(original) : { name: "", description: "", habits: "", program: connection?.program || "hindsight", connection_id: connection?.id || "local/hindsight", mode: "read_only" } };
       if (copy && original?.source_kind === nativeMemoryKind && original.description === "只读Hermes原有记忆内容；Hermes仍可按原设置更新，本入口不提交保存。") editor.value.description = "";
       if (copy) editor.value.name = Array.from(editor.value.name + " 副本").slice(0, 40).join(""); renderManager(); manager?.querySelector("input")?.focus();
     }
     function validMemoryEditor(value) {
-      return !!(typeof value.name === "string" && value.name.trim() && Array.from(value.name).length <= 40 && !/[\x00-\x1f\x7f]/.test(value.name) && typeof value.description === "string" && Array.from(value.description).length <= 200 && !value.description.includes("\0") && typeof value.habits === "string" && Array.from(value.habits).length <= 4000 && !value.habits.includes("\0") && value.program === "hindsight" && value.connection_id === "local/hindsight" && memoryModes.has(value.mode));
+      return !!(typeof value.name === "string" && value.name.trim() && Array.from(value.name).length <= 40 && !/[\x00-\x1f\x7f]/.test(value.name) && typeof value.description === "string" && Array.from(value.description).length <= 200 && !value.description.includes("\0") && typeof value.habits === "string" && Array.from(value.habits).length <= 4000 && !value.habits.includes("\0") && validMemoryProgram(value));
+    }
+    const documentNames = ["MEMORY.md", "USER.md"], maxDocumentBytes = 512 * 1024;
+    const documentDirty = value => !!value?.sha256 && value.text !== value.original;
+    window.addEventListener?.("beforeunload", event => { if (editor?.kind === "memory" && (documentDirty(editor.document) || editor.document?.blocked)) { event.preventDefault?.(); event.returnValue = ""; } });
+    const memoryEditorBusy = captured => captured.saving || captured.document?.loading || captured.document?.saving || captured.document?.blocked || documentDirty(captured.document);
+    function memoryProfileSaveBlocked(captured) {
+      const value = captured.value;
+      return editor !== captured || !sameWorkspace(captured.workspace) || memoryEditorBusy(captured) || captured.uncertain || !validMemoryEditor(value) || !captured.original && !data?.memory_connections.some(row => row.id === value.connection_id) || captured.original && (value.program !== captured.original.program || value.connection_id !== captured.original.connection_id) || captured.lockedMode && value.mode !== "read_only";
+    }
+    function currentDocument(captured, document) { return editor === captured && sameWorkspace(captured.workspace) && captured.document === document && captured.original?.program === "hermes_files" && !captured.copy; }
+    async function checkedMemoryDocument(value, captured, name, expectedText = null) {
+      const exact = (record, fields) => record && typeof record === "object" && !Array.isArray(record) && Object.keys(record).length === fields.length && fields.every(key => Object.hasOwn(record, key));
+      const document = value?.document;
+      if (!exact(value, ["scope", "profile_id", "program", "document", "workspace_id"]) || value.scope !== "memory_document" || value.workspace_id !== captured.workspace || value.profile_id !== captured.original.id || value.program !== "hermes_files"
+          || !exact(document, ["name", "text", "sha256", "size_bytes"]) || document.name !== name || typeof document.text !== "string" || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]/u.test(document.text)
+          || !Number.isSafeInteger(document.size_bytes) || document.size_bytes < 0 || document.size_bytes > maxDocumentBytes || typeof document.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(document.sha256) || expectedText !== null && document.text !== expectedText) throw Error("记忆文档的身份或完整内容不匹配，原修改保留。");
+      const subtle = window.crypto?.subtle || globalThis.crypto?.subtle;
+      if (!subtle || typeof TextEncoder !== "function") throw Error("当前浏览器不能核对完整文档，未继续保存。");
+      const bytes = new TextEncoder().encode(document.text);
+      if (bytes.length !== document.size_bytes || bytes.length > maxDocumentBytes) throw Error("记忆文档大小不匹配，原修改保留。");
+      const sha = Array.from(new Uint8Array(await subtle.digest("SHA-256", bytes)), byte => byte.toString(16).padStart(2, "0")).join("");
+      if (sha !== document.sha256) throw Error("记忆文档指纹不匹配，原修改保留。");
+      return document;
+    }
+    async function readMemoryDocument(captured, name, reread = false) {
+      if (editor !== captured || !sameWorkspace(captured.workspace) || !captured.workspace || !documentNames.includes(name) || captured.original?.program !== "hermes_files" || captured.copy || captured.saving || captured.uncertain) return;
+      const previous = captured.document;
+      if (previous?.loading || previous?.saving || (documentDirty(previous) || previous?.blocked) && !(reread && previous.name === name)) return;
+      const document = previous?.name === name ? previous : { name, text: "", original: "", sha256: null };
+      captured.document = document; document.loading = true; document.error = ""; renderManager();
+      try {
+        const raw = await api("/api/management/memory-documents?profile_id=" + encodeURIComponent(captured.original.id) + "&name=" + encodeURIComponent(name));
+        if (!currentDocument(captured, document)) return;
+        const received = await checkedMemoryDocument(raw, captured, name);
+        if (!currentDocument(captured, document)) return;
+        Object.assign(document, { text: received.text, original: received.text, sha256: received.sha256, blocked: false });
+      } catch (error) { if (currentDocument(captured, document)) document.error = readable(error, "文档暂时无法读取，原修改保留。"); }
+      finally { if (currentDocument(captured, document)) { document.loading = false; renderManager(); } }
+    }
+    async function saveMemoryDocument(captured, document) {
+      if (!currentDocument(captured, document) || captured.saving || captured.uncertain || document.loading || document.saving || document.blocked || !documentDirty(document)) return;
+      const text = document.text;
+      if (typeof TextEncoder !== "function" || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]/u.test(text) || new TextEncoder().encode(text).length > maxDocumentBytes) { document.error = "文档超过容量或含无效文字，没有截断保存。"; renderManager(); return; }
+      document.saving = true; document.error = ""; renderManager();
+      try {
+        const raw = await api("/api/management/memory-documents", { method: "POST", body: JSON.stringify({ profile_id: captured.original.id, name: document.name, text, expected_sha256: document.sha256 }) }, false);
+        if (!currentDocument(captured, document)) return;
+        const received = await checkedMemoryDocument(raw, captured, document.name, text);
+        if (!currentDocument(captured, document)) return;
+        Object.assign(document, { original: received.text, sha256: received.sha256, blocked: false });
+      } catch (error) { if (currentDocument(captured, document)) { document.blocked = true; document.error = error.status === 409 ? "文档已在另一入口更新，原修改保留；没有覆盖。" : readable(error, "保存结果尚未确认，原修改保留；请重新读取核对，没有自动重试。"); } }
+      finally { if (currentDocument(captured, document)) { document.saving = false; renderManager(); } }
+    }
+    function memoryDocumentPanel(captured) {
+      const box = node("section", "profile-memory-documents"), choices = node("div", "profile-actions"), document = captured.document;
+      const buttons = documentNames.map(name => { const button = action(name, () => readMemoryDocument(captured, name)); button.disabled = captured.saving || captured.uncertain || !captured.workspace || !!document?.loading || !!document?.saving || !!document?.blocked || documentDirty(document); button.setAttribute("aria-pressed", String(document?.name === name)); return button; }); choices.append(...buttons); box.append(choices);
+      if (!document) return box;
+      const input = node("textarea", "profile-memory-document"); input.rows = 10; input.value = document.text; input.setAttribute("aria-label", document.name); input.disabled = !document.sha256 || document.loading || document.saving || captured.saving || captured.uncertain;
+      const note = node("p", "profile-note"), error = node("p", "profile-error", document.error || ""); error.hidden = !document.error; error.setAttribute("role", "alert");
+      const actions = node("div", "profile-actions"), save = action(document.saving ? "正在保存文档…" : "保存文档", () => saveMemoryDocument(captured, document)), reread = action("重新读取", () => readMemoryDocument(captured, document.name, true));
+      function refresh() {
+        save.disabled = captured.saving || captured.uncertain || document.loading || document.saving || document.blocked || !documentDirty(document);
+        reread.disabled = captured.saving || captured.uncertain || document.loading || document.saving;
+        reread.textContent = documentDirty(document) || document.blocked ? "放弃修改并重新读取" : "重新读取";
+        note.textContent = document.loading ? "正在读取文档…" : document.saving ? "正在保存文档…" : document.blocked ? "保存需核对；请先复制要保留的修改，再重新读取。" : documentDirty(document) ? "文档有未保存修改。" : ""; note.hidden = !note.textContent;
+        for (const button of buttons) button.disabled = captured.saving || captured.uncertain || document.loading || document.saving || document.blocked || documentDirty(document);
+        for (const button of manager?.querySelectorAll("button") || []) {
+          if (button.dataset.memoryEditorClose === "true") button.disabled = memoryEditorBusy(captured);
+          if (button.dataset.memoryProfileSave === "true") button.disabled = memoryProfileSaveBlocked(captured);
+        }
+      }
+      input.addEventListener("input", () => { if (!currentDocument(captured, document) || input.disabled) return; document.text = input.value; refresh(); }); refresh();
+      actions.append(reread, save); box.append(input, note, error, actions); return box;
     }
     function memoryEditorPanel() {
       const captured = editor, value = captured.value, panel = aiControl(node("section", "profile-editor")), head = node("div", "rbw-title-row");
-      head.append(node("h3", "", captured.copy ? "复制为新空记忆库" : captured.original ? "编辑记忆配置" : "新建记忆配置"), humanControl(action("收起", () => { if (!captured.saving) { editor = null; renderManager(); } }))); panel.append(head);
+      const close = humanControl(action("收起", () => { if (!memoryEditorBusy(captured)) { editor = null; renderManager(); } }));
+      close.dataset.memoryEditorClose = "true"; close.disabled = memoryEditorBusy(captured); head.append(node("h3", "", captured.copy ? "复制为新空记忆库" : captured.original ? "编辑记忆配置" : "新建记忆配置"), close); panel.append(head);
       const grid = node("div", "profile-editor-grid");
-      function textField(label, field, limit, multiline = false) {
+      function textField(label, field, limit, multiline = false, mount = grid) {
         const wrapper = node("label", "profile-field profile-wide"), control = node(multiline ? "textarea" : "input"); control.value = value[field]; control.maxLength = limit * 2; if (multiline) control.rows = field === "habits" ? 5 : 2; control.setAttribute("aria-label", label); wrapper.append(node("span", "", `${label}${field === "name" ? "" : "（可选）"}`), control);
-        control.addEventListener("input", () => { value[field] = control.value; refreshSave(); }); grid.append(wrapper);
+        control.addEventListener("input", () => { value[field] = control.value; refreshSave(); }); mount.append(wrapper);
       }
-      textField("记忆配置名称", "name", 40); textField("用途说明", "description", 200, true);
-      const program = node("div", "profile-field"); program.append(node("span", "", "记忆程序"), node("strong", "", "Hindsight")); grid.append(program);
-      const connection = data?.memory_connections.find(row => row.id === "local/hindsight"), connectionField = node("div", "profile-field"); connectionField.append(node("span", "", "服务连接"), node("strong", "", connection?.label || "这台 Mac 的 Hindsight")); if (connection && !connection.available) connectionField.append(node("p", "profile-note", connection.reason || "连接当前不可用；可保存待连接配置。")); grid.append(connectionField);
-      if (captured.lockedMode) {
-        const modeField = node("div", "profile-field"); modeField.append(node("span", "", "使用方式"), node("strong", "", "只读取（原有记忆固定只读）")); grid.append(modeField);
-      } else grid.append(selectField("使用方式", [["read_only", "只读取"], ["read_write", "读取并记住"]], value.mode, mode => { value.mode = mode; renderManager(); }));
-      textField("身份与习惯", "habits", 4000, true); panel.append(grid);
-      panel.append(node("p", "profile-note", captured.copy ? "会建立一个新的独立记忆范围；不复制原库的数据，也不共用原库。" : captured.original ? "修改名称和使用规则保留配置 ID 与原记忆库。更换程序或迁移资料须另外处理。" : "保存后建立独立记忆范围。默认只读取，不会导入已有聊天或其他记忆库。"));
-      if (captured.lockedMode) panel.append(node("p", "profile-note", "小白兔只读取Hermes原有记忆内容，不保存新交互或修改原库。Hermes仍可按原设置更新这份记忆。"));
-      panel.append(node("p", "profile-note", value.mode === "read_write" ? connection?.processing_notice || "记忆保存会使用本机 Hindsight 配置的外部 DeepSeek 提取。本轮允许保存的新文字会提交给该处理连接；不会自动搬入整段旧聊天。" : "只读取不会保存本轮新交互。当前聊天上文仍会带入；身份与习惯是本轮额外说明。"));
+      textField("名称", "name", 40); textField("备注", "description", 200, true);
+      const programs = data?.memory_connections.map(row => [row.program, memoryProgramLabel(row.program) + (row.available ? "" : "（待配置）")]) || [];
+      if (captured.original && !programs.some(row => row[0] === value.program)) programs.push([value.program, memoryProgramLabel(value.program)]);
+      const program = selectField("记忆程序", programs.length ? programs : [["", "尚未接入记忆程序", true]], programs.length ? value.program : "", next => {
+        if (captured.original || captured.saving) return;
+        const selected = data?.memory_connections.find(row => row.program === next);
+        if (selected) { value.program = selected.program; value.connection_id = selected.id; value.mode = "read_only"; captured.document = null; } renderManager();
+      });
+      program.querySelector("select").setAttribute("aria-label", "记忆程序"); program.querySelector("select").disabled = !!captured.original || captured.saving || !programs.length;
+      grid.append(program); panel.append(grid);
+      const settings = node("fieldset", "profile-program-config"), settingsGrid = node("div", "profile-editor-grid"); settings.append(node("legend", "", "程序配置"), settingsGrid);
+      const connection = data?.memory_connections.find(row => row.id === value.connection_id), connectionField = node("div", "profile-field profile-wide"); connectionField.append(node("span", "", "服务连接"), node("strong", "", connection?.label || memoryProgramLabel(value.program))); if (connection && !connection.available) connectionField.append(node("p", "profile-note", "待配置" + (connection.reason ? " · " + connection.reason : ""))); settingsGrid.append(connectionField);
+      if (captured.lockedMode || value.program !== "hindsight") {
+        const modeField = node("div", "profile-field profile-wide"); modeField.append(node("span", "", "使用方式"), node("strong", "", captured.lockedMode ? "只读取（原有记忆固定只读）" : "只读取")); settingsGrid.append(modeField);
+      } else { const mode = selectField("使用方式", [["read_only", "只读取"], ["read_write", "读取并记住"]], value.mode, next => { value.mode = next; renderManager(); }); mode.querySelector("select").setAttribute("aria-label", "使用方式"); settingsGrid.append(mode); }
+      if (value.program !== "hermes_files") textField("身份与习惯", "habits", 4000, true, settingsGrid); panel.append(settings);
+      if (value.program === "hermes_files") {
+        if (captured.original && !captured.copy) settings.append(memoryDocumentPanel(captured));
+        else settings.append(node("p", "profile-note", "保存配置后可编辑 MEMORY.md 和 USER.md。"));
+      }
+      if (captured.copy) settings.append(node("p", "profile-note", "新建独立空库，不复制原库的数据。"));
+      if (captured.lockedMode) settings.append(node("p", "profile-note", "Hermes原有记忆只读；Hermes仍可按原设置更新。"));
+      if (value.mode === "read_write") settings.append(node("p", "profile-note", connection?.processing_notice || "保存新交互会提交给已配置的外部提取服务。"));
       const error = node("p", "profile-error", captured.error); error.hidden = !captured.error; error.setAttribute("role", "alert"); panel.append(error);
       const actions = humanControl(node("div", "profile-actions")), save = aiControl(action(captured.saving ? "正在保存…" : captured.copy ? "保存新空库配置" : "保存记忆配置", () => saveMemoryEditor(captured), "rbw-button rbw-primary"));
-      const refreshSave = () => { save.disabled = captured.saving || captured.uncertain || !validMemoryEditor(value) || captured.lockedMode && value.mode !== "read_only"; }; refreshSave(); actions.append(action("取消", () => { if (!captured.saving) { editor = null; renderManager(); } }), save); panel.append(actions); return panel;
+      const cancel = action("取消", () => { if (!memoryEditorBusy(captured)) { editor = null; renderManager(); } }); cancel.dataset.memoryEditorClose = "true"; cancel.disabled = memoryEditorBusy(captured);
+      save.dataset.memoryProfileSave = "true";
+      const refreshSave = () => { save.disabled = memoryProfileSaveBlocked(captured); }; refreshSave(); actions.append(cancel, save); panel.append(actions); return panel;
     }
     async function saveMemoryEditor(captured) {
-      if (editor !== captured || captured.saving || captured.uncertain || !validMemoryEditor(captured.value) || captured.lockedMode && captured.value.mode !== "read_only") return;
+      if (memoryProfileSaveBlocked(captured)) return;
       captured.saving = true; captured.error = ""; renderManager();
       const original = captured.original;
       let body = memoryEditFields(captured.value);
@@ -632,9 +738,13 @@
       const route = original ? `/api/profiles/memory/${original.id}${captured.copy ? "/copy" : ""}` : "/api/profiles/memory";
       try {
         const received = memoryProfile((await api(route, { method: original && !captured.copy ? "PUT" : "POST", body: JSON.stringify(body) }, false)).profile);
+        if (editor !== captured || !sameWorkspace(captured.workspace)) return;
+        if (received.program !== captured.value.program || received.connection_id !== captured.value.connection_id) throw Error("记忆程序与保存请求不匹配，请重新读取配置。");
+        if (original && !captured.copy && received.id !== original.id) throw Error("保存结果不属于这份记忆配置，请重新读取核对。");
         if (captured.copy && (received.id === original.id || received.bank_ref === original.bank_ref || received.locked_mode || received.source_kind === nativeMemoryKind || received.available && received.bank_state !== "empty")) throw new Error("新空库的身份或状态暂时无法确认，请刷新列表查看；没有自动重复复制。");
         if (data) data = { ...data, memory_profiles: [...data.memory_profiles.filter(row => row.id !== received.id), received] };
-        if (editor === captured) editor = null; renderManager(); onCatalog(data, received, "memory");
+        if (received.program === "hermes_files") { captured.original = received; captured.copy = false; captured.value = memoryEditFields(received); }
+        else editor = null; renderManager(); onCatalog(data, received, "memory");
         await load(true).catch(() => { if (manager?.isConnected !== false) manager?.append(node("p", "profile-note", "记忆配置已保存；列表暂时未刷新，可稍后重新读取。")); });
       } catch (error) {
         if (editor !== captured) return;
@@ -678,8 +788,9 @@
       } finally { nativeAttach.saving = false; renderManager(); }
     }
     function renderMemoryManager() {
-      const cards = node("div", "profile-card-grid"), enabled = memoryEnabled();
-      const none = aiControl(node("article", "rbw-card")); none.append(node("h3", "", "不使用长期记忆"), node("p", "profile-note", "不查询、不写入长期记忆。当前聊天上文照常保留。"), node("p", "profile-note", enabled ? "新对话默认使用这一项；你可以明确选择已保存的记忆配置。其他记忆程序尚未接入。" : "其他记忆程序尚未接入，暂不能创建、复制或切换记忆库。")); cards.append(none);
+      if (editor?.kind === "memory") { manager.append(memoryEditorPanel()); return; }
+      const cards = node("div", "profile-card-grid");
+      const none = aiControl(node("article", "rbw-card")); none.append(node("h3", "", "不使用长期记忆"), node("p", "profile-note", "当前聊天上文照常保留。")); cards.append(none);
       function appendNativeCounts(card, source) {
         const counts = [source.facts === null ? "事实数未确认" : `${source.facts} 条事实`, source.documents === null ? "文档数未确认" : `${source.documents} 份文档`];
         card.append(node("p", "rbw-card-meta", `服务统计：${counts.join(" · ")}。不表示已全部读取。`));
@@ -699,10 +810,11 @@
       for (const row of data?.memory_profiles || []) {
         if (row.id === "none") continue;
         const card = aiControl(node("article", "rbw-card")); card.dataset.memoryProfileId = row.id;
-        const bankLabel = { empty: "当前记忆库为空", ready: "已有记忆资料", unavailable: "记忆库暂不可用", unknown: "记忆库状态尚未确认" }[row.bank_state];
-        card.append(node("h3", "", row.name), node("p", "profile-note", `${current().memory_profile_id === row.id ? "本对话已选 · " : ""}第 ${row.revision} 版 · Hindsight · ${memoryModeLabel(row.mode)}`));
+        const bankLabel = row.program === "mem0" && !row.available ? "待配置" : { empty: "当前记忆库为空", ready: "已有记忆资料", unavailable: "记忆库暂不可用", unknown: "记忆库状态尚未确认" }[row.bank_state];
+        card.append(node("h3", "", row.name), node("p", "profile-note", `${current().memory_profile_id === row.id ? "本对话已选 · " : ""}第 ${row.revision} 版 · ${memoryProgramLabel(row.program)} · ${memoryModeLabel(row.mode)}`));
         if (row.description) card.append(node("p", "rbw-card-meta", row.description));
-        card.append(node("p", "rbw-card-meta", `${row.connection_label || "这台 Mac 的 Hindsight"} · ${row.bank_label || "独立记忆范围"} · ${bankLabel}`));
+        const connectionLabel = row.connection_label && row.connection_label !== memoryProgramLabel(row.program) ? row.connection_label : "";
+        card.append(node("p", "rbw-card-meta", [connectionLabel, row.bank_label || "独立记忆范围", bankLabel].filter(Boolean).join(" · ")));
         if (row.locked_mode) card.append(node("p", "profile-note", "Hermes原有记忆，只读接入；Hermes仍可按原设置更新。"));
         const nativeSource = row.source_kind === nativeMemoryKind && data?.native_memory_sources.find(source => source.linked_profile_id === row.id);
         if (nativeSource) {
@@ -711,25 +823,25 @@
         }
         if (!row.available) card.append(node("p", "profile-note", row.reason || "当前不可用；配置和草稿仍保留。"));
         const actions = humanControl(node("div", "profile-actions")); actions.append(action("编辑记忆配置", () => openMemoryEditor(row))); card.append(actions);
-        const details = node("details", "profile-identifiers"); details.append(humanControl(node("summary", "", "更多")), node("p", "", `配置 ID：${row.id}`), node("p", "", `记忆范围引用：${row.bank_ref}`));
+        const details = node("details", "profile-identifiers"); details.append(humanControl(node("summary", "", "更多")));
         const secondary = humanControl(node("div", "profile-actions")); secondary.append(action("复制为新空库", () => openMemoryEditor(row, true))); details.append(secondary); card.append(details); cards.append(card);
       }
-      manager.append(cards); if (editor?.kind === "memory") manager.append(memoryEditorPanel());
+      manager.append(cards);
     }
     function renderManagement(container, kind = "ai") { if (manager !== container || managerKind !== kind) resetNativeRefresh(); manager = container; managerKind = kind; renderManager(true); if (!data) load().catch(error => { if (manager?.isConnected !== false) { manager.append(aiControl(node("p", "profile-error", readable(error, "配置列表暂时无法读取，已有配置仍保留。")))); } }); }
     function renderManager(force = false) {
       syncWorkspace();
       if (!manager || !force && manager.isConnected === false) return;
-      const top = node("div", "rbw-title-row"); top.append(aiControl(node("h3", "", managerKind === "memory" ? "记忆配置" : "AI 配置")));
+      const top = node("div", "rbw-toolbar rbw-action-group");
       const refresh = aiControl(action("刷新配置", () => load(true).catch(error => { manager?.append(aiControl(node("p", "profile-error", readable(error, "配置列表暂时无法读取。")))); }))); top.append(refresh);
-      if (managerKind === "ai") { const add = action("新建配置", () => openEditor(), "rbw-button rbw-primary"); add.disabled = !!pendingCreation || creationInvalid || creationBusy; top.append(add); } else if (memoryEnabled()) top.append(action("新建记忆配置", () => openMemoryEditor(), "rbw-button rbw-primary")); manager.replaceChildren(top);
+      if (typeof onMemoryManual === "function") top.append(aiControl(action("使用手册", () => onMemoryManual(managerKind === "memory" ? "memory" : "ai"))));
+      if (managerKind === "ai") { const add = action("新建配置", () => openEditor(), "rbw-button rbw-primary"); add.disabled = !!pendingCreation || creationInvalid || creationBusy; top.append(add); } else {
+        if (memoryEnabled() && editor?.kind !== "memory") top.append(action("新建记忆配置", () => openMemoryEditor(), "rbw-button rbw-primary"));
+      } manager.replaceChildren(top);
       if (managerKind === "memory") {
         renderMemoryManager(); return;
       }
-      const nativeBackends = ["codex", "pi", "hermes"].filter(backend => nativeSource(backend)?.enabled === true), nativeLabels = nativeBackends.map(backend => "原生 " + agents.labels[backend]).join("、");
-      manager.append(aiControl(node("p", "profile-note", nativeBackends.length
-        ? `这里管理同一份已保存的 AI 参数；普通对话与${nativeLabels}分别选择。管理读取不会启动 Agent。`
-        : "这里管理已保存的 AI 参数，在对话中选择配置后使用。")));
+      const nativeBackends = ["codex", "pi", "hermes", "claude"].filter(backend => nativeSource(backend)?.enabled === true);
       if (pendingCreation || creationInvalid || creationNotice) manager.append(creationPanel());
       if (defaultNotice) manager.append(aiControl(node("p", "profile-note", defaultNotice)));
       const cards = node("div", "profile-card-grid");
@@ -741,7 +853,7 @@
         if (!row.available && row.reason) reasons.push("普通对话：" + row.reason);
         if (native && row.native_available !== true && row.native_reason) reasons.push(`原生 ${agentName(row.agent_instance_id)}：` + row.native_reason);
         const actions = humanControl(node("div", "profile-actions")); actions.append(action("编辑", () => openEditor(row))); card.append(actions);
-        const details = node("details", "profile-identifiers"); details.append(humanControl(node("summary", "", "更多")), node("p", "rbw-card-meta", `执行设备：${inventory().device?.name || "这台电脑"}`));
+        const details = node("details", "profile-identifiers"); details.append(humanControl(node("summary", "", "更多")));
         if (reasons.length) details.append(node("p", "profile-note", "状态说明"), ...reasons.map(reason => node("p", "profile-note", reason)));
         const secondary = humanControl(node("div", "profile-actions")); const copyButton = action("复制配置", () => openEditor(row, true)); copyButton.disabled = !!pendingCreation || creationInvalid || creationBusy; secondary.append(copyButton);
         const defaultRevision = data.default_ai_profile_revision, scope = workspace;
@@ -781,10 +893,10 @@
     const english = language === "en", text = (zh, en) => english ? en : zh;
     const value = v => typeof v === "string" && v.trim() ? v.trim().replace(/\s+/g, " ") : null;
     let requested = value(model);
-    if (requested && /^local\/(codex|hermes|pi)\/native\/[a-f0-9]{64}$/.test(requested)) requested = text("已选原生模型", "Selected native model");
+    if (requested && /^local\/(codex|hermes|pi)\/native\/[a-f0-9]{64}$/.test(requested)) requested = null;
     else if (requested) requested = requested.replace(/^local\/(codex|hermes|pi|claude|dsh)\//, "");
     const label = [value(agent) || text("Agent 待选择", "Choose an Agent"),
-      requested || text("沿用原生配置", "Keep native settings"), value(effort)].filter(Boolean).join(" · ");
+      requested || text("模型待核对", "Model unverified"), value(effort) || text("强度待核对", "Effort unverified")].join(" · ");
     const title = [text("下轮请求配置：", "Next-turn requested configuration: ") + label,
       text("选择不代表原生已执行。", "The selection does not prove native execution."),
       value(memory) && text("记忆：", "Memory: ") + value(memory),
@@ -815,13 +927,13 @@
   // never changes a frozen send or performs I/O; each native renderer retains
   // its own durable draft, compatibility catalogue and native send protocol.
   function createNativeSelection({ agent, parseProfile }) {
-    return createNativeChoice({ agent, parseProfile, agents: ["codex", "pi", "hermes"],
+    return createNativeChoice({ agent, parseProfile, agents: ["codex", "pi", "hermes", "claude"],
       field: "configuration_selection", failureField: "configuration_selection_error", references: ["ai_profile_id", "ai_profile_revision"],
       fields: ["id", "revision", "name", "agent_instance_id", "device_id", "model_id", "reasoning_effort"],
       belongs: value => value.agent_instance_id === "local/" + agent, memory: false });
   }
   function createNativeMemorySelection({ agent }) {
-    return createNativeChoice({ agent, agents: ["codex"], field: "memory_selection", failureField: "memory_selection_error",
+    return createNativeChoice({ agent, agents: ["codex", "pi", "hermes", "claude", "dsh"], field: "memory_selection", failureField: "memory_selection_error",
       references: ["memory_profile_id", "memory_profile_revision"],
       fields: ["id", "revision", "name", "description", "habits", "program", "connection_id", "mode", "bank_ref", "locked_mode", "source_kind"],
       parseProfile: value => { if (!window.RabbitNativeMemory) throw Error("记忆配置组件尚未就绪。"); return window.RabbitNativeMemory.choice(value, { readOnly: true }); },
@@ -894,5 +1006,5 @@
       catalogStarted: () => { if (managed() && ready()) catalogKey = key(); }
     });
   }
-  window.RabbitProfiles = { create, profile, memoryProfile, nativeMemorySource, memoryRecall, memoryInfo, snapshot, sameSnapshot, selection, catalog, renderStatus, createNativeSelection, createNativeMemorySelection };
+  window.RabbitProfiles = { create, profile, memoryProfile, memoryProgramLabel, nativeMemorySource, memoryRecall, memoryInfo, snapshot, sameSnapshot, selection, catalog, renderStatus, createNativeSelection, createNativeMemorySelection };
 })();

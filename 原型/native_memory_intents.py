@@ -22,6 +22,7 @@ from memory_context import (MAX_PACKAGE_BYTES, memory_query, validate_recall_pac
 from rabbit_runtime.native_session_store import NativeSessionStoreError, request_sha256
 from native_materials import MAX_INPUT_BYTES, NativeMaterialError, validate_refs
 from profiles import validate_profile_id, validate_profile_revision
+from native_memory_selection import assert_memory_selection_in
 
 
 MAX_PROFILE_BYTES = 24 * 1024
@@ -31,7 +32,7 @@ _CLIENT = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}\Z')
 _FIELDS = frozenset(('client_id', 'inputs', 'ai_profile_id', 'ai_profile_revision',
                      'material_refs', 'memory_profile_id', 'memory_profile_revision'))
 _HERMES_FIELDS = (_FIELDS - {'inputs'}) | {'message'}
-_CLAUDE_FIELDS = _HERMES_FIELDS - {'ai_profile_id', 'ai_profile_revision'}
+_CLAUDE_FIELDS = _HERMES_FIELDS
 _DSH_FIELDS = frozenset(('client_id', 'message', 'memory_profile_id', 'memory_profile_revision', 'material_refs'))
 _STATES = frozenset(('preparing', 'ready', 'failed'))
 _ERRORS = {
@@ -231,6 +232,37 @@ def public(record):
         'created_at': record['created_at']}
 
 
+def _read_record_in(db, workspace_id, client_id):
+    row = db.execute('SELECT * FROM native_memory_intents WHERE workspace_id=? AND client_id=?',
+                     (workspace_id, client_id)).fetchone()
+    if row is None:
+        return None
+    try:
+        value = dict(row)
+        value['memory_profile'] = _decode(value['memory_profile'], MAX_PROFILE_BYTES)
+        if value['memory_inputs'] is not None:
+            value['memory_inputs'] = _decode(value['memory_inputs'], MAX_PACKAGE_BYTES)
+        record = _checked(value)
+        if record['workspace_id'] != workspace_id or record['client_id'] != client_id:
+            _fail('invalid_record')
+        return record
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        _fail('invalid_record')
+
+
+def frozen_memory_in(db, workspace_id, chat_id, client_id, raw_sha256):
+    """Reuse earlier memory admission in this submission's catalogue snapshot."""
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_memory_intents'").fetchone() is None:
+        return None
+    record = _read_record_in(db, workspace_id, client_id)
+    if record is not None:
+        if record['chat_id'] != chat_id or record['raw_request_sha256'] != raw_sha256:
+            _fail('intent_conflict')
+        if record['state'] != 'ready':
+            return None
+    return record
+
+
 class NativeMemoryIntents:
     def __init__(self, path, workspace_id, *, query_filter=None, request_kind='codex'):
         try:
@@ -275,21 +307,7 @@ class NativeMemoryIntents:
                 db.close()
 
     def _read_in(self, db, client_id):
-        row = db.execute('SELECT * FROM native_memory_intents WHERE workspace_id=? AND client_id=?',
-                         (self.workspace_id, client_id)).fetchone()
-        if row is None:
-            return None
-        try:
-            value = dict(row)
-            value['memory_profile'] = _decode(value['memory_profile'], MAX_PROFILE_BYTES)
-            if value['memory_inputs'] is not None:
-                value['memory_inputs'] = _decode(value['memory_inputs'], MAX_PACKAGE_BYTES)
-            record = _checked(value)
-            if record['workspace_id'] != self.workspace_id or record['client_id'] != client_id:
-                _fail('invalid_record')
-            return record
-        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
-            _fail('invalid_record')
+        return _read_record_in(db, self.workspace_id, client_id)
 
     @staticmethod
     def _match(record, chat_id, digest=None):
@@ -342,6 +360,14 @@ class NativeMemoryIntents:
             prior = self._match(self._read_in(db, client_id), chat_id, digest)
             if prior is not None:
                 return dict(prior, created=False, reused=True)
+            if self.request_kind in ('claude', 'dsh'):
+                profile_intent = None
+                if self.request_kind == 'claude':
+                    from native_profile_intents import frozen_claude_profile_in
+                    profile_intent = frozen_claude_profile_in(db, self.workspace_id, chat_id, client_id, digest)
+                if profile_intent is None:
+                    assert_memory_selection_in(db, self.workspace_id, self.request_kind, chat_id,
+                                               selection['id'], selection['revision'])
             if not callable(recaller):
                 _fail('invalid_request')
             profile = self._profile_in(db, selection)

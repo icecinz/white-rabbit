@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import stat
@@ -18,11 +19,13 @@ from urllib.parse import parse_qs, quote
 
 from native_catalogue import NativeChatCatalogue, chat_id
 from native_chat_selection import NativeChatSelections
+from native_memory_selection import NativeMemorySelections
 from native_maintenance import maintenance_state as observe_maintenance, file_identity
 from service_admission import admitted_native
 from rabbit_runtime.native_session_store import open_directory as _directory, file_identity as _identity, validate_path as _path, request_sha256
 from rabbit_runtime.hermes.session_store import HermesNativeStore, HermesStoreError, validate_session_id as _session_id
 from rabbit_runtime.hermes.rpc import HermesTransportError
+from rabbit_runtime.hermes.connection import NATIVE_SETTINGS_COMMIT
 from rabbit_runtime.hermes.profile_catalog import (HermesProfileUnavailable, project_hermes_catalogue,
     project_hermes_profiles, resolve_hermes_profile)
 from hermes_profile_intents import HermesProfileIntents, HermesProfileIntentError
@@ -156,7 +159,8 @@ def _public_state(value):
 class HermesNativeHolder:
     def __init__(self, store, identity, connection, *, workspace_id, profile_intents=None,
                  catalogue_observer=None, chat_title=None, materials=None, attachments=None,
-                 memory_intents=None, memory_recall=None, configuration_selections=None):
+                 memory_intents=None, memory_recall=None, configuration_selections=None,
+                 memory_selections=None):
         self.store, self.identity, self.connection = store, chat_id(identity), connection
         self.workspace_id = workspace_id
         self._action = threading.RLock()
@@ -179,12 +183,14 @@ class HermesNativeHolder:
         self.profile_intents, self._catalogue_observer = profile_intents, catalogue_observer
         self._profiles_enabled = profile_intents is not None and getattr(connection, 'session_settings_guard', False) is True
         self._native_settings = self._settings_capabilities = None
+        self._task_result_context = None
         self._last_profile_client = None
         self._chat_title = chat_title
         self.materials = materials
         self.attachments = attachments
         self.memory_intents, self.memory_recall = memory_intents, memory_recall
         self.configuration_selections = configuration_selections
+        self.memory_selections = memory_selections
 
     def _confirm_native_draft(self, draft):
         identity = draft['identity']
@@ -648,9 +654,82 @@ class HermesNativeHolder:
                 raise _error('open_failed', 'Hermes原生连接未准备好；原身份与回执保留。', status=503) from None
             return self.view(refresh=False)
 
-    def send(self, client_id, message, ai_profile_id=None, ai_profile_revision=None, material_refs=_MISSING,
-             memory_profile_id=_MISSING, memory_profile_revision=_MISSING):
+    def _task_capabilities(self):
+        """Probe only this ready backend; an SDK flag alone is not capability."""
+        if (getattr(self.connection, 'task_results_supported', False) is not True
+                or self._state != 'ready' or self._rpc is None or not self._rpc.running):
+            raise _error('task_results_unavailable', '当前Hermes连接不支持精确交办结果，尚未发送；没有改用普通聊天发送。')
+        try:
+            value = self._rpc.request('rabbit.prompt.read', {'action': 'capabilities'}, timeout=20)
+            fields = {'schema_version', 'installed_commit', 'connection_epoch', 'max_entries',
+                      'max_answer_bytes', 'mode'}
+            if (type(value) is not dict or set(value) != fields
+                    or type(value['schema_version']) is not int or value['schema_version'] != 1
+                    or value['installed_commit'] != NATIVE_SETTINGS_COMMIT
+                    or type(value['connection_epoch']) is not str
+                    or re.fullmatch(r'[0-9a-f]{32}', value['connection_epoch']) is None
+                    or type(value['max_entries']) is not int or value['max_entries'] != 128
+                    or type(value['max_answer_bytes']) is not int or value['max_answer_bytes'] != MAX_PROMPT_BYTES
+                    or value['mode'] != 'current_connection'):
+                raise ValueError
+        except Exception:
+            raise _error('task_results_unavailable', '当前Hermes精确结果能力尚未核对，尚未发送；没有改用普通聊天发送。') from None
+        return _copy(value)
+
+    def read_task_result(self, client_id):
+        """Read one observed completion; never open, resume or search history."""
+        unavailable = {'state': 'unavailable', 'reason': 'current_result_unavailable', 'answer': None, 'source': None}
         client_id = chat_id(client_id)
+        with self._action:
+            operation = self.store.operation(client_id)
+            context = self._task_result_context
+            if (operation is None or operation['chat_id'] != self.identity or operation['status'] != 'completed'
+                    or context is None or context[0] is not self._rpc
+                    or context[1:3] != (self._epoch, self._runtime)):
+                return unavailable
+            try:
+                if self._task_capabilities() != context[3]:
+                    return unavailable
+                value = self._rpc.request('rabbit.prompt.read',
+                    {'session_id': self._runtime, 'submission_id': client_id}, timeout=20)
+                if type(value) is not dict or set(value) != {'state', 'reason', 'answer', 'source'}:
+                    return unavailable
+                if value['state'] in ('incomplete', 'unavailable'):
+                    if value['answer'] is not None or value['source'] is not None:
+                        return unavailable
+                    if value['state'] == 'incomplete' and value['reason'] == 'answer_capacity':
+                        return dict(unavailable, state='incomplete', reason='result_capacity')
+                    return unavailable
+                answer, source = value['answer'], value['source']
+                if (value['state'] != 'available' or value['reason'] != 'current_connection_result'
+                        or type(answer) is not dict or set(answer) != {'text', 'sha256', 'bytes'}
+                        or type(source) is not dict or set(source) != {'kind', 'submission_id', 'runtime_sid',
+                            'connection_epoch', 'request_text_sha256', 'request_sha256', 'terminal_status'}
+                        or source['kind'] != 'hermes_gateway_completion' or source['submission_id'] != client_id
+                        or source['runtime_sid'] != self._runtime or source['connection_epoch'] != context[3]['connection_epoch']
+                        or source['request_sha256'] != operation['request_sha256']
+                        or type(source['request_text_sha256']) is not str
+                        or re.fullmatch(r'[0-9a-f]{64}', source['request_text_sha256']) is None
+                        or source['terminal_status'] != 'completed' or type(answer['text']) is not str):
+                    return unavailable
+                raw = answer['text'].encode('utf-8')
+                if (type(answer['bytes']) is not int or answer['bytes'] != len(raw)
+                        or answer['sha256'] != hashlib.sha256(raw).hexdigest()):
+                    return unavailable
+                if len(raw) > MAX_PROMPT_BYTES:
+                    return dict(unavailable, state='incomplete', reason='result_capacity')
+                if (self._state != 'ready' or not self._rpc.running or self._task_result_context is not context
+                        or context[0] is not self._rpc or context[1:3] != (self._epoch, self._runtime)):
+                    return unavailable
+                return _copy(value)
+            except Exception:
+                return unavailable
+
+    def send(self, client_id, message, ai_profile_id=None, ai_profile_revision=None, material_refs=_MISSING,
+             memory_profile_id=_MISSING, memory_profile_revision=_MISSING, *, track_result=False):
+        client_id = chat_id(client_id)
+        if type(track_result) is not bool:
+            raise _error('invalid_tracking', '交办结果选项需要明确的开关值。', status=400)
         try: valid = type(message) is str and bool(message.strip()) and len(message.encode('utf-8')) <= MAX_PROMPT_BYTES
         except UnicodeError: valid = False
         if not valid: raise _error('invalid_message', '消息需要非空文字，且不超过128KiB。', status=400)
@@ -711,6 +790,12 @@ class HermesNativeHolder:
                 choice = self.configuration_selections.read('hermes', self.identity)
                 if choice['selection']['ai_profile_id'] is not None:
                     raise _error('profiles_unavailable', '下轮配置需要原生会话配置保护；当前连接无法应用，尚未发送。')
+            if not self._profiles_enabled and self.memory_selections is not None:
+                # Existing receipts returned above. A downgraded connector
+                # cannot turn a managed memory choice into an unselected send.
+                choice = self.memory_selections.read('hermes', self.identity)
+                if choice['selection']['memory_profile_id'] is not None:
+                    raise _error('memory_disabled', '下轮记忆选择需要原生会话配置保护；当前连接无法应用，尚未发送。')
             if memory_selected and (not self._profiles_enabled or self.memory_intents is None or not callable(self.memory_recall)):
                 raise _error('memory_disabled', '这条Hermes连接尚未启用可核验的只读共享记忆；原稿保留。')
             if 'ai_profile_id' in body and not self._profiles_enabled:
@@ -718,6 +803,9 @@ class HermesNativeHolder:
             if material_refs is not _MISSING and (not self._profiles_enabled or self.materials is None):
                 raise _error('materials_unavailable', 'Hermes材料输入需要可核验的原生配置意图与材料读取入口；整份尚未发送。')
             if self._state != 'ready': raise _error('not_open', '请先明确连接这段Hermes原生对话。')
+            if track_result:
+                capabilities = self._task_capabilities()
+                self._task_result_context = (self._rpc, self._epoch, self._runtime, capabilities)
             self._read_native()
             if self._profiles_enabled:
                 self._ensure_idle()
@@ -818,7 +906,11 @@ class HermesNativeHolder:
             with self._cache:
                 self._active, self._terminal, self._saw_start = client_id, None, False
             try:
-                result = self._rpc.request('prompt.submit', {'session_id': self._runtime, 'text': request['message']}, timeout=20)
+                method = 'rabbit.prompt.submit' if track_result else 'prompt.submit'
+                params = {'session_id': self._runtime, 'text': request['message']}
+                if track_result: params['submission_id'] = client_id
+                if track_result and images: params['images'] = _copy(request['images'])
+                result = self._rpc.request(method, params, timeout=20)
                 if type(result) is dict and result.get('status') == 'streaming': self.store.accepted(client_id)
                 else: self._problem = 'prompt_result_unknown'
             except Exception as error:
@@ -1107,6 +1199,7 @@ class HermesNativeHolder:
                 self._reader.join(timeout=3)
                 if self._reader.is_alive(): raise RuntimeError('Hermes事件读取者仍未退出。')
             self._state = 'closed'
+            self._task_result_context = None
 
 
 class HermesNativeChats:
@@ -1116,6 +1209,7 @@ class HermesNativeChats:
         self.admission = admission
         self.catalogue = NativeChatCatalogue(catalogue_path, agent='hermes')
         self.configuration_selections = NativeChatSelections(catalogue_path, workspace_id=workspace_id)
+        self.memory_selections = NativeMemorySelections(catalogue_path, workspace_id=workspace_id)
         self._maintenance_catalogue_identity = file_identity(self.catalogue.path)
         self.profiles_enabled = getattr(connection, 'session_settings_guard', False) is True
         self.materials = materials
@@ -1167,7 +1261,8 @@ class HermesNativeChats:
                 profile_intents=self.profile_intents, catalogue_observer=self._remember_catalogue, chat_title=chat['title'],
                 materials=self.materials, attachments=self.attachments,
                 memory_intents=self.memory_intents, memory_recall=self.memory_recall,
-                configuration_selections=self.configuration_selections)
+                configuration_selections=self.configuration_selections,
+                memory_selections=self.memory_selections)
         return self._owners[identity]
 
     def sources(self):
@@ -1292,6 +1387,7 @@ class HermesNativeChats:
     @admitted_native
     def dispatch(self, method, path, *, query='', body=None):
         replay = None
+        track_result = False
         with self._lock:
             if self._closing: raise _error('closing', 'Hermes原生入口正在收尾。', status=503)
             if path == ROOT:
@@ -1357,8 +1453,11 @@ class HermesNativeChats:
                 fields = {k: v for k, v in body.items() if k != '_one_ai_csrf'} if type(body) is dict else body
                 try:
                     validate_fields(fields, allowed[action], ('ai_profile_id', 'ai_profile_revision', 'material_refs',
-                        'memory_profile_id', 'memory_profile_revision') if action == 'send' else ())
+                        'memory_profile_id', 'memory_profile_revision', 'track_result') if action == 'send' else ())
                     if action == 'send':
+                        track_result = fields.pop('track_result', False)
+                        if type(track_result) is not bool:
+                            raise _error('invalid_tracking', '交办结果选项需要明确的开关值。', status=400)
                         try:
                             validate_selection(fields)
                         except NativeMemoryIntentError:
@@ -1465,7 +1564,9 @@ class HermesNativeChats:
                     if self._owners.get(identity) is owner:
                         self._owners.pop(identity); self._reserved.discard(identity)
                 return result
-            try: return getattr(owner, action)(**fields)
+            try:
+                if action == 'send': return owner.send(**fields, track_result=track_result)
+                return getattr(owner, action)(**fields)
             except (HermesProfileIntentError, HermesProfileUnavailable, HermesProfileApplicationError,
                     NativeMaterialError, HermesMessageViewError, HermesAttachmentError, NativeMemoryIntentError) as error:
                 if action == 'send':

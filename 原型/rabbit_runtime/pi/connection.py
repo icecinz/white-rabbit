@@ -51,11 +51,18 @@ def _directory(value):
 class PiNativeConnection:
     node: str | Path
     cli_script: str | Path
+    enable_task_results: bool = False
 
     def __post_init__(self):
+        if type(self.enable_task_results) is not bool:
+            raise ValueError('Task result observation requires an explicit boolean.')
         # Preserve the executable's lexical entry, including a trusted symlink.
         object.__setattr__(self, 'node', _startup_file(self.node, executable=True))
         object.__setattr__(self, 'cli_script', _startup_file(self.cli_script, executable=False))
+
+    @property
+    def task_results_supported(self):
+        return self.enable_task_results
 
     def model_capabilities(self):
         """Construct the original SDK's bounded offline capability reader."""
@@ -65,7 +72,10 @@ class PiNativeConnection:
     def create_rpc(self, *, cwd, session_dir, session_file=None, startup_overrides=None):
         overrides = validate_startup_options(startup_overrides)
         directory, sessions = _directory(cwd), _directory(session_dir)
-        argv = [str(self.node), str(self.cli_script), '--mode', 'rpc', '--session-dir', str(sessions)]
+        argv = [str(self.node)]
+        if self.enable_task_results:
+            argv += ['--import', str(Path(__file__).with_name('tracked_rpc_bootstrap.mjs'))]
+        argv += [str(self.cli_script), '--mode', 'rpc', '--session-dir', str(sessions)]
         if session_file is not None:
             path = _path(session_file)
             try:

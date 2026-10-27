@@ -78,6 +78,45 @@
     for (const pub of value.publications) publication(pub, workspace);
     return { ...value, folders: value.folders === undefined ? [] : [...value.folders] };
   }
+  async function moveFile({ api, getWorkspace, directory: value, source, folder }) {
+    const workspace = getWorkspace();
+    if (!sha(workspace)) throw Error("工作区身份暂未核对。");
+    const data = directory(value, workspace);
+    const movePath = value => {
+      path(value);
+      if (value.split("/").length > 8 || /[\ud800-\udfff]/u.test(value)
+          || value.split("/").some(part => new TextEncoder().encode(part).length > 255)) throw Error("文件位置暂不可核对，请重新读取文件夹。");
+      return value;
+    };
+    if (!data.complete || !uuid(source?.id) || source.kind !== undefined && !indexed(source)
+        || reference(source) && !sessionId(source.session_id)) throw Error("请重新读取完整的对话文件夹。");
+    folderPath(folder);
+    if (folder && !data.folders.includes(folder)) throw Error("请从已有真实文件夹中选择位置。");
+    const rows = data.chats.filter(row => identity(row) === identity(source));
+    const bindings = data.bindings?.filter(binding => sameSource(binding, source)) || [];
+    const saved = rows[0], binding = bindings[0], file = saved?.file;
+    if (rows.length !== 1 || bindings.length !== 1 || !["current", "external_modified", "db_stale", "source_missing"].includes(saved?.status)
+        || saved.paths.length !== 1 || !object(file) || file.path !== saved.paths[0] || !sha(file.sha256)
+        || identity(file) !== identity(source) || file.folder !== file.path.split("/").slice(0, -1).join("/")) throw Error("这段对话的唯一文件和版本暂不可核对，请重新读取。");
+    const from = movePath(file.path), to = movePath((folder ? folder + "/" : "") + from.split("/").at(-1));
+    if (from === to) return false;
+    if (getWorkspace() !== workspace) throw Error("工作区已变化，请重新选择分组。");
+    const request = { binding_id: binding.publication_id, expected_head_id: binding.head_id,
+      source_path: from, source_sha256: file.sha256, target_folder: folder };
+    try {
+      const result = await api("/api/markdown-chats/move", { method: "POST", body: JSON.stringify(request) }, false);
+      if (!object(result) || Object.keys(result).sort().join(",") !== "binding_id,from_path,head_id,moved,sha256,size_bytes,to_path,workspace_id"
+          || getWorkspace() !== workspace || result.workspace_id !== workspace || result.binding_id !== request.binding_id
+          || result.head_id !== request.expected_head_id || result.from_path !== from || result.to_path !== to
+          || result.sha256 !== request.source_sha256 || result.moved !== true || !Number.isSafeInteger(result.size_bytes)
+          || result.size_bytes < 0 || result.size_bytes > 524288) throw Error("移动返回未能核对。");
+      return true;
+    } catch (_) {
+      const error = Error("移动结果尚未核对，请关闭后重新读取文件夹。");
+      error.groupObservationRequired = true;
+      throw error;
+    }
+  }
   function create({ api, root, getWorkspace, getCapabilities, onOpenChat, onOpenNative = null, onOpenHistory = null, onUseMaterial = null, canUseMaterial = () => false, onDirectory = null, onError = () => {} }) {
     let generation = 0, directoryReadVersion = 0, scope = "", source = null, prepared = null, busy = false, pending = [], focused = null, storageBlocked = false, shellWasInert = false;
     let status, tree, rootPath, destination, preview, confirm, check, form, recovery;
@@ -311,5 +350,5 @@
     root.addEventListener("keydown", event => { if (event.key === "Escape") { event.preventDefault(); close(); } });
     return { open, close, enabled, readDirectory };
   }
-  window.RabbitMarkdownChats = Object.freeze({ create, path, publication, filePreview });
+  window.RabbitMarkdownChats = Object.freeze({ create, path, publication, filePreview, moveFile });
 })();

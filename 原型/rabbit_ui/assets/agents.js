@@ -21,5 +21,11 @@
     return !!match && has(match[1]) && (backend === undefined || backend === match[1]);
   }
   const emptyModels = () => Object.fromEntries(ids.map(id => [id, ""]));
-  window.RabbitAgents = Object.freeze({ ids, labels, initials, has, instanceId, isInstance, backendOfInstance, validModelId, emptyModels });
+  function originalAppUrl(agent, threadId) {
+    const location = window.location;
+    return agent === "codex" && typeof threadId === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$(?![\s\S])/.test(threadId)
+      && location && ["http:", "https:"].includes(location.protocol) && ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname)
+      ? `codex://threads/${threadId}` : null;
+  }
+  window.RabbitAgents = Object.freeze({ ids, labels, initials, has, instanceId, isInstance, backendOfInstance, validModelId, emptyModels, originalAppUrl });
 })();

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rabbit-runtime"
-version = "0.1.4"
+version = "0.1.7"
 description = "Explicit native Agent transport and Codex, Pi, DSH, Claude and Hermes execution foundations"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,6 +20,6 @@ package-dir = {rabbit_runtime = "."}
 include-package-data = false
 
 [tool.setuptools.package-data]
-"rabbit_runtime.pi" = ["thinking_levels.mjs"]
+"rabbit_runtime.pi" = ["thinking_levels.mjs", "result_tracking.mjs", "tracked_rpc_bootstrap.mjs", "tracked_rpc_pin.json"]
 "rabbit_runtime.dsh" = ["worker.mjs"]
 "rabbit_runtime.hermes" = ["worker.mjs", "vendor/hermes_gateway/json-rpc-gateway.mjs", "vendor/hermes_gateway/LICENSE", "vendor/hermes_gateway/upstream.json"]

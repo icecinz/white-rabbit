@@ -1,0 +1,3 @@
+# Official PyPI mem0ai 2.2.1 wheel SHA256:
+# fe91bb91ac8926231993a4aa58df00a60c6c74c709e6a338fe399500776eef4d
+mem0ai==2.2.1

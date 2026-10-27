@@ -44,11 +44,20 @@
       const dismiss = button("关闭", close); head.append(heading, dismiss); panel.append(head);
       const status = node("p", "file-task-note"); status.setAttribute("role", "status");
       const choices = node("div", "conversation-group-choices");
+      let readRequired = false;
+      const fail = error => {
+        if (!current()) { onError(error); return; }
+        status.textContent = error.message || "暂未加入，原对话保留。";
+        if (error.groupObservationRequired) {
+          readRequired = true;
+          for (const control of choices.querySelectorAll("button")) control.disabled = true;
+        }
+      };
       const label = node("label", "conversation-group-name", "分组名称"), input = node("input", "file-task-path"); input.setAttribute("aria-label", "分组名称"); input.maxLength = 80;
       label.append(input);
       const controls = node("div", "file-task-actions");
       const make = button("新建分组", async () => {
-        if (busy || !current()) return;
+        if (busy || readRequired || !current()) return;
         const name = input.value.trim();
         if (!name || /[\\/:\x00-\x1f\x7f]/.test(name) || name.startsWith(".")) { status.textContent = "请填写普通的文件夹名称。"; input.focus(); return; }
         busy = true; make.disabled = dismiss.disabled = true;
@@ -62,8 +71,8 @@
           if (!current()) return;
           busy = false; close(); select(name);
           if (target) await directory.open(target, { folder: name, group: true });
-        } catch (error) { if (current()) status.textContent = error.message || "未能确认分组，请重新读取。"; else onError(error); }
-        finally { busy = false; if (!root.hidden && version === stamp) { dismiss.disabled = false; make.disabled = !current(); } }
+        } catch (error) { fail(error); }
+        finally { busy = false; if (!root.hidden && version === stamp) { dismiss.disabled = false; make.disabled = readRequired || !current(); } }
       }, true);
       controls.append(make); panel.append(choices, label, controls, status); root.append(panel);
       input.addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); make.click(); } });
@@ -71,7 +80,7 @@
         const value = await directory.readDirectory(); if (!current()) return;
         if (item) for (const path of value.folders) {
           const choose = button(path, async () => {
-            if (busy || !current()) return;
+            if (busy || readRequired || !current()) return;
             busy = true; dismiss.disabled = make.disabled = true; choose.disabled = true;
             try {
               const target = await onAssign(item, path, value);
@@ -79,9 +88,9 @@
               busy = false; close(); select(path);
               if (target) await directory.open(target, { folder: path, group: true });
             }
-            catch (error) { if (current()) status.textContent = error.message || "暂未加入，原对话保留。"; else onError(error); }
-            finally { busy = false; if (!root.hidden && version === stamp) { dismiss.disabled = false; make.disabled = choose.disabled = !current(); } }
-          }); choices.append(choose);
+            catch (error) { fail(error); }
+            finally { busy = false; if (!root.hidden && version === stamp) { dismiss.disabled = false; make.disabled = choose.disabled = readRequired || !current(); } }
+          }, true); choices.append(choose);
         }
         if (item && !value.folders.length) choices.append(node("p", "file-task-note", "先创建一个分组。"));
       } catch (error) { if (current()) status.textContent = error.message || "文件夹暂未读出。"; }

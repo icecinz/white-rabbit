@@ -25,6 +25,17 @@
     let enabled = true, visible = false, destroyed = false, language = "zh-CN", generation = 0, writeVersion = 0, reading = false, writing = false, posting = false, readPending = false, timer = null;
     let snapshot = null, readable = false, errorText = "", notice = "", displayScope = null;
     let openingForSend = false, autoOpenBlocked = false, viewVersion = 0, filePicker = null;
+    const aiProfile = value => {
+      if (!window.RabbitProfiles) throw Error("AI配置组件尚未加载；原稿保留。");
+      if (!exact(value, ["id", "revision", "name", "agent_instance_id", "device_id", "model_id", "reasoning_effort"])) throw Error("Claude原生AI配置快照不完整；原稿保留。");
+      const result = window.RabbitProfiles.profile(value, false);
+      if (result.agent_instance_id !== "local/claude" || result.device_id !== "local" || result.reasoning_effort !== null) throw Error("Claude原生入口只接受本机模型配置，强度沿用原生设置。");
+      return result;
+    };
+    const configurationSelection = window.RabbitProfiles?.createNativeSelection?.({ agent: "claude", parseProfile: aiProfile });
+    let configurationSelectionUnsupported = false, selectedProfile = null, profileRows = [], profilesReadable = false, profilesReading = false, profilesError = "", profileRequest = 0, profileVersion = 0;
+    const memorySelection = window.RabbitProfiles?.createNativeMemorySelection?.({ agent: "claude" });
+    let memorySelectionUnsupported = false;
     let selectedMemory = null, memoryRows = [], memoryReadable = false, memoryReading = false, memoryRequest = 0, memoryVersion = 0, memoryError = "", memorySourcesError = "";
     const memoryEvidence = new Map(), memoryCards = new Map(), memoryContexts = new Map();
     const requestNodes = new Map(), burned = new Set(); let digests = new Map();
@@ -54,9 +65,37 @@
     for (const control of [openButton, disconnectButton, sendButton, memoryRefresh]) control.setAttribute("data-control-interface", "ai");
     memoryLabel.append(memoryTitle, memorySelect); memoryBox.append(memoryLabel, memoryRefresh, memoryInfo); if (settingsPanel) settingsPanel.append(memoryBox, recovery); else { fallbackSettings.append(memoryBox); composer.replaceChildren(fallbackSettings, input, materialBox, composerActions); } page.replaceChildren(head, notices, messages, operationRecords, memorySources, requests, composer);
     function memoryBlocked() { return !enabled || destroyed || writing || !!pending || storageInvalid || unsettled() || pendingRequest() || snapshot?.activity.state !== "idle"; }
-    function memoryReady() { return selectedMemory === null || !!materialDraft && !!window.RabbitNativeMemory && memoryReadable && memoryRows.some(row => row.mode === "read_only" && canonical(row) === canonical(selectedMemory)); }
+    function selectionReady() { return !configurationSelectionUnsupported && (!configurationSelection || configurationSelection.ready()); }
+    function profileReady() { return selectionReady() && (!configurationSelection || configurationSelection.matchesProfile(selectedProfile)) && (selectedProfile === null || materialDraft?.profileInputs === true && profilesReadable && profileRows.some(row => row.available && canonical(window.RabbitProfiles.profile(row, false)) === canonical(selectedProfile))); }
+    async function loadProfiles() {
+      syncWorkspace(); if (!ready() || writing || profilesReading || !workspace || !Object.hasOwn(snapshot || {}, "profile_intents") && !selectedProfile && !configurationSelection?.managed()) return;
+      configurationSelection?.catalogStarted();
+      const stamp = generation, request = ++profileRequest, writes = writeVersion; profilesReading = true; render();
+      try {
+        const value = await api(apiRoot + "/profiles"); if (!sameScope(stamp) || request !== profileRequest || writes !== writeVersion) return;
+        if (!object(value) || value.workspace_id !== workspace || value.chat_id !== chatId || !Array.isArray(value.profiles) || value.profiles.length > 512 || typeof value.native_catalog_ready !== "boolean") throw Error("Claude配置目录身份或格式不完整。");
+        const rows = value.profiles.map(row => { const selected = window.RabbitProfiles.profile(row, false); if (selected.agent_instance_id !== "local/claude" || selected.device_id !== "local" || row.available === true && selected.reasoning_effort !== null) throw Error("Claude原生配置能力不一致。"); if (typeof row.available !== "boolean" || row.unavailable_reason !== null && (typeof row.unavailable_reason !== "string" || row.unavailable_reason.length > 1000)) throw Error("Claude配置兼容状态不完整。"); return { ...selected, available: row.available, unavailable_reason: row.unavailable_reason }; });
+        if (new Set(rows.map(row => row.id)).size !== rows.length) throw Error("Claude配置标识重复。");
+        profileRows = rows; profilesReadable = true; profilesError = "";
+      } catch (error) { if (sameScope(stamp) && request === profileRequest && writes === writeVersion) { profilesReadable = false; profilesError = String(error?.message || "Claude配置目录暂不可读。").slice(0, 300); } }
+      finally { if (sameScope(stamp) && request === profileRequest) { profilesReading = false; render(); } }
+    }
+    async function loadInitialProfiles() { if (!configurationSelection?.managed() || configurationSelection.takeCatalogRefresh(ready())) await loadProfiles(); }
+    function memorySelectionReady() { return !memorySelectionUnsupported && (!memorySelection || memorySelection.ready()); }
+    function memoryControlled() { return memorySelectionUnsupported || memorySelection?.controlled() === true; }
+    function memoryReady() { return memorySelectionReady() && (!memorySelection || memorySelection.matchesProfile(selectedMemory)) && (selectedMemory === null || !!materialDraft && !!window.RabbitNativeMemory && memoryReadable && memoryRows.some(row => row.mode === "read_only" && canonical(row) === canonical(selectedMemory))); }
+    function syncMemorySelection() {
+      const blocked = memoryBlocked() || !readable || posting || openingForSend || !!filePicker?.busy() || snapshot?.disconnect_unconfirmed === true;
+      configurationSelection?.synchronize({ blocked, save,
+        apply: value => { const previous = selectedProfile; selectedProfile = value === null ? null : aiProfile(value); if (!save()) { selectedProfile = previous; return false; } profileVersion++; return true; } });
+      if (configurationSelection?.takeCatalogRefresh(ready() && !writing && !posting && !openingForSend && !profilesReading)) { profilesReadable = false; void loadProfiles(); }
+      memorySelection?.synchronize({ blocked, save,
+        apply: value => { const previous = selectedMemory; selectedMemory = value; if (!save()) { selectedMemory = previous; return false; } memoryVersion++; return true; } });
+      if (memorySelection?.takeCatalogRefresh(readable && !writing && !posting && !openingForSend && !memoryReading)) { memoryReadable = false; void loadMemoryProfiles(); }
+    }
+    async function loadInitialMemoryProfiles() { if (!memorySelection?.managed() || memorySelection.takeCatalogRefresh(readable)) await loadMemoryProfiles(); }
     memorySelect.addEventListener("change", () => {
-      if (memoryBlocked()) { render(); return; }
+      if (memoryControlled() || memoryBlocked()) { render(); return; }
       const row = memoryRows.find(value => value.id === memorySelect.value && value.mode === "read_only");
       if (memorySelect.value && (!memoryReadable || !row)) { render(); return; }
       const previous = selectedMemory; selectedMemory = row ? memoryCodec().choice(row, { readOnly: true }) : null; memoryVersion++;
@@ -64,6 +103,7 @@
     });
     async function loadMemoryProfiles() {
       syncWorkspace(); if (destroyed || !enabled || !workspace || writing || !Object.hasOwn(snapshot || {}, "memory_intents")) return;
+      memorySelection?.catalogStarted();
       const stamp = generation, request = ++memoryRequest, writes = writeVersion, version = memoryVersion;
       const current = () => sameScope(stamp) && request === memoryRequest && writes === writeVersion && version === memoryVersion;
       memoryReading = true; render();
@@ -91,20 +131,25 @@
           || snapshot?.activity.state !== "idle" || Object.values(answerJournal).includes("submitted_unknown")) return null;
       return { key: canonical([workspace, chatId, generation, viewVersion, draftRevision, draft, draftMaterials, selectedMemory, memoryVersion, snapshot?.epoch, snapshot?.binding?.session_id]), refs: materialRefs(draftMaterials) };
     }
-    function save() { if (!storageKey || storageInvalid) return false; try { window.sessionStorage.setItem(storageKey, encode({ version: selectedMemory || pending?.memory_profile ? 3 : materialDraft ? 2 : 1, draft, ...(selectedMemory || pending?.memory_profile ? { selected_memory: selectedMemory } : {}), ...(materialDraft ? { material_refs: draftMaterials, draft_revision: draftRevision } : {}), pending, answer_journal: answerJournal })); return true; } catch (_) { return false; } }
+    function save() { if (!storageKey || storageInvalid) return false; try { window.sessionStorage.setItem(storageKey, encode({ version: selectedProfile || pending?.ai_profile || configurationSelection?.managed() ? 4 : selectedMemory || pending?.memory_profile ? 3 : materialDraft ? 2 : 1, draft, ...(selectedProfile || pending?.ai_profile || configurationSelection?.managed() ? { selected_profile: selectedProfile } : {}), ...(selectedMemory || pending?.memory_profile ? { selected_memory: selectedMemory } : {}), ...(materialDraft ? { material_refs: draftMaterials, draft_revision: draftRevision } : {}), pending, answer_journal: answerJournal, ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}), ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}) })); return true; } catch (_) { return false; } }
     function syncWorkspace() {
       const value = String(getWorkspace() || ""); if (value === workspace) return;
       save(); workspace = value; generation++; writeVersion++; openingForSend = autoOpenBlocked = false; viewVersion++;
       storageKey = value ? "rabbit.claude-native.page.v1." + encodeURIComponent(value) + "." + chatId : "";
+      configurationSelectionUnsupported = false; configurationSelection?.reset(undefined, { workspace, chatId }); selectedProfile = null; profileRows = []; profilesReadable = profilesReading = false; profilesError = ""; profileRequest++; profileVersion++;
+      memorySelectionUnsupported = false; memorySelection?.reset(undefined, { workspace, chatId });
       draft = ""; draftMaterials = []; draftRevision = 0; pending = null; selectedMemory = null; memoryRows = []; memoryReadable = memoryReading = false; memoryError = memorySourcesError = ""; memoryRequest++; memoryVersion++; memoryEvidence.clear(); memoryCards.clear(); memoryContexts.clear(); answerJournal = Object.create(null); storageInvalid = false; snapshot = null; readable = false; errorText = notice = ""; reading = writing = posting = readPending = false; digests.clear(); requestNodes.clear(); burned.clear(); nativeMaterials?.setScope(encode([workspace, chatId, generation, null]));
       try {
         const stored = storageKey && JSON.parse(window.sessionStorage.getItem(storageKey) || "null");
         if (stored) {
-          if (!object(stored) || ![1, 2, 3].includes(stored.version) || stored.version >= 2 && !materialDraft || !text(stored.draft) || stored.draft.length > 200000 || !object(stored.answer_journal) || Object.keys(stored.answer_journal).length > 128) throw Error();
+          if (!object(stored) || ![1, 2, 3, 4].includes(stored.version) || stored.version >= 2 && !materialDraft || stored.version === 4 && materialDraft?.profileInputs !== true || !text(stored.draft) || stored.draft.length > 200000 || !object(stored.answer_journal) || Object.keys(stored.answer_journal).length > 128) throw Error();
           draft = stored.draft;
-          if (stored.version === 3) { selectedMemory = stored.selected_memory === null ? null : memoryCodec().choice(stored.selected_memory, { readOnly: true }); }
+          if (stored.version === 4) selectedProfile = stored.selected_profile === null ? null : aiProfile(stored.selected_profile);
+          if (stored.version === 3 || stored.version === 4 && Object.hasOwn(stored, "selected_memory")) { selectedMemory = stored.selected_memory === null ? null : memoryCodec().choice(stored.selected_memory, { readOnly: true }); }
           if (stored.version >= 2) { draftMaterials = materialRefs(stored.material_refs); if (!Number.isSafeInteger(stored.draft_revision) || stored.draft_revision < 0) throw Error(); draftRevision = stored.draft_revision; }
           if (stored.pending !== null) { const item = stored.pending; if (item?.material_refs !== undefined) { if (stored.version < 2) throw Error(); pending = materialDraft.restore(item, workspace, chatId); } else { if (!object(item) || !uuid(item.client_id) || !text(item.message) || !item.message.trim() || item.message.length > 200000 || !sha(item.request_sha256) || !["submitted_unknown", "accepted"].includes(item.status) || item.draft_revision !== undefined && (!Number.isSafeInteger(item.draft_revision) || item.draft_revision < 0)) throw Error(); pending = { client_id: item.client_id, message: item.message, request_sha256: item.request_sha256, status: item.status, draft_revision: item.draft_revision === undefined ? draftRevision : item.draft_revision }; } }
+          if (Object.hasOwn(stored, "configuration_selection")) { if (!configurationSelection) throw Error(); configurationSelection.reset(stored.configuration_selection, { workspace, chatId }); }
+          if (Object.hasOwn(stored, "memory_selection")) { if (!memorySelection) throw Error(); memorySelection.reset(stored.memory_selection, { workspace, chatId }); }
           for (const [digest, status] of Object.entries(stored.answer_journal)) { if (!sha(digest) || status !== "submitted_unknown") throw Error(); answerJournal[digest] = status; }
         }
       } catch (_) { storageInvalid = true; errorText = "浏览器保存的Claude回执无法读取；原记录保留，尚未提交。"; }
@@ -150,13 +195,13 @@
     function idle() { return ready() && uuid(snapshot?.binding?.session_id) && snapshot?.activity.state === "idle" && !unsettled() && !pendingRequest(); }
     // Only the Send gesture may connect a confirmed unopened, idle session.
     function canOpenForSend() {
-      return !filePicker?.busy() && enabled && !destroyed && visible && !root.hidden && !document.hidden && readable && !autoOpenBlocked
+      return selectionReady() && memorySelectionReady() && !filePicker?.busy() && enabled && !destroyed && visible && !root.hidden && !document.hidden && readable && !autoOpenBlocked
         && snapshot?.connection.state === "not_open" && !snapshot.connection.problem && snapshot.activity.state === "idle"
         && !pending && !unsettled() && !pendingRequest() && !storageInvalid;
     }
     async function connectForSend() {
       const stamp = generation, view = viewVersion, message = draft, revision = draftRevision,
-        memory = canonical(selectedMemory), version = memoryVersion, refs = canonical(draftMaterials);
+        memory = canonical(selectedMemory), version = memoryVersion, ai = canonical(selectedProfile), aiVersion = profileVersion, refs = canonical(draftMaterials);
       if (typeof TextEncoder !== "function" || new TextEncoder().encode(message).length > 128 * 1024) {
         errorText = "消息超过Claude单次发送容量；原稿保留，请缩短后发送。"; render(); return false;
       }
@@ -170,7 +215,7 @@
         if (!proof || proof.schema_version !== 1 || proof.agent !== "claude" || proof.workspace_id !== workspace || proof.chat_id !== chatId || proof.connection?.state !== "ready") { if (currentView) notice = tr("连接结果待核对；原稿保留，请在设置中核对连接，没有自动发送或重试。", "Connection outcome needs verification. The draft remains; check the connection in Settings. Nothing was sent or retried."); return false; }
         autoOpenBlocked = false;
         return currentView && !filePicker?.busy() && idle() && !pending && !storageInvalid && draft === message && draftRevision === revision
-          && memoryVersion === version && canonical(selectedMemory) === memory && canonical(draftMaterials) === refs;
+          && memoryVersion === version && canonical(selectedMemory) === memory && profileVersion === aiVersion && canonical(selectedProfile) === ai && canonical(draftMaterials) === refs;
       } finally { if (sameScope(stamp)) { openingForSend = false; render(); } }
     }
     function activeClient() { return uuid(snapshot?.activity?.client_id) ? snapshot.activity.client_id : pending?.client_id || [snapshot?.operation, ...(snapshot?.operations || [])].find(row => row?.kind === "prompt" && ["submitted_unknown", "accepted"].includes(row.status))?.client_id; }
@@ -197,6 +242,8 @@
       catch (_) { if (current()) storageInvalid = true; throw Error("Claude原消息或材料指纹无法核对；原记录保留，不会重新提交。"); }
       if (!current()) return;
       if (snapshot && (snapshot.epoch !== value.epoch || snapshot.binding?.session_id !== value.binding?.session_id)) { requestNodes.clear(); burned.clear(); }
+      if (configurationSelection) configurationSelection.observe(value); else if (Object.hasOwn(value, "configuration_selection") || Object.hasOwn(value, "configuration_selection_error")) configurationSelectionUnsupported = true;
+      if (memorySelection) memorySelection.observe(value); else if (Object.hasOwn(value, "memory_selection") || Object.hasOwn(value, "memory_selection_error")) memorySelectionUnsupported = true;
       settle(value); if (!storageInvalid) errorText = ""; snapshot = value; digests = next; readable = true; updateMemoryEvidence(value);
     }
     function fail(error, fallback) { const message = String(error?.message || ""); errorText = message && message.length < 300 ? message : fallback; onError(error); }
@@ -222,19 +269,19 @@
       } catch (error) {
         if (sameScope(stamp)) { if (action === "send" && error.accepted === false && !pending?.memory_profile && pending?.client_id === body.client_id && pending.status === "submitted_unknown") { const old = pending; pending = null; if (!save()) pending = old; } fail(error, "结果仍待核对，没有自动重复提交。"); }
         return null;
-      } finally { if (sameScope(stamp)) { writing = posting = false; render(); await refresh(); if (action === "open") await loadMemoryProfiles(); } }
+      } finally { if (sameScope(stamp)) { writing = posting = false; render(); await refresh(); if (action === "open") { await loadInitialProfiles(); await loadInitialMemoryProfiles(); } } }
     }
     async function send() {
-      syncWorkspace(); if (filePicker?.busy() || openingForSend || !(idle() || canOpenForSend()) || writing || pending || storageInvalid || !materialsReady() || !memoryReady() || !text(draft) || !draft.trim()) return;
+      syncWorkspace(); if (filePicker?.busy() || openingForSend || !(idle() || canOpenForSend()) || writing || pending || storageInvalid || !materialsReady() || !memoryReady() || !selectionReady() || idle() && !profileReady() || !text(draft) || !draft.trim()) return;
       if (!idle()) { if (await connectForSend()) await send(); return; }
       const view = viewVersion;
-      const stamp = generation, message = draft, refs = materialRefs(draftMaterials), memory = selectedMemory && memoryCodec().choice(selectedMemory, { readOnly: true }), revision = draftRevision, epoch = snapshot.epoch, sessionId = snapshot.binding.session_id, client = window.crypto?.randomUUID?.(); if (!uuid(client)) { errorText = "无法生成稳定Claude请求编号，尚未发送。"; render(); return; }
+      const stamp = generation, message = draft, refs = materialRefs(draftMaterials), choice = selectedProfile && aiProfile(selectedProfile), choiceVersion = profileVersion, memory = selectedMemory && memoryCodec().choice(selectedMemory, { readOnly: true }), revision = draftRevision, epoch = snapshot.epoch, sessionId = snapshot.binding.session_id, client = window.crypto?.randomUUID?.(); if (!uuid(client)) { errorText = "无法生成稳定Claude请求编号，尚未发送。"; render(); return; }
       writing = true; render();
       try {
         if (typeof TextEncoder !== "function" || new TextEncoder().encode(message).length > 128 * 1024) throw Error("消息超过Claude单次发送容量；原稿保留，请缩短后发送。");
         for (const ref of refs) await nativeMaterials.read(ref, { refresh: true });
-        const prepared = refs.length || memory ? await materialDraft.prepare(client, message, refs, workspace, chatId, sessionId, revision, memory) : { client_id: client, message, request_sha256: await promptHash(message), status: "submitted_unknown", ...(materialDraft ? { draft_revision: revision } : {}) };
-        if (!sameScope(stamp) || filePicker?.busy() || view !== viewVersion || !visible || root.hidden || document.hidden || !idle() || pending || draft !== message || draftRevision !== revision || encode(refs) !== encode(draftMaterials) || epoch !== snapshot.epoch || sessionId !== snapshot.binding.session_id || !materialsReady() || !memoryReady() || canonical(memory) !== canonical(selectedMemory)) return;
+        const prepared = refs.length || memory || choice ? await materialDraft.prepare(client, message, refs, workspace, chatId, sessionId, revision, memory, choice) : { client_id: client, message, request_sha256: await promptHash(message), status: "submitted_unknown", ...(materialDraft ? { draft_revision: revision } : {}) };
+        if (!sameScope(stamp) || filePicker?.busy() || view !== viewVersion || !visible || root.hidden || document.hidden || !idle() || pending || draft !== message || draftRevision !== revision || encode(refs) !== encode(draftMaterials) || epoch !== snapshot.epoch || sessionId !== snapshot.binding.session_id || !materialsReady() || !memoryReady() || !profileReady() || choiceVersion !== profileVersion || canonical(choice) !== canonical(selectedProfile) || canonical(memory) !== canonical(selectedMemory)) return;
         pending = prepared;
         if (!save()) { pending = null; throw Error("浏览器不能保存Claude回执，尚未发送；原稿保留。"); }
       } catch (error) { if (sameScope(stamp)) fail(error, "原消息无法保存，尚未提交。"); }
@@ -251,17 +298,27 @@
     function putDraft(value) {
       syncWorkspace();
       if (!object(value) || value.workspace_id !== workspace || !workspace || value.chat_id !== chatId || !enabled || destroyed || filePicker?.busy() || writing || pending || storageInvalid || unsettled() || pendingRequest() || snapshot?.activity.state === "running" || snapshot?.activity.state === "unknown" || draft !== "" || input.value !== "" || draftMaterials.length) throw Error("Claude原生草稿已有内容、请求尚未结束或所属对话已变化；没有覆盖。");
-      if (Object.hasOwn(value, "ai_profile")) throw Error("Claude原生对话沿用本机配置；目标模型配置没有放入草稿。");
+      const hasProfile = Object.hasOwn(value, "ai_profile"), choice = hasProfile ? value.ai_profile === null ? null : aiProfile(value.ai_profile) : selectedProfile;
+      if (choice !== null && materialDraft?.profileInputs !== true) throw Error("Claude模型配置输入组件未就绪；原草稿保留。");
+      if (hasProfile && configurationSelection?.controlled() && (!selectionReady() || !configurationSelection.matchesProfile(choice))) throw Error("Claude下轮配置由专员管理；交接配置不同或尚未核实，原草稿保留。");
+      if (hasProfile && selectedProfile !== null && canonical(choice) !== canonical(selectedProfile)) throw Error("Claude原生对话已有不同AI配置；没有覆盖。");
       const hasMemory = Object.hasOwn(value, "memory_profile"), memory = hasMemory ? value.memory_profile === null ? null : memoryCodec().choice(value.memory_profile, { readOnly: true }) : selectedMemory;
+      if (hasMemory && memoryControlled() && (!memorySelectionReady() || !memorySelection?.matchesProfile(memory))) throw Error("Claude下轮记忆由专员管理；交接选择不同或尚未核实，原草稿保留。");
       if (hasMemory && selectedMemory !== null && canonical(memory) !== canonical(selectedMemory)) throw Error("Claude原生对话已有不同的共享记忆选择；没有覆盖。");
       const refs = materialRefs(value.material_refs);
-      if (!text(value.text) || !(value.text.trim() || value.text === "" && (refs.length || hasMemory)) || typeof TextEncoder !== "function" || new TextEncoder().encode(value.text).length > 128 * 1024) throw Error("交接文字无效或超过Claude发送容量。");
+      if (!text(value.text) || !(value.text.trim() || value.text === "" && (refs.length || hasMemory || hasProfile)) || typeof TextEncoder !== "function" || new TextEncoder().encode(value.text).length > 128 * 1024) throw Error("交接文字无效或超过Claude发送容量。");
       if (refs.length && (!materialsEnabled || !nativeMaterials || !value.material_preview)) throw Error("Claude文本文件交接尚未启用或缺少完整预览；整份未放入。");
       if (value.material_preview !== undefined) { if (!refs.length || !nativeMaterials) throw Error("Claude材料预览缺少所选版本；整份未放入。"); nativeMaterials.seed(refs, value.material_preview); }
-      const previous = { draft, input: input.value, refs: draftMaterials, memory: selectedMemory, revision: draftRevision };
-      draft = value.text; draftMaterials = refs; selectedMemory = memory; draftRevision++; input.value = draft;
-      if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedMemory = previous.memory; draftRevision = previous.revision; throw Error("浏览器不能保存Claude原生草稿；原内容保留，尚未发送。"); }
-      if (hasMemory) memoryVersion++; render(); return true;
+      const previous = { draft, input: input.value, refs: draftMaterials, memory: selectedMemory, profile: selectedProfile, revision: draftRevision };
+      draft = value.text; draftMaterials = refs; selectedMemory = memory; selectedProfile = choice; draftRevision++; input.value = draft;
+      if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedMemory = previous.memory; selectedProfile = previous.profile; draftRevision = previous.revision; throw Error("浏览器不能保存Claude原生草稿；原内容保留，尚未发送。"); }
+      if (hasMemory) memoryVersion++; if (hasProfile) profileVersion++; render(); return true;
+    }
+    function selectSavedProfile(value) {
+      syncWorkspace();
+      if (!exact(value, ["workspace_id", "chat_id", "profile"]) || value.workspace_id !== workspace || value.chat_id !== chatId
+          || selectedProfile !== null || selectedMemory !== null || Object.keys(answerJournal).length || configurationSelection?.controlled()) throw Error("Claude原生配置入口已有选择或所属对话已变化；没有覆盖。");
+      return putDraft({ workspace_id: workspace, chat_id: chatId, text: "", ai_profile: aiProfile(value.profile) });
     }
     async function answer(record, result, fingerprint) {
       const current = snapshot?.requests.find(row => row.token === record.token);
@@ -468,12 +525,24 @@
       }
       for (const key of requestNodes.keys()) if (!keys.has(key)) requestNodes.delete(key); requests.replaceChildren(...nodes);
     }
+    function reportedModel() {
+      if (!readable) return "";
+      // Only live SDK replies report this observation. Imported SessionMessage
+      // pages and init aliases cannot establish the latest visible reply model.
+      const record = [...(snapshot?.native_records || [])].reverse().find(row =>
+        row.sdk_type === "AssistantMessage" && row.data?.parent_tool_use_id == null);
+      const data = record?.data, model = data?.model;
+      if (!object(data) || data.error != null || data.truncated === true || data.display_truncated === true || data.display_placeholder === true
+          || data.session_id != null && data.session_id !== snapshot?.binding?.session_id
+          || !text(model) || !model.trim() || model.length > 256 || /[\x00-\x1f\x7f]/.test(model)) return "";
+      return tr("已加载回复报告：", "Loaded reply reported: ") + model;
+    }
     function renderProfileStatus() {
       const renderStatus = window.RabbitProfiles?.renderStatus;
       statusCard.hidden = typeof renderStatus !== "function"; connection.hidden = !statusCard.hidden;
       if (fallbackTitle) fallbackTitle.textContent = tr("备用选择", "Fallback choices");
       if (statusCard.hidden) return;
-      const status = !readable || storageInvalid || autoOpenBlocked || snapshot?.disconnect_unconfirmed === true ? tr("待核对", "Needs verification")
+      const status = !selectionReady() || selectedProfile !== null && !profileReady() || !memorySelectionReady() || selectedMemory !== null && !memoryReady() || !readable || storageInvalid || autoOpenBlocked || snapshot?.disconnect_unconfirmed === true ? tr("待核对", "Needs verification")
         : openingForSend || snapshot?.connection.state === "opening" ? tr("正在连接", "Connecting")
         : snapshot?.connection.state === "failed" ? tr("连接失败", "Connection failed")
         : pendingRequest() ? tr("等待确认", "Waiting for confirmation")
@@ -481,13 +550,12 @@
         : pending || unsettled() ? tr("待核对", "Needs verification")
         : idle() ? tr("空闲", "Idle")
         : ["not_open", "closed"].includes(snapshot?.connection.state) ? tr("未连接", "Not connected") : tr("待核对", "Needs verification");
-      const inherited = tr("沿用原生配置", "Use native settings");
-      renderStatus(statusCard, { agent: "Claude Code", model: inherited, effort: null,
+      renderStatus(statusCard, { agent: "Claude Code", model: profileReady() && selectedProfile?.model_id || null, effort: null,
         memory: selectedMemory ? `${selectedMemory.name} · ${tr("只读", "Read only")}${memoryReady() ? "" : tr("（待核对）", " (needs verification)")}` : tr("不附加共享记忆", "No added shared memory"),
-        status, observed: "", language });
+        status, observed: reportedModel(), language });
     }
     function render() {
-      renderProfileStatus();
+      syncMemorySelection(); renderProfileStatus();
       moreSummary.textContent = tr("更多", "More"); operationSummary.textContent = tr("操作记录", "Operation records");
       const scope = encode([workspace, snapshot?.epoch ?? null, snapshot?.binding?.session_id ?? null]); if (displayScope !== scope) { displayScope = scope; messages.replaceChildren(); historyTools.replaceChildren(); rawRecords.open = false; moreMenu.open = operationRecords.open = false; requestNodes.clear(); }
       handoffView?.setScope(encode([workspace, chatId, scope])); root.setAttribute("lang", language); settingsPanel?.setAttribute("lang", language);
@@ -497,7 +565,7 @@
       input.placeholder = tr("给 Claude 发消息…", "Message Claude…"); connection.textContent = readable ? `Claude · ${snapshot.connection.state} · ${snapshot.activity.state}` : tr("Claude状态待核对", "Claude status unconfirmed");
       openButton.hidden = ready(); openButton.disabled = !enabled || destroyed || !readable || openingForSend || writing || !!pending || unsettled() || pendingRequest();
       if (openingForSend) connection.textContent = tr("正在连接 Claude…", "Connecting Claude…");
-      sendButton.disabled = !!filePicker?.busy() || openingForSend || !(idle() || canOpenForSend()) || writing || !!pending || storageInvalid || !materialsReady() || !memoryReady() || !draft.trim(); const stopping = !draft.trim() && snapshot?.activity.state === "running";
+      sendButton.disabled = !!filePicker?.busy() || openingForSend || !(idle() || canOpenForSend()) || writing || !!pending || storageInvalid || !materialsReady() || !memoryReady() || !selectionReady() || idle() && !profileReady() || !draft.trim(); const stopping = !draft.trim() && snapshot?.activity.state === "running";
       sendButton.textContent = stopping ? tr("停止", "Stop") : tr("发送", "Send");
       sendButton.setAttribute("aria-label", stopping ? tr("停止本轮", "Stop current turn") : tr("发送", "Send"));
       sendButton.setAttribute("data-composer-action", stopping ? "stop" : "send");
@@ -508,10 +576,13 @@
       const memoryStale = selectedMemory !== null && !memoryReady(), savedMemory = selectedMemory && "saved:" + selectedMemory.id + ":" + selectedMemory.revision;
       if (memoryStale) { const option = node("option", "", selectedMemory.name + tr(" · 原选第 ", " · saved v") + selectedMemory.revision + tr(" 版（待重新选择）", " (review required)")); option.value = savedMemory; option.disabled = true; memorySelect.append(option); }
       for (const row of memoryRows) { const option = node("option", "", row.name + tr(" · 第 ", " · v") + row.revision + tr(" 版", "") + (row.mode === "read_only" ? tr(" · 只读", " · read only") : tr(" · 本入口不支持读写", " · read-write unavailable here"))); option.value = row.id; option.disabled = !memoryReadable || row.mode !== "read_only"; memorySelect.append(option); }
-      memorySelect.value = memoryStale ? savedMemory : selectedMemory?.id || ""; memorySelect.disabled = memoryBlocked(); memoryRefresh.disabled = !enabled || destroyed || writing || memoryReading;
-      memoryInfo.textContent = [tr("Claude 原生记忆照常；这里只为下一次发送附加只读资料。不附加不会清除原生上文。", "Claude native memory stays unchanged. Read-only sources are added for the next send. Choosing none does not erase earlier context."), memoryStale ? tr("原选版本已变化或尚未核实，请重新选择；原稿保留。", "The saved version changed or is unverified. Choose explicitly; the draft remains.") : "", memoryReading ? tr("正在读取保存的参数…", "Reading saved parameters…") : "", memoryError].filter(Boolean).join(" ");
-      memoryBox.hidden = !Object.hasOwn(snapshot || {}, "memory_intents") && !selectedMemory && !pending?.memory_profile;
+      memorySelect.value = memoryStale ? savedMemory : selectedMemory?.id || ""; memorySelect.disabled = memoryControlled() || memoryBlocked(); memoryRefresh.disabled = !enabled || destroyed || writing || memoryReading;
+      memoryInfo.textContent = [memorySelection?.message(language), memorySelectionUnsupported ? tr("记忆配置状态组件未就绪；原草稿保留。", "Memory configuration state is unavailable; the original draft remains.") : "", tr("Claude 原生记忆照常；这里只为下一次发送附加只读资料。不附加不会清除原生上文。", "Claude native memory stays unchanged. Read-only sources are added for the next send. Choosing none does not erase earlier context."), memoryStale ? tr("原选版本已变化或尚未核实，请重新选择；原稿保留。", "The saved version changed or is unverified. Choose explicitly; the draft remains.") : "", memoryReading ? tr("正在读取保存的参数…", "Reading saved parameters…") : "", memoryError].filter(Boolean).join(" ");
+      memoryBox.hidden = !Object.hasOwn(snapshot || {}, "memory_intents") && !selectedMemory && !pending?.memory_profile && !memoryControlled();
+      memoryLabel.hidden = memoryBox.hidden || memoryControlled();
       notices.replaceChildren(); if (errorText) notices.append(node("p", "rbs-error", errorText)); if (notice) notices.append(node("p", "rbs-note", notice));
+      if (profilesError) notices.append(node("p", "rbs-note", profilesError));
+      if (!selectionReady() || selectedProfile !== null && !profileReady()) notices.append(node("p", "rbs-note", configurationSelection?.message(language) || tr("AI配置尚未核对；原草稿保留。", "AI configuration needs verification; the draft remains.")));
       if (snapshot?.binding?.persisted === true && uuid(snapshot.binding.session_id)) notices.append(node("p", "rbs-note", tr("已保存原生会话：", "Saved native session: ") + snapshot.binding.session_id + " · " + snapshot.binding.cwd));
       if (pending) notices.append(node("p", "rbs-note", pending.status === "accepted" ? tr("Claude已接收原消息，等待原生完成；不会重复发送。", "Claude accepted the original message; waiting for completion without resending.") : posting ? tr("正在提交；原消息和编号已保存。", "Submitting; the original message and ID are saved.") : tr("原消息结果尚未确认；刷新只读核对原编号，不会自动重发。", "The original outcome is unknown. Refresh only checks its original ID without resending.")));
       if (snapshot?.binding?.persisted === false) notices.append(node("p", "rbs-note", tr("原生持久化尚未核实；不据此承诺重启后可恢复。", "Native persistence is not verified; restart recovery is not yet claimed.")));
@@ -536,8 +607,8 @@
     }
     input.addEventListener("input", () => { draft = input.value; draftRevision++; if (!save()) errorText = tr("新草稿暂不能保存，请保持页面打开；原回执仍保留。", "The new draft could not be saved. Keep this page open; the original receipt remains."); render(); });
     const visibility = () => { if (document.hidden) { viewVersion++; clearTimeout(timer); timer = null; save(); } else if (visible) refresh(); }; document.addEventListener?.("visibilitychange", visibility);
-    async function show() { if (destroyed || !enabled) return; viewVersion++; visible = true; root.hidden = false; syncWorkspace(); render(); await refresh(); await loadMemoryProfiles(); }
-    async function showSettings() { if (destroyed || !enabled) return; viewVersion++; visible = true; root.hidden = true; syncWorkspace(); render(); await refresh(); await loadMemoryProfiles(); }
+    async function show() { if (destroyed || !enabled) return; viewVersion++; visible = true; root.hidden = false; syncWorkspace(); render(); await refresh(); await loadInitialProfiles(); await loadInitialMemoryProfiles(); }
+    async function showSettings() { if (destroyed || !enabled) return; viewVersion++; visible = true; root.hidden = true; syncWorkspace(); render(); await refresh(); await loadInitialProfiles(); await loadInitialMemoryProfiles(); }
     function hide() { viewVersion++; visible = false; root.hidden = true; clearTimeout(timer); timer = null; save(); }
     function destroy() { hide(); destroyed = true; settingsPanel?.remove(); generation++; readPending = false; document.removeEventListener?.("visibilitychange", visibility); }
     function setLanguage(value) { language = value === "en" ? "en" : "zh-CN"; render(); }
@@ -545,9 +616,9 @@
     function setMaterialInputs(value) { materialsEnabled = value === true; render(); }
     function getConfigurationContext() {
       if (destroyed || !workspace || workspace !== String(getWorkspace() || "")) return null;
-      return { agent_instance_id: "local/claude", profile_id: null, profile_name: null, profile_revision: null, model_id: null, reasoning_effort: null };
+      return { agent_instance_id: "local/claude", profile_id: selectedProfile?.id || null, profile_name: selectedProfile?.name || null, profile_revision: selectedProfile?.revision || null, model_id: profileReady() ? selectedProfile?.model_id || null : null, reasoning_effort: null };
     }
-    render(); return { show, showSettings, hide, destroy, refresh, setLanguage, setEnabled, setMaterialInputs, getConfigurationContext, putDraft, getTextSnapshot };
+    render(); return { show, showSettings, hide, destroy, refresh, setLanguage, setEnabled, setMaterialInputs, getConfigurationContext, selectSavedProfile, putDraft, getTextSnapshot };
   }
   window.RabbitClaudeNative = Object.freeze({ create });
 })();

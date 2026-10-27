@@ -26,13 +26,15 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from chat_store import (ChatStore, BusyError, ContextSelectionConflict, SourceUpdateConflict,
                         ProfileSelectionConflict, imported_message, source_update_comparison, source_image_backfill_plan)
 from rabbit_preparation import build_context, ContextCapacityError, prepare_text_file_messages
-from library import LibraryView
+from library import LibraryView, conversation_query, conversation_directory
 from preferences import Preferences, management, validate_model_id
 import app_settings
 import app_management
 from rabbit_memory import memory_management
 from rabbit_memory import memory_connection_check
 import native_model_management
+import native_work_status
+import external_work
 import native_chat_management
 from model_catalog import ModelCatalog
 from rabbit_content.materials import ImageStore, MAX_FILE_BYTES
@@ -56,6 +58,9 @@ from rabbit_content.history_markdown_reference import HistoryMarkdownReference
 from rabbit_content.markdown_chat_document import render as render_markdown_chat, render_native as render_native_markdown, native_revision
 from native_markdown_source import NativeMarkdownSource
 from rabbit_content.markdown_chat_sync import MarkdownChatSyncError
+from rabbit_content.markdown_sync_files import MarkdownMoveError
+import native_task_input
+import native_task_result
 from rabbit_content.file_intent import validate_intent, validate_inputs
 from rabbit_content.file_task_store import FileTaskStore, FileTaskStoreError
 from agent_registry import IDS as AGENT_IDS, LABELS as AGENT_LABELS, has as registered_agent, browser_definitions
@@ -65,7 +70,7 @@ from specialist_http import SpecialistHTTP, SpecialistHTTPError, decode_body as 
 from rabbit_preparation import handoff as native_handoff, MaterialReferenceError
 from native_materials import NativeMaterials, NativeMaterialError
 from native_profile_catalog import (NativeProfileUnavailable, resolve_native_profile,
-                                    project_native_capabilities)
+                                    project_native_capabilities, project_claude_capabilities, resolve_claude_profile)
 from native_chat_selection import (NativeChatSelections, NativeChatSelectionConflict,
                                    NativeChatSelectionCorrupt)
 from native_memory_selection import (NativeMemorySelections, NativeMemorySelectionConflict,
@@ -305,7 +310,15 @@ class Service:
                  specialist_connection=None, specialist_work_document=False, native_chat_connection=None,
                  pi_native_connection=None, hermes_native_connection=None, claude_native_connection=None,
                  dsh_native_connection=None, interface_tasks_enabled=False, dsh_root=None, dsh_decoder=None,
-                 markdown_dir=None):
+                 markdown_dir=None, memory_program_drivers=None, external_work_reader_factory=None):
+        if (memory_program_drivers is not None and
+                (type(memory_program_drivers) is not dict or
+                 set(memory_program_drivers) - {'hermes_files', 'mem0'})):
+            raise ValueError('记忆程序需要宿主明确提供的固定驱动。')
+        self._memory_program_drivers = dict(memory_program_drivers or {})
+        if external_work_reader_factory is not None and not callable(external_work_reader_factory):
+            raise ValueError('外部工作读取器需要可信宿主明确提供。')
+        self._external_work = None
         if specialist_factory is not None and specialist_connection is not None:
             raise ValueError('专员只能使用一个可信原生构造入口。')
         if specialist_factory is not None and not callable(specialist_factory):
@@ -425,6 +438,8 @@ class Service:
             repair_sources = self._initialize_owned(adapters, codex_root, hermes_db, memory_driver,
                 native_source_getter, native_transport_factory, file_adapters, claude_root, pi_root,
                 dsh_root, dsh_decoder)
+            self._external_work = external_work.ExternalWork(self.workspace_id,
+                reader_factory=external_work_reader_factory)
             # Only explicit selection writes create selection metadata. Startup
             # and reads neither change the schema nor discover/open an Agent.
             self.native_selections = NativeChatSelections(self.store.path, workspace_id=self.workspace_id)
@@ -872,7 +887,8 @@ class Service:
                                       accepted=False if method != 'GET' else None)
         from rabbit_runtime.claude.session_store import ClaudeStoreError
         try:
-            return self.claude_native_chats.dispatch(method, path, query=query, body=body)
+            return self._native_configuration_result('claude', method, path,
+                self.claude_native_chats.dispatch(method, path, query=query, body=body))
         except ClaudeStoreError as error:
             raise SpecialistHTTPError(409, 'claude_native_' + error.code,
                 'Claude原生绑定或回执需要核对，未自动覆盖或重发。') from None
@@ -898,7 +914,8 @@ class Service:
                                       accepted=False if method != 'GET' else None)
         from rabbit_runtime.dsh.session_store import DSHStoreError
         try:
-            return self.dsh_native_chats.dispatch(method, path, query=query, body=body)
+            return self._native_configuration_result('dsh', method, path,
+                self.dsh_native_chats.dispatch(method, path, query=query, body=body))
         except DSHStoreError as error:
             raise SpecialistHTTPError(409, 'dsh_native_' + error.code,
                 'DSH原生绑定或回执需要核对，未自动覆盖或重发。') from None
@@ -1205,6 +1222,18 @@ class Service:
         result['native_profile_capabilities'] = self._native_profile_capabilities()
         return result
 
+    @admitted_service
+    def work_status(self):
+        return native_work_status.snapshot(self)
+
+    @admitted_service
+    def external_work_snapshot(self):
+        return self._external_work.read()
+
+    @admitted_service
+    def external_work_operation(self, body):
+        return self._external_work.operation(body)
+
     def _native_profile_capabilities(self):
         native = self.native_chats
         return {'codex': project_native_capabilities(
@@ -1215,7 +1244,11 @@ class Service:
             'hermes': project_hermes_capabilities(
                 self.hermes_native_chats.catalogue_snapshot()
                 if self.hermes_native_chats is not None and self.hermes_native_chats.profiles_enabled else None,
-                enabled=self.hermes_native_chats is not None and self.hermes_native_chats.profiles_enabled)}
+                enabled=self.hermes_native_chats is not None and self.hermes_native_chats.profiles_enabled),
+            'claude': project_claude_capabilities(
+                self.claude_native_chats.catalogue_snapshot()
+                if self.claude_native_chats is not None and self.claude_native_chats.profiles_enabled else None,
+                enabled=self.claude_native_chats is not None and self.claude_native_chats.profiles_enabled)}
 
     @admitted_service
     def saved_ai_profile_inventory(self):
@@ -1229,12 +1262,12 @@ class Service:
 
     def _native_configuration_agent(self, agent):
         controllers = {'codex': self.native_chats, 'pi': self.pi_native_chats,
-                       'hermes': self.hermes_native_chats}
+                       'hermes': self.hermes_native_chats, 'claude': self.claude_native_chats}
         if type(agent) is not str or agent not in controllers:
             raise SpecialistHTTPError(400, 'native_chat_selection_invalid',
-                '当前只支持普通Codex、Pi和Hermes对话的下轮配置。', accepted=False)
+                '当前支持普通Codex、Pi、Hermes和Claude对话的下轮配置。', accepted=False)
         if (controllers[agent] is None or
-                agent == 'hermes' and not controllers[agent].profiles_enabled):
+                agent in ('hermes', 'claude') and not controllers[agent].profiles_enabled):
             raise SpecialistHTTPError(503, 'native_chat_selection_unavailable',
                 '这台入口尚未启用所选原生Agent。', accepted=False)
 
@@ -1268,12 +1301,19 @@ class Service:
                     inference_performed=False, connection_checked=False)
 
     def _native_memory_configuration_agent(self, agent):
-        if type(agent) is not str or agent != 'codex':
+        controllers = {'codex': self.native_chats, 'pi': self.pi_native_chats,
+                       'hermes': self.hermes_native_chats, 'claude': self.claude_native_chats,
+                       'dsh': self.dsh_native_chats}
+        if type(agent) is not str or agent not in controllers:
             raise SpecialistHTTPError(400, 'native_chat_memory_selection_invalid',
-                '当前只支持普通Codex对话的下轮共享记忆选择。', accepted=False)
-        if self.native_chats is None:
+                '当前支持普通Codex、Pi、Hermes、Claude和DSH对话的下轮共享记忆选择。', accepted=False)
+        if (controllers[agent] is None or
+                agent == 'pi' and not callable(getattr(controllers[agent].connection, 'model_capabilities', None)) or
+                agent == 'hermes' and not controllers[agent].profiles_enabled or
+                agent in ('claude', 'dsh') and not callable(getattr(
+                    getattr(controllers[agent], 'memory_selections', None), 'none_fence', None))):
             raise SpecialistHTTPError(503, 'native_chat_memory_selection_unavailable',
-                '这台入口尚未启用普通原生Codex。', accepted=False)
+                '这台入口尚未启用所选原生Agent的记忆选择保护。', accepted=False)
 
     @admitted_service
     def native_chat_memory_configuration(self, agent, chat_id):
@@ -1301,29 +1341,30 @@ class Service:
 
     def _native_configuration_result(self, agent, method, path, value):
         roots = {'codex': '/api/native-chats/', 'pi': '/api/pi-chats/',
-                 'hermes': '/api/hermes-chats/'}
+                 'hermes': '/api/hermes-chats/', 'claude': '/api/claude-chats/',
+                 'dsh': '/api/dsh-chats/'}
         prefix = roots[agent]
         if method == 'GET' and path.startswith(prefix) and '/' not in path[len(prefix):]:
-            try:
-                selection = self.native_selections.read(agent, path[len(prefix):])
-            except NativeChatSelectionCorrupt:
-                # Configuration metadata must not hide accepted/unknown native
-                # receipts. The client blocks fresh sends while recovery stays
-                # available through this view and the dedicated receipt route.
-                value = dict(value, configuration_selection_error={
-                    'code': 'native_chat_selection_corrupt',
-                    'message': '下轮配置记录无法核对；已有消息和回执仍保留。'})
-            else:
-                value = dict(value, configuration_selection=selection)
-            if agent == 'codex':
+            if agent in ('codex', 'pi', 'hermes', 'claude'):
                 try:
-                    memory = self.native_memory_selections.read(agent, path[len(prefix):])
-                except NativeMemorySelectionCorrupt:
-                    value = dict(value, memory_selection_error={
-                        'code': 'native_chat_memory_selection_corrupt',
-                        'message': '下轮记忆选择无法核对；已有消息和回执仍保留。'})
+                    selection = self.native_selections.read(agent, path[len(prefix):])
+                except NativeChatSelectionCorrupt:
+                    # Configuration metadata must not hide accepted/unknown native
+                    # receipts. The client blocks fresh sends while recovery stays
+                    # available through this view and the dedicated receipt route.
+                    value = dict(value, configuration_selection_error={
+                        'code': 'native_chat_selection_corrupt',
+                        'message': '下轮配置记录无法核对；已有消息和回执仍保留。'})
                 else:
-                    value = dict(value, memory_selection=memory)
+                    value = dict(value, configuration_selection=selection)
+            try:
+                memory = self.native_memory_selections.read(agent, path[len(prefix):])
+            except NativeMemorySelectionCorrupt:
+                value = dict(value, memory_selection_error={
+                    'code': 'native_chat_memory_selection_corrupt',
+                    'message': '下轮记忆选择无法核对；已有消息和回执仍保留。'})
+            else:
+                value = dict(value, memory_selection=memory)
         return value
 
     @admitted_service
@@ -1346,6 +1387,37 @@ class Service:
     @admitted_service
     def native_chat_names(self):
         return native_chat_management.names(self)
+
+    @admitted_service
+    def conversations_list(self, query='', agent='all', offset=0, limit=20):
+        options = conversation_query(query, agent, offset, limit)
+        page = self.list_library(**options, include_internal=False)
+        return conversation_directory(page, workspace_id=self.workspace_id, options=options)
+
+    def _native_task_payload(self, fields, *, forwarded=False, refresh_native=False):
+        result = native_task_result.read(self, fields['agent'], fields['chat_id'],
+            fields['client_id'], refresh_native=refresh_native)
+        return dict(result, workspace_id=self.workspace_id, scope='native_task/v1',
+            agent=fields['agent'], chat_id=fields['chat_id'], client_id=fields['client_id'],
+            forwarded=forwarded)
+
+    @admitted_service
+    def dispatch_native_task(self, body):
+        fields = {key: value for key, value in body.items() if key != '_one_ai_csrf'} if type(body) is dict else body
+        submitted = native_task_input.dispatch(self, fields)
+        # The POST acknowledgement reads only original submission metadata.
+        # Fetching result text is a separate explicit read, never another send.
+        try:
+            return self._native_task_payload(fields, forwarded=submitted['forwarded'])
+        except Exception:
+            # Admission already happened. Even a later read's local rejection
+            # cannot turn this submission into an unsent acknowledgement.
+            raise native_task_input.NativeTaskInputError('submission_unknown', 'unknown') from None
+
+    @admitted_service
+    def read_native_task(self, agent, chat_id, client_id):
+        return self._native_task_payload(dict(agent=agent, chat_id=chat_id, client_id=client_id),
+            refresh_native=True)
 
     @admitted_service
     def rename_native_chat(self, body):
@@ -1387,14 +1459,43 @@ class Service:
     def apply_memory_profile_operation(self, body):
         fields = self._profile_write_fields(body,
             ('action', 'creation_id', 'profile', 'profile_id', 'revision', 'changes'))
-        return dict(memory_management.apply_memory_profile_operation(self.memory_profiles,
-            self.native_memory_bindings, fields), workspace_id=self.workspace_id)
+        result = memory_management.apply_memory_profile_operation(self.memory_profiles,
+            self.native_memory_bindings, fields)
+        profile = result['profile']
+        if profile['program'] == 'hermes_files' and fields['action'] in ('create', 'copy'):
+            # Explicit local creation only; no service/model call and no import
+            # of the original Hermes files. A failed setup leaves saved intent.
+            try:
+                self._memory_driver_for_profile(profile).ensure_bank(profile)
+            except (MemoryServiceError, ValueError, OSError):
+                pass
+        return dict(result, workspace_id=self.workspace_id)
 
     @admitted_service
     def check_memory_connection(self, profile_id, revision):
         return dict(memory_connection_check.check_memory_connection(self.memory_profiles,
             self.native_memory_bindings, self._memory_driver_for_profile, profile_id, revision),
             workspace_id=self.workspace_id)
+
+    @admitted_service
+    def memory_document(self, fields, *, writing=False):
+        allowed = ('profile_id', 'name', 'text', 'expected_sha256') if writing else ('profile_id', 'name')
+        value = self._profile_write_fields(fields, allowed)
+        if set(value) != set(allowed) or value.get('name') not in ('MEMORY.md', 'USER.md'):
+            raise ValueError('请选择明确的记忆配置和文档。')
+        profile = self.memory_profiles.get(value['profile_id'])
+        if profile['program'] != 'hermes_files' or self.native_memory_bindings.get(profile['id']) is not None:
+            raise ValueError('此入口只编辑小白兔独立的 Hermes 记忆文档。')
+        driver = self._memory_driver_for_profile(profile)
+        try:
+            document = (driver.write_document(profile, value['name'], value['text'],
+                        expected_sha256=value['expected_sha256']) if writing else
+                        driver.read_document(profile, value['name']))
+        except MemoryServiceError as error:
+            raise SpecialistHTTPError(error.status or 503, error.code, str(error),
+                **({} if writing else {'accepted': False})) from None
+        return dict(scope='memory_document', profile_id=profile['id'], program='hermes_files',
+                    document=document, workspace_id=self.workspace_id)
 
     def _migrate_profile_parameters(self):
         # Preserve parameter intent even if a formerly used connection is now
@@ -1486,7 +1587,8 @@ class Service:
             self._resolve_ai_profile(fields)
         except (ValueError, KeyError, RuntimeError, OSError, subprocess.SubprocessError):
             native = {'local/codex': self.native_chats, 'local/pi': self.pi_native_chats,
-                      'local/hermes': self.hermes_native_chats}.get(fields['agent_instance_id'])
+                      'local/hermes': self.hermes_native_chats,
+                      'local/claude': self.claude_native_chats}.get(fields['agent_instance_id'])
             if native is None or fields['device_id'] != 'local':
                 raise
             self._resolve_native_profile_from_cache(fields)
@@ -1494,6 +1596,18 @@ class Service:
     def _resolve_native_profile_from_cache(self, profile):
         """Validate saved parameters against RAM discovery, never open or RPC."""
         backend = profile['agent_instance_id']
+        if backend == 'local/claude':
+            native = self.claude_native_chats
+            if native is None or not native.profiles_enabled:
+                raise NativeProfileUnavailable('这台入口尚未启用 Claude 原生模型配置。')
+            if profile['device_id'] != 'local':
+                raise NativeProfileUnavailable('当前只核对本机 Claude 的原生模型配置。')
+            if not profile['model_id'] and profile['reasoning_effort'] is None:
+                return {}
+            snapshot = native.catalogue_snapshot()
+            if snapshot is None:
+                raise NativeProfileUnavailable('尚未观察到 Claude SDK 模型候选；请先打开原生对话并更新目录。')
+            return resolve_claude_profile(profile, snapshot['catalogue'])
         if backend == 'local/hermes':
             native = self.hermes_native_chats
             if native is None or not native.profiles_enabled:
@@ -1580,7 +1694,8 @@ class Service:
         authentication = getattr(driver, 'authentication_fingerprint', None)
         if type(authentication) is not str or not re.fullmatch(r'[0-9a-f]{64}', authentication):
             raise MemoryServiceError('memory_service_unavailable', '记忆连接的认证摘要暂时无法核验。')
-        value = {'connection': 'local/hindsight', 'url': driver.base_url, 'token': authentication}
+        value = {'connection': getattr(driver, 'connection_id', 'local/hindsight'),
+                 'url': driver.base_url, 'token': authentication}
         native_scope = getattr(driver, 'source_fingerprint', None)
         if native_scope is not None:
             value['native_readonly_source'] = native_scope
@@ -1601,6 +1716,14 @@ class Service:
 
     def _memory_driver_for_profile(self, profile):
         binding = self.native_memory_bindings.get(profile['id'])
+        program = profile.get('program', 'hindsight')
+        if program != 'hindsight':
+            if binding is not None:
+                raise MemoryServiceError('memory_connection_changed', '原记忆绑定与程序不符，没有自动换库。')
+            driver = self._memory_program_drivers.get(program)
+            if driver is None:
+                raise MemoryServiceError('memory_service_unavailable', '这份记忆程序尚未配置，原选择保留。')
+            return driver
         if binding is None:
             return self._memory_driver()
         current = self._get_native_source()
@@ -1700,16 +1823,51 @@ class Service:
             pass
         return result
 
+    def _memory_program_connection(self, program):
+        if program == 'hindsight':
+            return self._memory_connection()
+        connection_id, label = {
+            'hermes_files': ('local/hermes-files', 'Hermes 文档记忆'),
+            'mem0': ('local/mem0', 'Mem0'),
+        }[program]
+        result = dict(id=connection_id, program=program, label=label, available=False,
+                      write_supported=False, reason='尚未配置这份记忆程序。')
+        driver = self._memory_program_drivers.get(program)
+        if driver is None:
+            return result
+        try:
+            fingerprint = self._memory_fingerprint(driver)
+            key = ('health', fingerprint)
+            with self._memory_cache_lock:
+                old = self._memory_cache.get(key)
+            if old and time.monotonic() - old[0] < 30:
+                health = old[1]
+            else:
+                health = driver.health()
+                with self._memory_cache_lock:
+                    self._memory_cache[key] = (time.monotonic(), health)
+            if health.get('available') is True:
+                result.update(available=True, reason='')
+            elif isinstance(health.get('reason'), str):
+                # Only local fixed diagnostics; never expose a private config.
+                result['reason'] = ('Mem0 需要配置模型、嵌入服务和独立运行环境。'
+                                    if program == 'mem0' else 'Hermes 文件核心暂不可用。')
+        except (MemoryServiceError, ValueError, OSError):
+            pass
+        return result
+
     def _public_memory_profile(self, profile, connection=None, *, fresh=False):
         result = dict(make_memory_snapshot(profile), available=False, bank_state='unknown', reason='',
-                      connection_label='这台 Mac 的 Hindsight', bank_label='独立记忆范围',
+                      connection_label={'hermes_files': 'Hermes 文档记忆', 'mem0': 'Mem0'}.get(
+                          profile['program'], '这台 Mac 的 Hindsight'), bank_label='独立记忆范围',
                       created_at=profile.get('created_at'), updated_at=profile.get('updated_at'))
         binding = self.native_memory_bindings.get(profile['id'])
         if binding:
             result.update(source_kind='hermes_hindsight_readonly', locked_mode=True,
                           native_source_ref=self._native_source_ref(binding),
                           bank_label='Hermes原有记忆（只读内容）')
-        connection = connection or self._memory_connection()
+        connection = (connection if connection and connection.get('program') == profile['program']
+                      else self._memory_program_connection(profile['program']))
         if not connection['available']:
             return dict(result, bank_state='unavailable', reason=connection['reason'])
         if profile['mode'] == 'read_write' and connection.get('write_supported') is not True:
@@ -1739,7 +1897,7 @@ class Service:
         # so the editor does not fabricate a second namespace on a retry.
         try:
             if self.native_memory_bindings.get(profile['id']) is None:
-                self._memory_driver().ensure_bank(profile)
+                self._memory_driver_for_profile(profile).ensure_bank(profile)
         except (MemoryServiceError, ValueError, OSError):
             pass
         with self._memory_cache_lock:
@@ -1758,8 +1916,10 @@ class Service:
         fields = self._profile_write_fields(body, ('revision',) + MUTABLE_FIELDS + ('program', 'connection_id'))
         revision = fields.pop('revision', None)
         # A program or connection is a fixed reference, never a new endpoint.
-        if fields.pop('program', 'hindsight') != 'hindsight' or fields.pop('connection_id', 'local/hindsight') != 'local/hindsight':
-            raise ValueError('请选择已接入的本机 Hindsight 连接。')
+        original = self.memory_profiles.get(profile_id)
+        if (fields.pop('program', original['program']) != original['program'] or
+                fields.pop('connection_id', original['connection_id']) != original['connection_id']):
+            raise ValueError('更换记忆程序请新建配置，原记忆不会自动迁移。')
         writer = self.memory_profiles.copy if copying else self.memory_profiles.update
         if not copying and self.native_memory_bindings.get(profile_id) is not None and fields.get('mode', 'read_only') != 'read_only':
             raise ValueError('原有Hermes记忆在这里固定只读取；要保存新信息，请新建独立记忆配置。')
@@ -1781,7 +1941,8 @@ class Service:
                 'memory_profiles': [{'id': 'none', 'name': '不使用长期记忆', 'available': True,
                     'detail': '小白兔不查询或写入长期记忆；当前聊天上文照常带入。已接入的文字连接隔离自动记忆。'}] +
                     [self._public_memory_profile(profile, connection) for profile in self.memory_profiles.list()['profiles']],
-                'memory_connections': [connection],
+                'memory_connections': [connection] + [self._memory_program_connection(program)
+                    for program in ('hermes_files', 'mem0') if program in self._memory_program_drivers],
                 'native_memory_sources': self._native_source_inventory(connection),
                 'default_ai_profile_id': saved['default_state']['ai_profile_id'],
                 'default_ai_profile_revision': saved['default_state']['revision'], 'default_memory_profile_id': 'none',
@@ -1838,8 +1999,12 @@ class Service:
         return {'profile': self._public_ai_profile(saved)}
 
     @admitted_service
-    def profile_selection(self, chat_id):
+    def profile_selection(self, chat_id, *, metadata_only=False):
         selection = self.store.get_profile_selection(chat_id)
+        if metadata_only:
+            return {'workspace_id': self.workspace_id, 'scope': 'chat_configuration',
+                    'chat_id': chat_id, 'profile_selection': selection,
+                    'inference_performed': False, 'connection_checked': False}
         profile_id = selection['ai_profile_id']
         return {'profile_selection': selection,
                 'ai_profile': self._public_ai_profile(self.profiles.get(profile_id)) if profile_id else None,
@@ -1847,13 +2012,13 @@ class Service:
                     if selection['memory_profile_id'] != 'none' else {'id': 'none', 'name': '不使用长期记忆', 'available': True}}
 
     @admitted_service
-    def set_profile_selection(self, chat_id, body):
+    def set_profile_selection(self, chat_id, body, *, metadata_only=False):
         fields = self._profile_write_fields(body, ('revision', 'ai_profile_id', 'memory_profile_id'))
         revision = fields.pop('revision', None)
         if not ('ai_profile_id' in fields or 'memory_profile_id' in fields):
             raise ValueError('请选择需要更换的配置。')
         self.store.set_profile_selection(chat_id, revision=revision, **fields)
-        return self.profile_selection(chat_id)
+        return self.profile_selection(chat_id, metadata_only=metadata_only)
 
     @staticmethod
     def _accepts_keyword(runner, name):
@@ -2193,6 +2358,15 @@ class Service:
             return dict(workspace_id=self.workspace_id, folder=folder)
 
     @admitted_service
+    def move_markdown_file(self, body):
+        fields = {'binding_id', 'expected_head_id', 'source_path', 'source_sha256', 'target_folder'}
+        if type(body) is not dict or set(body) - fields - {'_one_ai_csrf'} or not fields <= body.keys():
+            raise MarkdownMoveError('invalid_arguments')
+        with self.publication_lock:
+            result = self._markdown_registry().move_file(**{key: body[key] for key in fields})
+            return dict(result, workspace_id=self.workspace_id)
+
+    @admitted_service
     def open_markdown_folder(self, body):
         if type(body) is not dict or set(body) - {'_one_ai_csrf'}:
             raise ValueError('只能打开当前对话文件夹。')
@@ -2431,6 +2605,7 @@ class Service:
         result = self.store.get(chat_id)
         result['profile_selection'] = self.store.get_profile_selection(chat_id)
         snapshots = self.store.profile_message_snapshots(chat_id)
+        request_configurations = self.store.message_request_configurations(chat_id)
         memory_evidence = self.store.memory_message_info(chat_id)
         memory_receipts = self.memory_runner.receipts_for_chat(chat_id) if self.memory_runner else {}
         file_receipts = self._file_receipts(chat_id)
@@ -2473,6 +2648,8 @@ class Service:
                 message['file_task'] = file_receipts[message['id']]
             if message['id'] in snapshots:
                 message['profile_snapshot'] = snapshots[message['id']]
+            if message['id'] in request_configurations:
+                message['request_configuration'] = request_configurations[message['id']]
             if message['id'] in memory_evidence:
                 message['memory_info'] = memory_evidence[message['id']]
                 if (message['memory_info']['retain']['state'] == 'completed'
@@ -3352,6 +3529,8 @@ class Service:
         self._close_claude_native_chats()
         self._close_dsh_native_chats()
         self._close_interface_tasks()
+        if self._external_work is not None:
+            self._external_work.close()
         if self._lock_fd is not None:
             if not self.publication_lock.acquire(timeout=5):
                 raise BusyError('项目提交仍在收尾，服务独占锁暂时保留。')
@@ -3486,6 +3665,9 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(409, {'workspace_id': self.service.workspace_id, 'code': 'settings_version_conflict',
                              'error': str(error), 'current_settings': dict(error.current_settings,
                                  workspace_id=self.service.workspace_id)})
+        except external_work.ExternalWorkError as error:
+            self._reply(error.status, {'workspace_id': self.service.workspace_id,
+                'error': str(error), 'code': error.code, 'accepted': False})
         except ProfileConflict as error:
             value = {'error': str(error), 'profile': error.profile}
             if self.command == 'POST' and urlsplit(self.path).path.startswith('/api/profiles/ai/'):
@@ -3535,6 +3717,21 @@ class Handler(BaseHTTPRequestHandler):
             self._profile_management_error(404, {'error': str(error.args[0])})
         except DocumentTicketExpired as error:
             self._reply(410, {'error': str(error), 'code': 'document_preview_expired', 'accepted': False})
+        except native_task_input.NativeTaskInputError as error:
+            result = {'workspace_id': self.service.workspace_id, 'error': str(error),
+                'code': 'native_task_' + error.code}
+            if error.outcome == 'not_sent':
+                result['accepted'] = False
+            else:
+                result['result_unknown'] = True
+            self._reply(400 if error.code == 'invalid_arguments' else
+                503 if error.outcome == 'unknown' else 409, result)
+        except MarkdownMoveError as error:
+            result = {'workspace_id': self.service.workspace_id, 'error': str(error),
+                'code': error.code, 'result_unknown': error.result_unknown}
+            if not error.result_unknown:
+                result['accepted'] = False
+            self._reply(503 if error.result_unknown else 400 if error.code == 'invalid_arguments' else 409, result)
         except MarkdownChatSyncError as error:
             rejected = error.code in ('invalid_arguments', 'invalid_document', 'not_found')
             status = 404 if error.code == 'not_found' else 400 if rejected else 409
@@ -3686,10 +3883,40 @@ class Handler(BaseHTTPRequestHandler):
                 if route.query:
                     raise ValueError('设置目录不接受查询参数。')
                 return self.service.managed_settings()
+            if path == native_work_status.PATH:
+                self._require_bodyless_get('work_status_invalid', '工作状态')
+                if route.query:
+                    raise SpecialistHTTPError(400, 'work_status_invalid', '工作状态不接受查询参数。')
+                return self.service.work_status()
+            if path == external_work.PATH:
+                self._require_bodyless_get('external_work_invalid', '外部工作')
+                if route.query:
+                    raise external_work.ExternalWorkError('invalid_arguments')
+                return self.service.external_work_snapshot()
             if path == '/api/management':
                 return self.service.management_inventory(fresh=arg('refresh') == '1')
             if path == '/api/management/ai-profiles':
                 return self.service.saved_ai_profile_inventory()
+            if path == '/api/management/conversations':
+                self._require_bodyless_get('conversation_query_invalid', '对话目录')
+                fields = parse_qs(route.query, keep_blank_values=True, strict_parsing=True, errors='strict')
+                if (set(fields) - {'query', 'agent', 'offset', 'limit'}
+                        or any(len(values) != 1 for values in fields.values())):
+                    raise ValueError('对话目录只接受明确的查询、Agent和分页参数。')
+                values = {key: items[0] for key, items in fields.items()}
+                for key in ('offset', 'limit'):
+                    if key in values:
+                        if re.fullmatch(r'0|[1-9][0-9]{0,6}', values[key]) is None:
+                            raise ValueError('对话目录分页参数无效。')
+                        values[key] = int(values[key])
+                return self.service.conversations_list(**values)
+            if path == '/api/management/native-tasks':
+                self._require_bodyless_get('native_task_result_invalid', '原生任务')
+                fields = parse_qs(route.query, keep_blank_values=True, strict_parsing=True, errors='strict')
+                if (set(fields) != {'agent', 'chat_id', 'client_id'}
+                        or any(len(values) != 1 for values in fields.values())):
+                    raise ValueError('请指定一段原生对话和本次原请求编号。')
+                return self.service.read_native_task(**{key: values[0] for key, values in fields.items()})
             if path == '/api/management/native-chat-configuration':
                 self._require_bodyless_get('native_chat_selection_invalid', '原生下轮配置')
                 fields = parse_qs(route.query, keep_blank_values=True, strict_parsing=True)
@@ -3741,6 +3968,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.service.ai_profile_creation_receipt(unquote(path[len('/api/management/ai-profile-creations/'):]))
             if path == '/api/management/context':
                 return {'workspace_id': self.service.workspace_id, 'csrf_token': self.service.csrf_token}
+            if path == '/api/management/memory-documents':
+                if len(route.query) > 256 or self.headers.get('Transfer-Encoding') or self.headers.get('Content-Length', '0') != '0':
+                    raise ValueError('记忆文档读取不接收请求正文。')
+                document_query = parse_qs(route.query, keep_blank_values=True, strict_parsing=True,
+                                          errors='strict', max_num_fields=2)
+                if set(document_query) != {'profile_id', 'name'} or any(len(values) != 1 for values in document_query.values()):
+                    raise ValueError('记忆文档读取需要准确的配置编号和文档名。')
+                return self.service.memory_document({key: values[0] for key, values in document_query.items()})
             if path == '/api/profiles':
                 return self.service.profile_inventory()
             if path == '/api/chats':
@@ -3750,7 +3985,10 @@ class Handler(BaseHTTPRequestHandler):
                 if file_match:
                     return self.service.file_content(unquote(file_match[1]), unquote(file_match[2]))
                 if path.endswith('/profile-selection'):
-                    return self.service.profile_selection(unquote(path[len('/api/chats/'):-len('/profile-selection')]))
+                    if route.query not in ('', 'metadata_only=1'):
+                        raise ValueError('配置选择只接受 metadata_only=1。')
+                    return self.service.profile_selection(unquote(path[len('/api/chats/'):-len('/profile-selection')]),
+                        metadata_only=bool(route.query))
                 if path.endswith('/source-images/receipt'):
                     return self.service.source_images_receipt(
                         unquote(path[len('/api/chats/'):-len('/source-images/receipt')]),
@@ -3812,6 +4050,8 @@ class Handler(BaseHTTPRequestHandler):
         specialist_mutation = specialist_mutation or raw_path.startswith('/api/native-history/')
         specialist_mutation = specialist_mutation or raw_path == '/api/management/native-chat-configuration'
         specialist_mutation = specialist_mutation or raw_path == '/api/management/native-chat-memory-configuration'
+        specialist_mutation = specialist_mutation or raw_path == '/api/markdown-chats/move'
+        specialist_mutation = specialist_mutation or raw_path == '/api/management/native-tasks'
         if not self._guard(known_unsent=specialist_mutation):
             return
 
@@ -3825,6 +4065,9 @@ class Handler(BaseHTTPRequestHandler):
             dsh_chat = path == '/api/dsh-chats' or path.startswith('/api/dsh-chats/')
             native_material = path == '/api/native-materials/preview'
             markdown_material = path in ('/api/markdown-chats/file-preview', '/api/file-materials/markdown')
+            markdown_move = path == '/api/markdown-chats/move'
+            native_task = path == '/api/management/native-tasks'
+            external = path == external_work.PATH
             native_history = path.startswith('/api/native-history/')
             native_management = path in ('/api/management/native-chat-configuration',
                                          '/api/management/native-chat-memory-configuration',
@@ -3835,23 +4078,23 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if self.headers.get_content_type() != 'application/json':
                     raise ValueError('请使用 JSON 消息。')
-                raw = self._read_body(8192 if native_management else app_settings.MAX_BODY if path == app_settings.PATH else
-                                      32 * 1024 if path == '/api/management/memory-profile-operations' else MAX_MATERIAL_BODY if path == '/api/materials' else
+                raw = self._read_body(external_work.MAX_BODY if external else 256 * 1024 if native_task else 8192 if native_management or markdown_move else app_settings.MAX_BODY if path == app_settings.PATH else
+                                      32 * 1024 if path in ('/api/management/memory-profile-operations', '/api/management/memory-documents') else MAX_MATERIAL_BODY if path == '/api/materials' else
                                       MAX_TEXT_MATERIAL_BODY if path == '/api/file-materials' else MAX_BODY)
-                if path == '/api/management/memory-profile-operations':
+                if path in ('/api/management/memory-profile-operations', '/api/management/memory-documents'):
                     try:
                         body = decode_specialist_body(raw)
                     except SpecialistHTTPError:
                         raise ValueError('记忆配置操作需要不含重复字段的有效 JSON 对象。') from None
                 else:
-                    if markdown_material:
+                    if markdown_material or markdown_move:
                         try:
                             body = decode_specialist_body(raw)
                         except SpecialistHTTPError:
                             raise ValueError('文件资料需要不含重复字段的有效 JSON 对象。') from None
                     else:
-                        body = (app_settings.decode_body(raw) if path == app_settings.PATH else
-                                decode_specialist_body(raw) if specialist or native_material or native_management else json.loads(raw))
+                        body = (external_work.decode_body(raw) if external else app_settings.decode_body(raw) if path == app_settings.PATH else
+                                decode_specialist_body(raw) if specialist or native_material or native_management or native_task else json.loads(raw))
                 if not isinstance(body, dict):
                     raise ValueError('请求格式无效。')
                 if not self._allowed(mutate=True, nonce=body.get('_one_ai_csrf')):
@@ -3875,6 +4118,11 @@ class Handler(BaseHTTPRequestHandler):
                         or parts[0] not in ('codex', 'hermes', 'pi', 'claude', 'dsh') or parts[1] not in ('preview', 'adopt')):
                     raise SpecialistHTTPError(400, 'native_history_invalid', '请使用原会话核对或登记入口。', accepted=False)
                 return self.service.native_history_request(parts[0], parts[1], body)
+            if external:
+                if self.command != 'POST' or route.query:
+                    raise external_work.ExternalWorkError('invalid_arguments')
+                return self.service.external_work_operation({key: value for key, value in body.items()
+                    if key != '_one_ai_csrf'})
             if native_material:
                 if self.command != 'POST' or route.query:
                     raise ValueError('请使用材料预览的固定 POST 入口。')
@@ -3884,6 +4132,18 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('请使用分组的固定入口。')
                 return (self.service.create_markdown_folder(body) if path.endswith('/folders')
                         else self.service.open_markdown_folder(body))
+            if path == '/api/management/memory-documents':
+                if self.command != 'POST' or route.query:
+                    raise ValueError('请使用记忆文档的固定保存入口。')
+                return self.service.memory_document(body, writing=True)
+            if markdown_move:
+                if self.command != 'POST' or route.query:
+                    raise MarkdownMoveError('invalid_arguments')
+                return self.service.move_markdown_file(body)
+            if native_task:
+                if self.command != 'POST' or route.query:
+                    raise native_task_input.NativeTaskInputError('invalid_arguments', 'not_sent')
+                return self.service.dispatch_native_task(body)
             if specialist:
                 if dsh_chat:
                     return self.service.dsh_native_request(self.command, path, query=route.query, body=body)
@@ -3985,7 +4245,10 @@ class Handler(BaseHTTPRequestHandler):
                 if path.startswith('/api/profiles/ai/'):
                     return self.service.update_ai_profile(unquote(path[len('/api/profiles/ai/'):]), body)
                 if path.startswith('/api/chats/') and path.endswith('/profile-selection'):
-                    return self.service.set_profile_selection(unquote(path[len('/api/chats/'):-len('/profile-selection')]), body)
+                    if route.query not in ('', 'metadata_only=1'):
+                        raise ValueError('配置选择只接受 metadata_only=1。')
+                    return self.service.set_profile_selection(unquote(path[len('/api/chats/'):-len('/profile-selection')]), body,
+                        metadata_only=bool(route.query))
                 if path.startswith('/api/chats/') and path.endswith('/backend'):
                     chat_id = unquote(path[len('/api/chats/'):-len('/backend')])
                     return self.service.set_chat_backend(dict(body, chat_id=chat_id))
@@ -4184,7 +4447,7 @@ def main():
     if args.native_pi_node is not None:
         from rabbit_runtime.pi.connection import PiNativeConnection
         try:
-            pi_native_connection = PiNativeConnection(args.native_pi_node, args.native_pi_cli)
+            pi_native_connection = PiNativeConnection(args.native_pi_node, args.native_pi_cli, enable_task_results=True)
         except ValueError as error:
             parser.error(str(error))
     if (args.specialist_codex_cli is not None or args.specialist_work_document) and args.specialist_mcp_python is None:
@@ -4215,11 +4478,20 @@ def main():
     os.umask(0o077)
     index = args.index or str(Path(args.data_dir) / 'history.sqlite')
     specialist_options = {'specialist_work_document': True} if args.specialist_work_document else {}
+    from memory_program_setup import configured_programs
+    # Keep the configured venv path lexical: resolving its Python symlink
+    # would select the base interpreter's unrelated site-packages directory.
+    hermes_dependencies = (Path(args.native_hermes_python).parent.parent / 'lib' /
+        f'python{sys.version_info.major}.{sys.version_info.minor}' / 'site-packages'
+        if args.native_hermes_python else None)
+    memory_program_drivers = configured_programs(args.data_dir, hermes_source=args.native_hermes_root,
+        hermes_dependencies=hermes_dependencies)
     service = Service(args.data_dir, index, documents_dir=args.documents_dir, publication_dir=args.publication_dir,
                       specialist_connection=specialist_connection, native_chat_connection=native_chat_connection,
                       pi_native_connection=pi_native_connection, hermes_native_connection=hermes_native_connection,
                       claude_native_connection=claude_native_connection, dsh_native_connection=dsh_native_connection,
                       dsh_root=args.native_dsh_history_root,
+                      memory_program_drivers=memory_program_drivers,
                       **specialist_options)
     server = None
     try:

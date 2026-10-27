@@ -18,7 +18,7 @@ from rabbit_memory.memory_profiles import (MemoryProfiles, MAX_REVISION,
 from rabbit_memory.memory_management import saved_memory_profile_in
 
 
-AGENTS = frozenset(('codex',))
+AGENTS = frozenset(('codex', 'pi', 'hermes', 'claude', 'dsh'))
 TABLE = 'native_chat_memory_selections'
 _WORKSPACE = re.compile(r'[0-9a-f]{64}\Z')
 _COLUMNS = ('workspace_id', 'agent', 'chat_id', 'revision', 'memory_profile_id', 'memory_profile_revision')
@@ -190,6 +190,29 @@ class NativeMemorySelections:
         with self._db() as db:
             _catalogue_in(db, agent, chat_id)
             return _public_in(db, self.workspace_id, agent, chat_id)
+
+    @contextmanager
+    def none_fence(self, agent, chat_id):
+        """Serialize a fresh plain-text reservation with selection writes.
+
+        While holding this context, first inspect the old native receipt. Only
+        if absent, call the yielded guard and the existing local store.begin.
+        No recall, material read, native startup or RPC belongs in this scope.
+        This is a selection fence, not an atomic transaction across databases.
+        """
+        _scope(self.workspace_id, agent, chat_id)
+        with self._db(write=True) as db:
+            active = True
+
+            def assert_none():
+                if not active:
+                    raise RuntimeError('原生记忆选择核对已经结束。')
+                assert_memory_selection_in(db, self.workspace_id, agent, chat_id, None, None)
+
+            try:
+                yield assert_none
+            finally:
+                active = False
 
     def select(self, agent, chat_id, expected_revision, memory_profile_id, memory_profile_revision):
         _scope(self.workspace_id, agent, chat_id)

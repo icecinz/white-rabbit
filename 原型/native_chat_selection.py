@@ -21,7 +21,7 @@ from profiles import (AIProfiles, MAX_REVISION, make_profile_snapshot,
                       validate_profile_id, validate_profile_revision)
 
 
-AGENTS = frozenset(('codex', 'pi', 'hermes'))
+AGENTS = frozenset(('codex', 'pi', 'hermes', 'claude'))
 TABLE = 'native_chat_profile_selections'
 _WORKSPACE = re.compile(r'[0-9a-f]{64}\Z')
 

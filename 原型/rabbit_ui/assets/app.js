@@ -3,6 +3,15 @@
 
   const agents = window.RabbitAgents;
   const $ = (id) => document.getElementById(id);
+  let bundledHelp;
+  function readBundledHelp() {
+    if (bundledHelp !== undefined) return bundledHelp;
+    try {
+      const source = $("rabbit-help-data"), value = JSON.parse(source?.content?.textContent || source?.textContent || "");
+      bundledHelp = value && typeof value.manual === "string" && typeof value.guide === "string" ? value : null;
+    } catch (_) { bundledHelp = null; }
+    return bundledHelp;
+  }
   const ui = {
     sidebar: $("sidebar"), backdrop: $("sidebar-backdrop"), list: $("session-list"),
     search: $("search-input"), title: $("conversation-title"), eyebrow: $("heading-eyebrow"),
@@ -18,7 +27,7 @@
     csrf: "", status: null, chats: [], listView: "library", page: "conversations", historyAgent: "all", includeInternal: false,
     queries: { chats: "", history: "" }, historyItems: [], historyTotal: 0, historyNext: null,
     historyLoading: false, hiddenInternal: 0, listVersion: 0,
-    libraryItems: [], libraryTotal: 0, libraryNext: null, libraryQuery: "", libraryError: "",
+    libraryItems: [], libraryWorkspace: "", libraryTotal: 0, libraryNext: null, libraryQuery: "", libraryError: "",
     preferences: { default_backend: "codex", send_shortcut: "enter", markdown: true, show_internal: false, chat_backends: {}, chat_models: {}, default_models: agents.emptyModels(), revision: "0" },
     management: null, backendChoosing: false, backendChoiceVersion: 0, preferenceNotice: "",
     selected: { type: "new", id: null }, chat: null, historySession: null, historyMessages: [], historyReady: false,
@@ -35,7 +44,7 @@
     browserNotice: "", browserInputTouched: false, browserTouchedDrafts: new Set(), browserPageTouched: false, browserQueryTouched: false, browserAgentFilterTouched: false, browserSaveTimer: null, browserRestoring: false, conversationScrollTop: 0,
     sourceUpdateVisible: false, sourceUpdateChatId: null, sourceUpdateState: "empty", sourceUpdateData: null, sourceUpdateNotice: "", sourceUpdateVersion: 0, sourceUpdateInputVersion: 0, sourceUpdateSaving: null,
     sourceImages: { visible: false, chatId: null, state: "empty", data: null, notice: "", version: 0, saving: null }, sourceImagePending: new Map(),
-    profile_snapshot: null, profileChoices: new Map(), profileSelection: null, profileSelectionIntent: false, profilesInventory: null, profilesRevision: null, profileNotice: "", profileLegacy: false, memoryChatCreation: null, memoryRecallError: false,
+    profile_snapshot: null, profileChoices: new Map(), profileSelection: null, profileSelectionSync: null, profileSelectionIntent: false, profilesInventory: null, profilesRevision: null, profileNotice: "", profileLegacy: false, memoryChatCreation: null, memoryRecallError: false,
   };
   ui.input.placeholder = "在此输入";
   for (const control of [ui.send, $("new-chat"), $("refresh-history")]) control.dataset.controlInterface = "ai";
@@ -76,7 +85,7 @@
       profiles.close(false);
       return true;
     },
-    onManage: kind => showPage("management", kind === "memory" ? "memory-profiles" : "ai-profiles"), onCatalog: acceptProfileCatalog, getInventory: () => state.management, getCapabilities: () => state.status?.profiles || {} }) : null;
+    onManage: kind => showPage("management", kind === "memory" ? "memory-profiles" : "ai-profiles"), onMemoryManual: openManual, onCatalog: acceptProfileCatalog, getInventory: () => state.management, getCapabilities: () => state.status?.profiles || {} }) : null;
   const activeRunStates = new Set(["queued", "running", "cancelling"]);
   const backendLabels = agents.labels;
   const isImCodesPreview = window.location.hostname === "app.im.codes" && /^\/api\/server\/[^/]+\/local-web\/[^/]+(?:\/|$)/.test(window.location.pathname);
@@ -235,20 +244,52 @@
     if (snap) { state.backend = agents.backendOfInstance(snap.ai_profile.agent_instance_id); state.model_id = snap.ai_profile.model_id; }
     if (remember) state.profileChoices.set(draftKey(), snap);
   }
+  const sameProfileSelection = (a, b) => !!a && !!b && a.revision === b.revision && a.ai_profile_id === b.ai_profile_id && a.memory_profile_id === b.memory_profile_id;
+  function observeProfileSelection(value) {
+    let next;
+    try { next = window.RabbitProfiles.selection(value); }
+    catch (_) { state.profileSelectionSync = "conflict"; state.profileSelectionIntent = false; return false; }
+    const previous = state.profileSelection;
+    if (previous && (next.revision < previous.revision || next.revision === previous.revision && !sameProfileSelection(previous, next))) {
+      state.profileSelectionSync = "conflict"; state.profileSelectionIntent = false; return false;
+    }
+    if (!sameProfileSelection(previous, next)) {
+      state.profileSelection = next; state.profileSelectionIntent = false;
+      // Only an untouched legacy selection may use its old route as a fallback.
+      state.profileSelectionSync = !previous && next.revision === 0 && next.ai_profile_id === null && next.memory_profile_id === "none" ? null : "pending";
+    }
+    return state.profileSelectionSync !== "conflict";
+  }
+  function commonProfileBusy() {
+    return state.sending || state.creating || state.backendChoosing || state.cancelling || isRunning() || currentUploadCount() > 0 || state.contextState === "loading" || contextPinSavingCurrent()
+      || state.pendingSubmissions.has(state.selected.id) || state.pendingSubmission?.chatId === state.selected.id;
+  }
+  function applyObservedProfileSelection() {
+    if (state.selected.type !== "chat" || state.profileSelectionSync !== "pending" || commonProfileBusy()) return;
+    const choice = state.profileSelection, row = choice?.ai_profile_id && profiles?.get(choice.ai_profile_id);
+    const memory = choice?.memory_profile_id === "none" ? { id: "none" } : profiles?.getMemory(choice?.memory_profile_id);
+    if (!row || !memory) { state.profile_snapshot = null; state.profileLegacy = false; state.profileChoices.delete(draftKey()); return; }
+    const previous = state.profile_snapshot;
+    state.profileSelectionSync = null; state.profileSelectionIntent = false;
+    adoptProfile(toProfileSnapshot(row, memory), { frozen: true, remember: true }); state.profileNotice = "";
+    if (!sameProfile(previous, state.profile_snapshot)) invalidateContextPreview("另一入口已更换配置，请重新查看本轮上下文。草稿和材料保留。");
+    checkpointBrowserState();
+  }
   function acceptProfileCatalog(data, changed = null, kind = "ai") {
     if (!data) return;
     const previousIntent = state.profile_snapshot;
     state.profilesInventory = data; state.profilesRevision = data.revision;
-    {
+    if (!(state.selected.type === "chat" && (state.profileSelectionSync || commonProfileBusy()))) {
       if (state.profile_snapshot) adoptProfile(state.profile_snapshot);
       else if (!state.profileLegacy && !browserRestoreSnapshot) { const row = state.selected.type === "new" ? profiles?.get(data.default_ai_profile_id) : migratedProfile(); if (row) adoptProfile(toProfileSnapshot(row, { id: "none" })); }
     }
-    if (changed && (kind === "ai" ? state.profile_snapshot?.ai_profile.id : state.profile_snapshot?.memory_profile.id) === changed.id) { adoptProfile(kind === "ai" ? toProfileSnapshot(changed) : toProfileSnapshot(state.profile_snapshot.ai_profile, changed), { remember: true }); invalidateContextPreview("配置已保存新版本，请重新查看本轮上下文。"); }
+    if (!(state.selected.type === "chat" && (state.profileSelectionSync || commonProfileBusy())) && changed && (kind === "ai" ? state.profile_snapshot?.ai_profile.id : state.profile_snapshot?.memory_profile.id) === changed.id) { adoptProfile(kind === "ai" ? toProfileSnapshot(changed) : toProfileSnapshot(state.profile_snapshot.ai_profile, changed), { remember: true }); invalidateContextPreview("配置已保存新版本，请重新查看本轮上下文。"); }
     if (!sameProfile(previousIntent, state.profile_snapshot)) invalidateContextPreview("所选配置已更新，之前的上下文预览已清除，请重新查看。草稿和图片保留。");
     updateComposer(); profiles?.selectChanged();
   }
   function restoreProfileChoice() {
     if (!profilesEnabled()) return;
+    if (state.selected.type === "chat" && state.profileSelectionSync) { applyObservedProfileSelection(); return; }
     const key = draftKey();
     if (state.profileChoices.get(key)) { adoptProfile(state.profileChoices.get(key)); return; }
     const chosen = state.profileSelection?.ai_profile_id ? profiles?.get(state.profileSelection.ai_profile_id) : null;
@@ -283,10 +324,11 @@
         const current = state.profileSelection || window.RabbitProfiles.selection((await api(`/api/chats/${encodeURIComponent(chatId)}/profile-selection`)).profile_selection);
         const data = await api(`/api/chats/${encodeURIComponent(chatId)}/profile-selection`, { method: "PUT", body: JSON.stringify({ revision: current.revision, [kind === "memory" ? "memory_profile_id" : "ai_profile_id"]: selected.id }) }, false);
         if (version !== state.openVersion || key !== draftKey() || choiceVersion !== state.backendChoiceVersion) return false;
-        state.profileSelection = window.RabbitProfiles.selection(data.profile_selection);
+        if (!observeProfileSelection(data.profile_selection)) throw Error("聊天选择的版本待核对，原草稿保留。请重新读取对话后再选择。");
+        if (state.profileSelection.ai_profile_id !== desired.ai_profile.id || state.profileSelection.memory_profile_id !== desired.memory_profile.id) throw Error("聊天选择已在另一入口更新，原草稿保留。");
       }
       if (version !== state.openVersion || key !== draftKey() || choiceVersion !== state.backendChoiceVersion) return false;
-      adoptProfile(desired, { frozen: true, remember: true }); state.profileNotice = ""; state.memoryRecallError = false;
+      state.profileSelectionSync = null; adoptProfile(desired, { frozen: true, remember: true }); state.profileNotice = ""; state.memoryRecallError = false;
       if (state.selected.type === "history") {
         const previous = historyChoice(), explicit = kind === "memory" || previous.memory_explicit;
         state.historyChoices.set(state.selected.id, { ...previous, mode: kind === "ai" ? "text" : previous.mode, memory_explicit: explicit, ...(explicit ? { memory_profile: desired.memory_profile } : {}) });
@@ -294,7 +336,7 @@
       state.profileSelectionIntent = true;
       invalidateContextPreview("配置已更换，请重新查看本轮上下文。"); invalidateSourceUpdate("配置已更换，请重新查看来源更新。"); invalidateSourceImages("配置已更换，请重新查看来源图片。"); saveDraft(); renderRunNotice(); return true;
     } catch (error) {
-      if (version === state.openVersion && key === draftKey()) { if (error.profile_selection) state.profileSelection = window.RabbitProfiles.selection(error.profile_selection); state.profileNotice = userError(error, "配置暂时没有完成选择，原配置和草稿保留。"); }
+      if (version === state.openVersion && key === draftKey()) { if (error.profile_selection) observeProfileSelection(error.profile_selection); state.profileNotice = userError(error, "配置暂时没有完成选择，原配置和草稿保留。"); }
       throw error;
     } finally { state.backendChoosing = false; updateComposer(); }
   }
@@ -303,18 +345,20 @@
     const data = await api(`/api/chats/${encodeURIComponent(chatId)}/profile-selection`), current = window.RabbitProfiles.selection(data.profile_selection);
     const sameChoice = (a, b) => a.ai_profile_id === b.ai_profile_id && a.memory_profile_id === b.memory_profile_id;
     const desired = { ai_profile_id: snap.ai_profile.id, memory_profile_id: snap.memory_profile.id };
-    if (current.revision === 0 && current.ai_profile_id === null && current.memory_profile_id === "none" || sameChoice(current, desired) && (!expected || expected.revision === current.revision && sameChoice(expected, current))) { if (state.selected.type === "chat" && state.selected.id === chatId) state.profileSelection = current; return current.revision; }
+    if (current.revision === 0 && current.ai_profile_id === null && current.memory_profile_id === "none" || sameChoice(current, desired) && (!expected || expected.revision === current.revision && sameChoice(expected, current))) { if (state.selected.type === "chat" && state.selected.id === chatId && !observeProfileSelection(current)) throw Error("聊天选择的版本待核对，原草稿保留。"); return current.revision; }
     if (!expected || !sameChoice(expected, current) || expected.revision !== current.revision) {
-      if (state.selected.type === "chat" && state.selected.id === chatId) state.profileSelection = current;
+      if (state.selected.type === "chat" && state.selected.id === chatId) observeProfileSelection(current);
       throw new Error("共同聊天已有另一入口选择的 AI 或记忆配置。请明确重新选择；原草稿和图片保留，没有覆盖另一份选择。");
     }
     const changed = await api(`/api/chats/${encodeURIComponent(chatId)}/profile-selection`, { method: "PUT", body: JSON.stringify({ revision: current.revision, ...desired }) }, false);
     const received = window.RabbitProfiles.selection(changed.profile_selection);
-    if (state.selected.type === "chat" && state.selected.id === chatId) state.profileSelection = received;
+    if (received.revision !== current.revision + 1 || !sameChoice(received, desired)) { if (state.selected.type === "chat" && state.selected.id === chatId) { state.profileSelectionSync = "conflict"; state.profileSelectionIntent = false; } throw Error("聊天选择回执不一致，原草稿保留。请重新读取对话。"); }
+    if (state.selected.type === "chat" && state.selected.id === chatId && !observeProfileSelection(received)) throw Error("聊天选择的版本待核对，原草稿保留。");
     return received.revision;
   }
   function profileReady() {
     if (!profilesEnabled()) return state.profile_snapshot == null;
+    if (state.selected.type === "chat" && state.profileSelectionSync) return false;
     if (!state.profile_snapshot) return state.profileLegacy;
     const selected = profiles?.get(state.profile_snapshot.ai_profile.id);
     const memory = state.profile_snapshot.memory_profile.id === "none" ? { available: true } : profiles?.getMemory(state.profile_snapshot.memory_profile.id);
@@ -763,6 +807,7 @@
   }
   let composerStopTarget = null;
   function updateComposer() {
+    applyObservedProfileSelection();
     renderComposerFiles(); const fileMode = state.task_intent.mode === "files"; const fileBlocked = (fileMode || state.task_intent.artifact_ids.length > 0) && (!ui.input.value.trim() || fileInputsUnready() || !fileMode && !fileInputsSupported() || fileMode && (state.attachment_ids.length > 0 || !fileTaskSupported()));
     $("toggle-file-task").textContent = fileMode ? "取消生成文件" : "生成文件"; $("toggle-file-task").setAttribute("aria-pressed", String(fileMode)); $("toggle-file-task").disabled = !fileTasks || !fileMode && !fileTaskSupported() || state.sending || state.creating || currentUploadCount() > 0;
     $("add-text-file").disabled = $("pick-text-file").disabled = !fileInputsSupported() || state.sending || state.creating || state.backendChoosing || currentUploadCount() > 0 || fileMode && state.attachment_ids.length > 0 || state.task_intent.artifact_ids.length >= 4;
@@ -797,10 +842,10 @@
       ui.hint.textContent = "正在连接这台电脑…";
       ui.footnote.textContent = "连接完成后就可以发送。";
     } else if (!profileReady()) {
-      ui.hint.textContent = state.profile_snapshot ? "这份 AI 配置需要确认" : "请选择一份 AI 配置";
+      ui.hint.textContent = state.profileSelectionSync ? "聊天配置待核对" : state.profile_snapshot ? "这份 AI 配置需要确认" : "请选择一份 AI 配置";
       const row = state.profile_snapshot && profiles?.get(state.profile_snapshot.ai_profile.id), memory = state.profile_snapshot?.memory_profile.id !== "none" && profiles?.getMemory(state.profile_snapshot?.memory_profile.id);
       const expired = row && row.revision !== state.profile_snapshot.ai_profile.revision || memory && memory.revision !== state.profile_snapshot.memory_profile.revision;
-      ui.footnote.textContent = expired ? "当前草稿使用旧配置；发送前请明确选择最新配置。" : plain(memory && !memory.available ? memory.reason : row?.reason) || (state.profile_snapshot ? "所选配置暂时不可用，草稿保留；请在管理检查或重新选择配置。" : "请选择一份已接入的 AI 配置；历史和草稿会保留。");
+      ui.footnote.textContent = state.profileSelectionSync ? "另一入口的配置尚未采用；草稿和材料保留，发送前需核对选择及配置目录。" : expired ? "当前草稿使用旧配置；发送前请明确选择最新配置。" : plain(memory && !memory.available ? memory.reason : row?.reason) || (state.profile_snapshot ? "所选配置暂时不可用，草稿保留；请在管理检查或重新选择配置。" : "请选择一份已接入的 AI 配置；历史和草稿会保留。");
     } else if (!available) {
       ui.hint.textContent = state.model_id ? "所选模型暂时不能回答" : `${backendLabels[state.backend]} 暂时不能回答`;
       ui.footnote.textContent = modelUnavailableReason();
@@ -827,19 +872,22 @@
     $("image-model-status").textContent = !hasImages ? "" : imageInfo?.image_input === "supported" ? "所选连接支持图像输入；本轮带图数量可在上下文中检查。" : imageInfo?.image_input === "unsupported" ? "所选连接暂不支持图像输入。图片和草稿保留，可选择支持图片的模型。" : "所选连接的图像能力尚未确认。图片保留，预览或发送时会检查，不会自动换模型。";
     ui.footnote.hidden = !ui.footnote.textContent;
     $("add-image").disabled = fileMode || imageInfo?.image_input === "unsupported" || !materials || !state.status?.materials?.enabled || state.sending || state.creating || currentUploadCount() > 0 || state.attachment_ids.length >= Math.min(4, state.status?.materials?.max_message_images || 4);
-    $("ai-profile-label").textContent = nativeHistory ? `${backendLabels[state.selected.agent] || state.selected.agent} · 原会话` : state.profile_snapshot?.ai_profile.name || (profilesEnabled() ? "选择配置" : `${backendLabels[state.backend]} · 原有配置`);
+    const profileUnresolved = state.selected.type === "chat" && !!state.profileSelectionSync;
+    $("ai-profile-label").textContent = profileUnresolved ? "配置待核对" : nativeHistory ? `${backendLabels[state.selected.agent] || state.selected.agent} · 原会话` : state.profile_snapshot?.ai_profile.name || (profilesEnabled() ? "选择配置" : `${backendLabels[state.backend]} · 原有配置`);
     const memory = draftMemoryProfile();
-    const requested = nativeHistory ? null : state.profile_snapshot?.ai_profile;
+    const requested = nativeHistory || profileUnresolved ? null : state.profile_snapshot?.ai_profile;
+    const currentProfile = requested && profiles?.get(requested.id);
+    const effective = currentProfile?.revision === requested?.revision ? currentProfile : null;
     window.RabbitProfiles?.renderStatus($("conversation-config-status"), {
       agent: backendLabels[nativeHistory ? state.selected.agent : state.backend],
       device: state.management?.device?.name,
-      model: requested?.model_id || (nativeHistory ? null : modelInfo()?.name || null),
-      effort: requested?.reasoning_effort,
-      memory: memory.id !== "none" ? [memory.name, memory.mode === "read_only" ? "只读" : "读取并记住"].filter(Boolean).join(" · ") : null,
+      model: effective?.effective_model || requested?.model_id || (nativeHistory || requested || profileUnresolved ? null : modelInfo()?.model || null),
+      effort: effective?.effective_effort || requested?.reasoning_effort,
+      memory: !profileUnresolved && memory.id !== "none" ? [memory.name, memory.mode === "read_only" ? "只读" : "读取并记住"].filter(Boolean).join(" · ") : null,
       status: !state.status ? "正在连接" : state.sending || isRunning() ? "正在回复" : state.pendingSubmission?.uncertain ? "发送待核对" : !profileReady() || !available ? "配置待核对" : "空闲",
       language: window.RabbitWorkspace?.language?.() || "zh-CN",
     });
-    $("memory-profile-label").textContent = memory.id !== "none" && memory.name || (nativeHistory ? "不额外带入共享记忆" : "不使用长期记忆");
+    $("memory-profile-label").textContent = profileUnresolved ? "配置待核对" : memory.id !== "none" && memory.name || (nativeHistory ? "不额外带入共享记忆" : "不使用长期记忆");
     $("choose-ai-profile").disabled = !profilesEnabled() || !profiles || !state.profilesInventory || state.sending || state.creating || state.backendChoosing;
     $("choose-memory-profile").disabled = !profilesEnabled() || !profiles || !state.profilesInventory || state.sending || state.creating || state.backendChoosing;
     renderComposerMaterials(); renderFileMaterialStatus();
@@ -990,6 +1038,7 @@
         offset = data.next_offset;
       } while (reset && preserve && offset != null && items.length < wanted && data.items && data.items.length);
       state.libraryItems = reset ? items : [...state.libraryItems, ...items];
+      state.libraryWorkspace = typeof data.workspace_id === "string" && data.workspace_id === state.status?.workspace_id ? data.workspace_id : "";
       state.libraryTotal = Number(data.total) || 0;
       state.libraryNext = data.next_offset == null ? null : data.next_offset;
       state.libraryRevision = data.revision ?? state.libraryRevision;
@@ -1012,12 +1061,15 @@
     catch (error) { toast(userError(error, "对话暂时没有读出来，请稍后再试。")); }
   }
   let specialistGuideTarget = null;
+  let specialistLocationRevision = 0, specialistCommandTarget = null;
   let specialistGuideGeneration = 0, specialistGuideRead = 0, specialistGuideSelection = null, specialistGuideVerification = "";
   const specialist = window.RabbitSpecialist ? window.RabbitSpecialist.create({
     root: $("specialist-panel"),
     composerRoot: $("specialist-composer-mount"), composerLabel: $("specialist-composer-label"), settingsRoot: settingsMounts.specialist,
     guideRoot: $("specialist-guide-panel"),
+    guideText: readBundledHelp()?.guide || "", onOpenManual: openManual,
     getGuideContext: () => ({ catalog: profiles?.catalog(), target: specialistGuideTarget?.workspace_id === state.status?.workspace_id ? specialistGuideTarget : null, verification: specialistGuideVerification }),
+    getCommandContext: captureSpecialistCommandContext,
     onTurnSettled: refreshSpecialistGuide, onGuideCheckContext: specialistCheckContext,
     // Native submissions and answers are never replayed by the common 403
     // retry path. Only an explicit check can reconcile an unknown receipt.
@@ -1025,6 +1077,36 @@
     getWorkspace: () => state.status?.workspace_id || "", openDocument,
     onError: error => toast(userError(error, "专员请求尚未确认，草稿与原请求保留。")),
   }) : null;
+  // The current work identity is separate from the guide's descriptive snapshot.
+  // It never reads conversation contents, resolves a name or opens an Agent.
+  function currentSpecialistWorkContext() {
+    const scope = state.status?.workspace_id;
+    if (!scope) return null;
+    const codec = window.RabbitSpecialistContext;
+    if (!codec?.normalize) throw Error("当前操作对象组件尚未就绪；原指令保留。");
+    if (state.page === "specialist") return specialistCommandTarget?.workspace_id === scope ? codec.normalize(specialistCommandTarget) : null;
+    let target = { kind: "page", page: state.page, section: ["management", "settings"].includes(state.page) ? state.workspaceSections[state.page] || null : null };
+    if (state.page === "native-chats") {
+      const native = nativeChats?.getConfigurationContext();
+      if (native?.workspace_id === scope && agents.has(native.agent) && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(native.chat_id || ""))
+        target = { kind: "native", agent: native.agent, chat_id: native.chat_id };
+    } else if (state.page === "conversations") {
+      if (state.selected.type === "new") target = { kind: "new_chat" };
+      else if (state.selected.type === "chat" && state.chat?.id === state.selected.id && !state.chatLoading)
+        target = { kind: "chat", chat_id: state.chat.id };
+      else if (state.selected.type === "history" && state.historyReady && agents.has(state.selected.agent) && state.historySession?.session_id)
+        target = { kind: "history", agent: state.selected.agent, session_id: state.historySession.session_id };
+    }
+    return codec.normalize({ schema_version: 1, workspace_id: scope, target });
+  }
+  function captureSpecialistCommandContext() {
+    const context = currentSpecialistWorkContext(), location = specialistLocationRevision, opening = state.openVersion;
+    const frozen = JSON.stringify(context), scope = state.status?.workspace_id;
+    return { context, isCurrent: () => {
+      if (scope !== state.status?.workspace_id || location !== specialistLocationRevision || opening !== state.openVersion) return false;
+      try { return frozen === JSON.stringify(currentSpecialistWorkContext()); } catch (_) { return false; }
+    } };
+  }
   async function specialistCheckContext(event) {
     const scope = state.status?.workspace_id, target = specialistGuideTarget, stamp = specialistGuideGeneration;
     const current = () => specialistEnabled() && event?.workspace_id === scope && scope === state.status?.workspace_id
@@ -1049,7 +1131,7 @@
       && event?.manual_check === true && event.workspace_id === scope && (typeof event.isCurrent !== "function" || event.isCurrent())
       && generation === specialistGuideGeneration && request === specialistGuideRead && target === specialistGuideTarget;
     if (!scope || !profiles || !current()) return;
-    const nativeTarget = target?.workspace_id === scope && ["codex", "pi", "hermes"].includes(target.agent)
+    const nativeTarget = target?.workspace_id === scope && ["codex", "pi", "hermes", "claude"].includes(target.agent)
       && target.agent_instance_id === "local/" + target.agent && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(target.chat_id || "");
     const results = await Promise.allSettled([profiles.loadFresh(), nativeTarget
       ? api("/api/management/native-chat-configuration?" + new URLSearchParams({ agent: target.agent, chat_id: target.chat_id }), {}, false)
@@ -1145,6 +1227,7 @@
     }
     choice.addEventListener("change", () => {
       if (!enabled || !available[choice.value] || !controllers[choice.value]) { renderChoice(); return; }
+      specialistLocationRevision++;
       navigationVersion++;
       for (const controller of Object.values(controllers)) controller.hide();
       selected = choice.value; remember(); renderChoice();
@@ -1168,6 +1251,7 @@
       showSettings() { visible = false; settingsVisible = true; root.hidden = true; for (const [id, controller] of Object.entries(controllers)) if (id !== selected) controller.hide(); return controllers[selected]?.showSettings(); },
       hide() { navigationVersion++; showExistingSelection = false; visible = settingsVisible = false; root.hidden = true; for (const controller of Object.values(controllers)) controller.hide(); },
       async createNew(agent, isCurrent = () => true, savedProfile = null, initialDraft = null) {
+        specialistLocationRevision++;
         const request = ++navigationVersion, originalWorkspace = scope;
         if (!isCurrent() || !enabled || !available[agent] || !controllers[agent]) throw Error("这个 Agent 的原生入口暂不可用。");
         const current = () => isCurrent() && request === navigationVersion && scope === originalWorkspace && enabled && available[agent];
@@ -1177,6 +1261,7 @@
       },
       getQuoteContext() { return enabled && visible && available[selected] ? controllers[selected]?.getQuoteContext() : null; },
       async selectExisting(value, isCurrent = () => true) {
+        specialistLocationRevision++;
         const request = ++navigationVersion, sourceWorkspace = scope, target = value?.agent;
         const current = () => typeof isCurrent === "function" && isCurrent() && request === navigationVersion && enabled && scope === sourceWorkspace && scope === String(state.status?.workspace_id || "")
           && value?.workspaceId === scope && available[target] && typeof controllers[target]?.selectExisting === "function";
@@ -1332,8 +1417,16 @@
     }
     const saved = directory.chats.find(row => row.rabbit_id === source.id && (row.kind === "native_index" || row.kind === "history_reference" ? source.kind === row.kind && source.agent === row.agent : source.kind === undefined));
     if (saved) {
-      if (saved.paths.length === 1 && saved.file?.folder === folder) return null;
-      throw Error(saved.paths.length === 1 ? `已有文档位于“${saved.paths[0]}”。可在访达中移动后重新读取。` : "这段对话已有整理记录，请在文件夹中核对后再分组。");
+      if (await window.RabbitMarkdownChats.moveFile({ api, getWorkspace: () => state.status?.workspace_id,
+          directory, source, folder })) {
+        try { await markdownChats.readDirectory(); }
+        catch (_) {
+          const error = Error("文件已移动，目录暂未更新。请关闭后重新读取。");
+          error.groupObservationRequired = true;
+          throw error;
+        }
+      }
+      return null;
     }
     return source;
   }
@@ -1405,14 +1498,37 @@
     onError: error => toast(userError(error, "文件资料接力尚未完成，原草稿保留。")),
   }) : null;
   let workspaceReady = false;
+  const workStatus = window.RabbitWorkStatus ? window.RabbitWorkStatus.create({
+    api: (path, options) => api(path, options, false),
+    getWorkspace: () => state.status?.workspace_id || "", translate: uiText,
+    getLabel: row => state.libraryWorkspace === state.status?.workspace_id
+      ? state.libraryItems.find(item => item.kind === "native" && item.agent === row.agent && item.id === row.chat_id)?.title || "" : "",
+    onOpen: async (row, isCurrent) => {
+      const current = () => isCurrent() && row.workspace_id === state.status?.workspace_id
+        && state.page === "management" && state.workspaceSections.management === "agents";
+      if (!current()) return false;
+      try {
+        if (row.role === "specialist") {
+          if (!specialistEnabled()) throw Error("小白兔专员入口暂不可用。");
+          state.browserPageTouched = true; showPage("specialist"); return true;
+        }
+        if (!nativeChats?.selectExisting) throw Error("原生对话入口暂不可用。");
+        return await nativeChats.selectExisting({ agent: row.agent, chatId: row.chat_id, workspaceId: row.workspace_id }, current);
+      } catch (error) {
+        if (current()) toast(userError(error, "原工作暂时没打开，原对话和草稿仍保留。"));
+        return false;
+      }
+    },
+  }) : null;
   const workspace = window.RabbitWorkspace ? window.RabbitWorkspace.create({
     root: $("workspace-panel"), api, getWorkspace: () => state.status?.workspace_id || "",
+    workStatus,
     getSelection: () => ({ backend: state.backend, model_id: state.model_id, chatId: state.selected.type === "chat" ? state.selected.id : null, chatTitle: state.chat && state.chat.title || state.selected.type === "history" && state.historySession && state.historySession.title }),
     selectBackend, selectModel, onPreferences: applyPreferences, profiles, profilesEnabled, onNavigate: showPage,
     renderSpecialistSettings: container => container.append(settingsMounts.specialist),
     renderNativeSettings: container => container.append(settingsMounts.native),
-    onSectionChange: ({ page, tab }) => { state.workspaceSections[page] = tab; if (workspaceReady) renderSidebar(); },
-    onLanguageChange: updateBasicLanguage, onAddResource: openConnectionGuide,
+    onSectionChange: ({ page, tab }) => { state.workspaceSections[page] = tab; if (workspaceReady) { if (state.page === page) workspaceHeader(); renderSidebar(); } },
+    onLanguageChange: updateBasicLanguage, onAddResource: openConnectionGuide, onManual: openManual,
     onManagement: (data) => {
       state.management = data;
       if (state.status) state.status = { ...state.status, backends: data.agents };
@@ -1437,11 +1553,35 @@
   }
   function openConnectionGuide(kind) {
     if (!["agent", "model"].includes(kind)) return;
-    const root = state.status?.documents?.root;
-    if (typeof root !== "string" || !root || state.status.documents.enabled !== true) {
-      toast("接入指南暂时未就绪，请重新连接这台 Mac；没有添加连接。"); return;
+    return openManual(kind === "agent" ? "connect-agent" : "connect-model");
+  }
+  function openManual(topic = "intro") {
+    const version = ++documentVersion;
+    documentDraftPreview = null;
+    if ($("document-viewer").hidden) documentReturnFocus = document.activeElement;
+    $("document-viewer").hidden = false;
+    $("document-title").textContent = "小白兔使用手册";
+    $("document-meta").replaceChildren();
+    const content = $("document-content"), text = readBundledHelp()?.manual;
+    content.replaceChildren(); content.classList.add("builtin-manual");
+    $("close-document").focus();
+    if (!text) { content.append(el("p", "", "使用手册未随界面载入，请重新打开小白兔。")); return false; }
+    const body = el("div", "manual-body"), index = el("nav", "manual-index");
+    index.setAttribute("aria-label", "手册目录");
+    if (window.OneAIRichText?.render) window.OneAIRichText.render(body, text);
+    else { const plainText = el("pre", "document-lines", text); body.append(plainText); }
+    const topics = { intro: "小白兔是什么", ai: "AI 配置", memory: "记忆配置", native: "Agent 会话", specialist: "小白兔专员", settings: "应用设置", devices: "设备", "connect-agent": "接入 Agent", "connect-model": "接入大模型", problems: "遇到问题" };
+    const headings = [...body.querySelectorAll("h2,h3")], sections = new Map();
+    for (const [key, label] of Object.entries(topics)) {
+      const heading = headings.find(node => node.textContent.trim() === label);
+      if (!heading) continue;
+      sections.set(key, heading);
+      index.append(button(label, "document-link", () => heading.scrollIntoView({ block: "start" })));
     }
-    return openDocument(root.replace(/\/$/, "") + "/手动接入/" + (kind === "agent" ? "添加Agent.md" : "添加模型.md"));
+    content.append(index, body); content.scrollTop = 0;
+    const section = sections.get(topic) || headings.find(node => node.textContent.trim() === topic);
+    if (section) requestAnimationFrame(() => { if (version === documentVersion && !$("document-viewer").hidden && content.classList.contains("builtin-manual")) section.scrollIntoView({ block: "start" }); });
+    return true;
   }
   let routeSignature = "";
   function updateRoute() {
@@ -1508,15 +1648,16 @@
       return;
     }
     if (state.page === "specialist") {
-      ui.title.textContent = uiText("小白兔专员");
-      ui.eyebrow.textContent = "小白兔";
-      ui.meta.textContent = window.RabbitWorkspace?.language?.() === "en" ? "Native Codex chat for Rabbit" : "管理小白兔的独立原生对话";
+      ui.title.textContent = window.RabbitWorkspace?.language?.() === "en" ? "Rabbit specialist conversation" : "小白兔专员对话框";
+      ui.eyebrow.textContent = "";
+      ui.meta.textContent = "";
       ui.actions.replaceChildren(); ui.composer.hidden = true;
       return;
     }
-    ui.title.textContent = uiText(state.page === "management" ? "管理" : "设置");
-    ui.eyebrow.textContent = "小白兔";
-    ui.meta.textContent = uiText(state.page === "management" ? "AI 配置 · 记忆配置 · 接入连接" : "让小白兔更适合你");
+    const section = state.workspaceSections[state.page];
+    ui.title.textContent = workspace?.getNavigation(state.page).find(value => value.id === section)?.label || uiText(state.page === "management" ? "管理" : "设置");
+    ui.eyebrow.textContent = "";
+    ui.meta.textContent = "";
     ui.actions.replaceChildren(); ui.composer.hidden = true;
   }
   function headerMore(items) {
@@ -1524,6 +1665,13 @@
     details.append(el("summary", "", "更多"));
     actions.append(...items); details.append(actions);
     return details;
+  }
+  function originalAppEntry(agent, threadId) {
+    const href = agents.originalAppUrl?.(agent, threadId);
+    if (!href) return null;
+    const link = el("a", "text-button original-app-link original-app-entry", "在 Codex 打开原对话");
+    link.href = href; link.setAttribute("data-control-interface", "human");
+    return link;
   }
   function historyHeader() {
     if (state.page !== "conversations") { workspaceHeader(); return; }
@@ -1534,6 +1682,10 @@
     const continuation = state.historyContinuationIds.get(state.selected.id);
     ui.actions.replaceChildren();
     const extra = [];
+    const original = state.historyReady && state.selected.type === "history" && history.agent === state.selected.agent
+      && history.session_id === state.selected.sessionId && state.selected.id === `${history.agent}:${history.session_id}`
+      ? originalAppEntry(history.agent, history.session_id) : null;
+    if (original) extra.push(original);
     if (nativeAdoptionEnabled(state.selected.agent)) extra.push(button("用文字副本接续", "text-button", () => { if (chooseHistoryMode("text")) profiles?.open("ai"); }));
     if (continuation) {
       const open = button("打开接续对话", "text-button", continueHistory); open.disabled = state.creating || state.sending;
@@ -1562,7 +1714,12 @@
     if (!['conversations', 'management', 'settings', 'specialist', 'native-chats'].includes(page)) return;
     if (page === "specialist" && !specialistEnabled()) return;
     if (page === "native-chats" && !nativeChatsEnabled()) return;
-    if (page === "specialist" && state.page !== "specialist") captureSpecialistGuideTarget();
+    if (page === "specialist" && state.page !== "specialist") {
+      try { specialistCommandTarget = currentSpecialistWorkContext(); }
+      catch (_) { specialistCommandTarget = null; /* Viewing history cannot depend on an optional work target. */ }
+      captureSpecialistGuideTarget();
+    }
+    specialistLocationRevision++;
     saveDraft();
     profiles?.close(false);
     const previousPage = state.page;
@@ -1627,6 +1784,8 @@
     if (chat && chat.id && state.selected.type === "chat") {
       const secondary = [];
       if (chat.source && chat.source.agent && chat.source.session_id) {
+        const original = chat.id === state.selected.id ? originalAppEntry(chat.source.agent, chat.source.session_id) : null;
+        if (original) secondary.push(original);
         secondary.push(button("显示原对话", "text-button source-view-entry", () => viewChatSource(chat)), button("查看来源更新", "text-button source-update-entry", () => openSourceUpdate(chat.id)), button(state.sourceImagePending.has(chat.id) ? "检查上次图片补入" : "补入来源图片", "text-button source-images-entry", () => openSourceImages(chat.id)));
       }
       const exportButton = button(state.exporting ? "导出中…" : "导出文字", "text-button export-button", exportChat);
@@ -1656,7 +1815,7 @@
     if (!snap) return [];
     const row = snap.ai_profile;
     const memory = snap.memory_profile;
-    return [`- 本次 AI 配置：${markdownLabel(row.name)} · 第 ${row.revision} 版`, `- 配置标识：${row.id}`, `- 请求 Agent：${row.agent_instance_id}`, `- 执行设备：本机`, `- 请求模型：${markdownLabel(row.model_id || "跟随 Agent 默认")}`, `- 请求强度：${row.reasoning_effort || "跟随 Agent 默认"}`, ...(memory.id === "none" ? ["- 长期记忆：不使用；当前聊天上文照常保留"] : [`- 本次记忆配置：${markdownLabel(memory.name)} · 第 ${memory.revision} 版`, `- 记忆程序：Hindsight · ${memory.mode === "read_write" ? "读取并记住" : "只读取"}`, `- 记忆范围引用：${memory.bank_ref}`, ...(memory.habits ? [`- 本轮身份与习惯：${markdownLabel(memory.habits)}`] : [])])];
+    return [`- 本次 AI 配置：${markdownLabel(row.name)} · 第 ${row.revision} 版`, `- 配置标识：${row.id}`, `- 请求 Agent：${row.agent_instance_id}`, `- 执行设备：本机`, `- 请求模型：${markdownLabel(row.model_id || "跟随 Agent 默认")}`, `- 请求强度：${row.reasoning_effort || "跟随 Agent 默认"}`, ...(memory.id === "none" ? ["- 长期记忆：不使用；当前聊天上文照常保留"] : [`- 本次记忆配置：${markdownLabel(memory.name)} · 第 ${memory.revision} 版`, `- 记忆程序：${window.RabbitProfiles.memoryProgramLabel(memory.program)} · ${memory.mode === "read_write" ? "读取并记住" : "只读取"}`, `- 记忆范围引用：${memory.bank_ref}`, ...(memory.habits ? [`- 本轮身份与习惯：${markdownLabel(memory.habits)}`] : [])])];
   }
   function safeMemoryInfo(value) { try { return window.RabbitProfiles?.memoryInfo(value) || null; } catch (_) { return null; } }
   function memoryStatusText(value) {
@@ -2017,7 +2176,7 @@
     saveDraft(); stopPolling(); ++state.openVersion;
     if (!state.browserRestoring && !draftHasContent(state.drafts.get("__new__") || "", state.draftAttachments.get("__new__") || [], state.taskIntents.get("__new__"))) state.profileChoices.delete("__new__");
     state.selected = { type: "new", id: null };
-    state.profile_snapshot = null; state.profileSelection = null; state.profileSelectionIntent = false; state.profileLegacy = false; state.profileNotice = ""; profiles?.close(false);
+    state.profile_snapshot = null; state.profileSelection = null; state.profileSelectionSync = null; state.profileSelectionIntent = false; state.profileLegacy = false; state.profileNotice = ""; profiles?.close(false);
     state.memoryRecallError = false;
     state.backend = state.preferences.default_backend || "codex"; state.model_id = defaultModelId(state.backend);
     state.chat = null; state.chatMessages = []; state.run = null; state.historySession = null; state.historyMatch = null; state.transientError = "";
@@ -2042,7 +2201,7 @@
     const version = ++state.openVersion;
     state.chatLoading = { id, version }; state.selectedRevision = null; state.remoteRunning = false;
     state.selected = { type: "chat", id }; state.chat = null; state.chatMessages = []; state.run = null; state.transientError = "";
-    state.profile_snapshot = null; state.profileSelection = null; state.profileSelectionIntent = false; state.profileLegacy = false; state.profileNotice = ""; profiles?.close(false);
+    state.profile_snapshot = null; state.profileSelection = null; state.profileSelectionSync = null; state.profileSelectionIntent = false; state.profileLegacy = false; state.profileNotice = ""; profiles?.close(false);
     state.memoryRecallError = false;
     state.pendingSubmission = null;
     state.historySession = null; state.historyMatch = target; resetMessageView(); headerForChat(state.chats.find((chat) => chat.id === id)); restoreDraft(); renderRunNotice(); renderList();
@@ -2253,10 +2412,12 @@
     documentDraftPreview = null;
     $("document-viewer").hidden = true;
     $("document-content").replaceChildren();
+    $("document-content").classList.remove("builtin-manual");
     $("document-meta").replaceChildren();
     if (documentReturnFocus && documentReturnFocus.isConnected) documentReturnFocus.focus();
   }
   async function openMarkdownMaterial(selection) {
+    $("document-content").classList.remove("builtin-manual");
     if (!nativeFileHandoff || !fileMaterials || selection?.workspace_id !== state.status?.workspace_id) throw Error("文件资料入口或工作区暂不可用。");
     nativeHandoff?.close(); nativeTextHandoff?.close(); nativeFileHandoff.close();
     if (!$("native-file-handoff-modal").hidden || !$("native-handoff-modal").hidden || !$("native-text-handoff-modal").hidden) throw Error("资料正在放入目标草稿，请稍后再打开文件。");
@@ -2318,7 +2479,8 @@
       $("document-content").append(el("p", "", userError(error, "文件位置、版本或绑定已有变化，请从文件夹重新核对。")));
     }
   }
-  async function openDocument(path, line = null) {
+  async function openDocument(path, line = null, { referenceActions = true } = {}) {
+    $("document-content").classList.remove("builtin-manual");
     const version = ++documentVersion;
     documentDraftPreview = null;
     const captured = captureDocumentDraft(version);
@@ -2344,7 +2506,7 @@
         const selected = pre.querySelector(".selected-line");
         if (selected) requestAnimationFrame(() => selected.scrollIntoView({ block: "center" }));
       } else window.OneAIRichText.render($("document-content"), data.content, { openDocument, basePath: data.path });
-      if (typeof data.content === "string" && typeof data.name === "string" && /\.(?:md|txt)$/i.test(data.name)) {
+      if (referenceActions && typeof data.content === "string" && typeof data.name === "string" && /\.(?:md|txt)$/i.test(data.name)) {
         const tools = el("span", "document-draft-tools");
         const preview = { captured, block: documentReference(data), name: data.name, ticket: typeof data.snapshot_ticket === "string" ? data.snapshot_ticket : null, fileButton: null, button: null, notice: el("span", "document-draft-note") };
         preview.button = button("放入草稿", "document-to-draft", () => insertDocumentDraft(preview));
@@ -2400,14 +2562,22 @@
     article.append(body);
     if (role === "user" && !history) appendFileInputs(article, message);
     if (role === "assistant" && !history && fileTasks && state.selected.type === "chat") fileTasks.append(article, state.selected.id, message.file_task);
-    if (role === "assistant") appendMemoryInfo(article, message.memory_info);
     if (role === "assistant") {
       let snap = null; try { snap = profileSnapshot(message.profile_snapshot); } catch (_) { /* Keep text readable if optional metadata is malformed. */ }
-      if (snap || message.model || message.model_source) {
-        const details = el("details", "message-profile-details"), lines = el("div"); details.append(el("summary", "", "本次回复的配置与来源"));
+      const run = !history && state.selected.type === "chat" && state.run?.message_id === message.id ? state.run : null;
+      const memory = message.memory_info || run?.memory_info;
+      const configuration = message.request_configuration;
+      const request = configuration?.source === "requested_route" && (configuration.model === null || typeof configuration.model === "string") && (configuration.reasoning_effort === null || typeof configuration.reasoning_effort === "string") ? configuration : null;
+      if (snap || message.model || message.model_source || memory || run?.context_info || request) {
+        const details = el("details", "message-profile-details"), lines = el("div"); details.append(el("summary", "", "本轮信息"));
+        if (request) lines.append(el("p", "", `本轮请求：${request.model || "模型待核对"} · ${request.reasoning_effort || "强度待核对"}`));
         for (const text of profileExportLines(snap).map(line => line.replace(/^- /, ""))) lines.append(el("p", "", text));
-        if (!snap) lines.append(el("p", "", "原记录未提供 AI 配置快照。"));
-        lines.append(el("p", "", `型号信息来源：${modelSourceLabel(message.model_source)}`)); details.append(lines); article.append(details);
+        if (message.model || message.model_source || request) lines.append(el("p", "", `型号信息来源：${modelSourceLabel(request?.source || message.model_source)}`));
+        if (run?.context_info) {
+          const info = run.context_info, included = Number(info.included_messages) || 0, total = Number(info.total_messages) || included;
+          lines.append(el("p", "", Number(info.omitted_messages) > 0 ? `${contextStatusCopy(info).omission}，已带入 ${included}/${total} 条对话。` : `已带入 ${included} 条对话。`));
+        }
+        appendMemoryInfo(lines, memory); details.append(lines); article.append(details);
       }
     }
     if (!content && hasImageRecords(message)) article.append(el("p", "message-image-only", "原消息只有图片，未附文字。"));
@@ -2430,7 +2600,7 @@
     return message.role === "tool" || ["tool_call", "tool_result", "command_execution", "file_change", "agent_context", "agent_message", "bash_context"].includes(message.message_kind || message.phase);
   }
   function renderMessages(messages, { history = false, forceBottom = false, appendNotice = null, preserveScroll = false } = {}) {
-    const signature = JSON.stringify([state.selected.type, state.selected.id, messages.map((message) => [message.id || message.message_id, message.role, message.content, message.display_content, message.status, message.phase, message.type, message.message_kind, message.approval_required, message.model, message.provider, message.model_source, message.profile_snapshot, message.memory_info, message.attachment_ids, message.native_attachments, message.attachment_summary, message.file_task, message.file_inputs]), state.historyMessageNext, state.historyMessagePrev, state.historyMessageStart, state.historyMatch, state.preferences.markdown, state.rawMessages, history ? state.historySession?.coverage : null, !history && state.selected.type === "chat" ? projectPublish?.summary(state.selected.id) : null]);
+    const signature = JSON.stringify([state.selected.type, state.selected.id, messages.map((message) => [message.id || message.message_id, message.role, message.content, message.display_content, message.status, message.phase, message.type, message.message_kind, message.approval_required, message.model, message.provider, message.model_source, message.request_configuration, message.profile_snapshot, message.memory_info, message.attachment_ids, message.native_attachments, message.attachment_summary, message.file_task, message.file_inputs]), !history ? [state.run?.message_id, state.run?.context_info, state.run?.memory_info] : null, state.historyMessageNext, state.historyMessagePrev, state.historyMessageStart, state.historyMatch, state.preferences.markdown, state.rawMessages, history ? state.historySession?.coverage : null, !history && state.selected.type === "chat" ? projectPublish?.summary(state.selected.id) : null]);
     if (signature === state.messageSignature) return;
     state.messageSignature = signature;
     const expandedProfiles = new Set([...ui.messages.querySelectorAll(".message-profile-details[open]")].map((node) => node.closest(".message").dataset.messageId));
@@ -2858,6 +3028,7 @@
     return JSON.stringify(messages.map((message) => [message.id, message.role, message.content, message.display_content, message.status, message.attachment_ids, message.native_attachments, message.attachment_summary, message.file_inputs]));
   }
   function renderChat(data, forceBottom = false, { background = false, revisionFallback = null, preserveScroll = false } = {}) {
+    if (data.chat && data.chat.id !== state.selected.id) return;
     const firstLoad = !state.chat;
     const messages = Array.isArray(data.messages) ? data.messages : [];
     if (background && contextMessageStamp(messages) !== contextMessageStamp(state.chatMessages)) invalidateContextPreview("前文已更新，之前的预览已清除，请重新查看。");
@@ -2868,7 +3039,7 @@
     if (projectPublish && Array.isArray(data.project_publications)) { try { projectPublish.acceptChat(state.selected.id, data.project_publications); } catch (error) { toast(userError(error, "另存记录暂时无法读取，原成果保留。")); } }
     if (fileMaterials && Array.isArray(data.file_materials)) for (const raw of data.file_materials.slice(0, 100)) { try { fileMaterials.accept(raw); } catch (_) {} }
     state.run = data.run || null;
-    if (profilesEnabled()) state.profileSelection = data.profile_selection ? window.RabbitProfiles.selection(data.profile_selection) : state.profileSelection;
+    if (profilesEnabled()) observeProfileSelection(data.profile_selection);
     state.selectedRevision = data.revision ?? (data.chat && data.chat.revision) ?? revisionFallback ?? state.selectedRevision;
     if (firstLoad && !background) {
       const recentBackend = state.run && state.run.backend || [...state.chatMessages].reverse().find((message) => message.role === "assistant" && backendLabels[message.backend])?.backend;
@@ -2893,8 +3064,6 @@
       const backend = backendLabels[state.run.backend] || "AI";
       const stopping = state.cancelling || state.run.cancel_requested;
       ui.notice.append(el("span", "spinner"), el("span", "", stopping ? "正在停止这一轮…" : state.run.status === "queued" ? `消息已发送，${backend} 正在准备回答…` : `${backend} 正在回答…`));
-    } else if (state.run && state.run.status === "completed") {
-      ui.notice.append(el("span", "", "这一轮已完成。"));
     } else if (state.run && state.run.status === "failed") {
       ui.notice.classList.add("error");
       const reason = userError({ message: state.run.error }, "这一轮没有完成。可以修改问题后再试一次。");
@@ -2903,15 +3072,11 @@
       ui.notice.append(el("span", "", state.run.status === "interrupted" ? "上一轮已中断。可以在下方继续。" : "这一轮已停止，可以修改问题后继续。"));
     }
     if (state.memoryChatCreation) { const pending = state.memoryChatCreation; ui.notice.append(el("span", "", "新空对话的创建结果待检查，原草稿仍保留。"), button("检查新对话创建", "", async () => { try { await createMemoryChat(pending.profile_snapshot, profileView().view); } catch (error) { toast(userError(error, "暂时无法确认，未重复创建。")); } })); }
-    if (!state.transientError && state.run && state.run.context_info) {
-      const info = state.run.context_info;
-      const included = Number(info.included_messages) || 0;
-      const total = Number(info.total_messages) || included;
-      const omitted = Number(info.omitted_messages) || 0;
-      const partial = contextStatusCopy(info).omission;
-      ui.notice.append(el("span", "run-context", omitted > 0 ? `${partial}，已带入 ${included}/${total} 条；原记录仍保留，可查看本轮上下文。` : `已带入 ${included} 条对话。`));
+    if (!state.transientError && state.run?.memory_info) {
+      const info = safeMemoryInfo(state.run.memory_info);
+      const attention = info?.recall.state === "failed" ? "长期记忆检索失败。" : { queued: "记忆提取任务已排队。", submitting: "正在提交记忆提取任务。", processing: "记忆提取任务处理中。", failed: "记忆保存失败，已有回答不受影响。", unknown: "记忆保存结果未确认，已有回答保留。" }[info?.retain.state];
+      if (attention) ui.notice.append(el("span", "run-memory", attention));
     }
-    if (!state.transientError && state.run?.memory_info) ui.notice.append(el("span", "run-memory", memoryStatusText(state.run.memory_info)));
     ui.notice.hidden = !ui.notice.childNodes.length;
     updateComposer();
   }
@@ -2953,6 +3118,7 @@
         }
       } else state.remoteRunning = false;
       if (current()) {
+        updateComposer();
         const notice = plain(changes.preferences_notice);
         if (notice && notice !== state.preferenceNotice) toast(notice);
         state.preferenceNotice = notice;
@@ -2985,7 +3151,7 @@
     saveDraft(); stopPolling();
     const version = ++state.openVersion;
     state.selected = { type: "history", id: `${agent}:${sessionId}`, agent, sessionId };
-    state.profile_snapshot = null; state.profileSelection = null; state.profileSelectionIntent = false; state.profileLegacy = false; state.profileNotice = ""; profiles?.close(false);
+    state.profile_snapshot = null; state.profileSelection = null; state.profileSelectionSync = null; state.profileSelectionIntent = false; state.profileLegacy = false; state.profileNotice = ""; profiles?.close(false);
     state.memoryRecallError = false;
     state.backend = state.historyBackendChoices.get(state.selected.id) || agent; state.model_id = state.historyModelChoices.get(state.selected.id) ?? defaultModelId(state.backend);
     state.historyReady = false;
@@ -3160,7 +3326,7 @@
           invalidateContextPreview("已接上这段对话，请重新查看本轮上下文。");
           state.selected = { type: "chat", id }; state.chat = created.chat;
           state.historySession = null; state.historyMessages = []; state.historyMatch = null; state.historyReady = false;
-          state.chatMessages = []; state.run = null; state.selectedRevision = null; state.profileSelection = null; adoptProfile(capturedProfile, { frozen: true });
+          state.chatMessages = []; state.run = null; state.selectedRevision = null; state.profileSelection = null; state.profileSelectionSync = null; adoptProfile(capturedProfile, { frozen: true });
           headerForChat(created.chat); state.messageSignature = "";
         }
         if (previousSelection.type === "history") {

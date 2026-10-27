@@ -4,6 +4,8 @@
 
 Start with **one agent you already use**. White Rabbit's native routes call the agent's own CLI, SDK, or protocol; they do not include a replacement agent or a model account. This snapshot targets macOS/POSIX and Python 3.11+.
 
+These routes create or recover supported native sessions managed by White Rabbit. They do not automatically attach to a task already running in Codex desktop, WorkBuddy, or any other window. Reading history, recovering a saved session, and controlling a live external executor are separate capabilities.
+
 ## Demo and real mode are different
 
 `python3 -B demo.py` uses temporary invented data and rule-based replies. The commands below start the real application: it can index local native histories, store application records, launch agents, and use their current credentials and model settings. A new White Rabbit data directory does not disable native-history discovery. Online agents may transmit the material you send to their providers; normal native startup can also create logs, caches, or background work.
@@ -105,12 +107,40 @@ The separate management assistant needs an existing Python environment with the 
 --specialist-codex-cli "/absolute/path/to/codex"
 ```
 
-It can call the supported application-management interfaces; it is not a general permission bypass or a device-control service. Its current role requests a fixed model/reasoning configuration, so availability also depends on the native account. The optional work-document mode requires separately supplied project role documents and is not needed for this starting path.
+It keeps a separate fixed native conversation and calls the same supported application-management interfaces as the UI. Its current role requests a fixed model/reasoning configuration, so availability also depends on the native account. The optional work-document mode requires separately supplied project role documents and is not needed for this starting path. See [what the specialist can do](specialist.md).
 
 ## What to expect
 
-Text conversations, compatible full-text materials, and session continuation have implementations for the five routes. Recovery depends on the original session, working directory, and native files remaining available. Images are limited to selected Codex and Hermes configurations; Pi's local-image route is not fully validated, and Claude/DSH image inputs are not enabled here. Shared-memory behavior also varies; the DSH follow-up path has known failed validation records.
+Text conversations, compatible full-text materials, and session continuation have implementations for the five routes. Recovery depends on the original session, working directory, and native files remaining available.
+
+| Route | Saved next-turn settings | Material / result boundary |
+| --- | --- | --- |
+| Codex | Model and supported reasoning level | Full text; original images only for supported configurations |
+| Hermes | Model and supported reasoning level | Full text and compatible images; exact delegated results can depend on the current connection cache |
+| Pi | Model and supported reasoning level | Full text; image use needs a verified vision-capable model and route; delegated results are current-connection scoped |
+| Claude Code | Model selection; reasoning retains native settings | Full text; images are not enabled here; eligible final SDK results can be read from bounded local receipts after disconnect |
+| DeepSeek Harness | Local model override remains unconnected because the existing native setter may change global defaults | Full text and next-turn read-only memory selection; images are not enabled here |
+
+The five routes can independently select supported read-only memory for the next turn. Hindsight, Hermes document memory, and the optional Mem0 bridge have different configuration and read/write capabilities. A selected memory profile does not erase context already in the native session or disable the agent's own memory system.
+
+Native target input/result routes are not equivalent to every complete specialist delegation path being validated. Keep the original request/session/turn identity when reading a result; a recent answer is not an exact result. Missing or cold connection state must not trigger an automatic resend.
+
+Claude's local operation ledger can now contain **final-answer text**, not only status metadata. It stores only successful, non-truncated, top-level SDK Results with UTF-8 text at most 128 KiB, together with SHA-256 and the original chat/client/session/epoch identity. Matching reads after disconnect or rebuild are labeled `stored_sdk_result`; they do not assert that the original connection is currently alive. Older receipts without stored text are not backfilled, and failures, subtasks, truncated/oversized results, corruption, or identity mismatch cannot be returned as a successful stored answer. Pi/Hermes still require their current-connection result caches. This limited saved body does not replace the agent's original full transcript or restore its internal state.
 
 Agents preserve their own transcripts, tools, permissions, and configurations. A selected text/material handoff does not migrate complete internal state. Offline tests, a successful connection, and a finished real task are different evidence; this release does not promise every tool, extension, approval shape, or recovery case.
 
 The server binds to loopback. External mobile access currently depends on your separately configured IM.codes connection to the same online Mac. Do not treat it as a public hosted service or cross-computer scheduler.
+
+## Observe current work and HAPI (optional)
+
+**Management → Agent → Current work** shows metadata for native connections White Rabbit already owns. Opening an item returns to the same conversation. An empty list does not prove other applications or background tools are idle.
+
+If you already run a local HAPI Hub, the included connector can manually bind its read-only work-discovery route:
+
+```sh
+python3 -B 工具/hapi_work_connect.py --origin http://127.0.0.1:3006
+```
+
+Replace the port with your Hub's port. The tool accepts only a literal loopback HTTP origin, asks for the original HAPI access token without echoing it, and exchanges it for a JWT kept in White Rabbit's memory. Use `--rabbit-port` if the White Rabbit server uses another port. No HAPI process or agent is started by the connector.
+
+Click the manual refresh action under **Management → Agent** to fetch Hub-reported summaries; opening an item goes to HAPI's original page. The statuses are HAPI reports, not proof of White Rabbit control or full native state. Sending, approvals, and stopping remain in HAPI. Service restart or expired authentication needs a fresh manual connection; `--clear` removes only White Rabbit's in-memory binding.

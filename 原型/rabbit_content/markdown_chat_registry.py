@@ -11,9 +11,10 @@ import re
 import sqlite3
 import time
 
-from .markdown_chat_directory import MarkdownChatDirectory, MarkdownDirectoryError
+from .markdown_chat_directory import MarkdownChatDirectory, MarkdownDirectoryError, _folder_parts
 from .markdown_chat_document import parse, document_identity, reference_identity, MarkdownChatDocumentError
-from .project_publish_files import ProjectPublishError
+from .project_publish_files import ProjectPublishError, _parts
+from .markdown_sync_files import MarkdownMoveError
 from .project_publish_store import (
     ProjectPublishStore, ProjectPublishStoreError, MESSAGES, MAX_PUBLICATIONS, _uuid,
 )
@@ -334,6 +335,29 @@ class MarkdownChatRegistry:
         with self.lock, _errors():
             return self.sync.overlay_bindings(self._base_bindings())
 
+    def _locate_current_file(self, binding_id, expected_head_id):
+        bindings = self.bindings()
+        binding = next((item for item in bindings if item['publication_id'] == binding_id), None)
+        if binding is None:
+            raise MarkdownChatRegistryError('not_found')
+        if binding['head_id'] != expected_head_id:
+            raise MarkdownChatRegistryError('document_changed')
+        references = {source_identity(item['source']): {
+            'sha256': item['source']['sha256'], 'revision': item['source']['revision'],
+        } for item in bindings}
+        scan = self.directory.scan(references, current_revisions={
+            identity: reference['revision'] for identity, reference in references.items()})
+        if not scan['complete']:
+            raise MarkdownChatRegistryError('directory_unavailable')
+        source = binding['source']
+        selected = next((row for row in scan['chats']
+            if (row.get('kind', 'markdown_chat'), row.get('agent', ''), row['rabbit_id']) ==
+               (source['kind'], source.get('agent', ''), source['chat_id'])), None)
+        if (selected is None or selected['status'] not in ('current', 'external_modified')
+                or len(selected['paths']) != 1 or 'file' not in selected):
+            raise MarkdownChatRegistryError('document_changed')
+        return binding, selected
+
     def current_file(self, binding_id, expected_head_id):
         """Read one current disk document as untrusted reference material.
 
@@ -344,29 +368,6 @@ class MarkdownChatRegistry:
         with self.lock, _errors():
             binding_id, expected_head_id = _uuid(binding_id), _uuid(expected_head_id)
 
-            def locate():
-                bindings = self.bindings()
-                binding = next((item for item in bindings if item['publication_id'] == binding_id), None)
-                if binding is None:
-                    raise MarkdownChatRegistryError('not_found')
-                if binding['head_id'] != expected_head_id:
-                    raise MarkdownChatRegistryError('document_changed')
-                references = {source_identity(item['source']): {
-                    'sha256': item['source']['sha256'], 'revision': item['source']['revision'],
-                } for item in bindings}
-                scan = self.directory.scan(references, current_revisions={
-                    identity: reference['revision'] for identity, reference in references.items()})
-                if not scan['complete']:
-                    raise MarkdownChatRegistryError('directory_unavailable')
-                source = binding['source']
-                selected = next((row for row in scan['chats']
-                    if (row.get('kind', 'markdown_chat'), row.get('agent', ''), row['rabbit_id']) ==
-                       (source['kind'], source.get('agent', ''), source['chat_id'])), None)
-                if (selected is None or selected['status'] not in ('current', 'external_modified')
-                        or len(selected['paths']) != 1 or 'file' not in selected):
-                    raise MarkdownChatRegistryError('document_changed')
-                return binding, selected
-
             def inspect(path):
                 try:
                     return self.publisher.files.inspect(path)
@@ -374,7 +375,7 @@ class MarkdownChatRegistry:
                     code = error.code if error.code in ('capacity', 'scope_changed', 'not_found', 'closed') else 'document_changed'
                     raise MarkdownChatRegistryError(code) from None
 
-            binding, before = locate()
+            binding, before = self._locate_current_file(binding_id, expected_head_id)
             path = before['paths'][0]
             current = inspect(path)
             if not current['exists'] or current['sha256'] != before['file']['sha256']:
@@ -383,7 +384,7 @@ class MarkdownChatRegistry:
             parsed = parse(raw, workspace_id=self.workspace_id)
             if document_identity(parsed['metadata']) != source_identity(binding['source']):
                 raise MarkdownChatRegistryError('document_changed')
-            after_binding, after = locate()
+            after_binding, after = self._locate_current_file(binding_id, expected_head_id)
             if (after_binding != binding or after['paths'] != [path]
                     or after['file']['sha256'] != current['sha256']):
                 raise MarkdownChatRegistryError('document_changed')
@@ -396,6 +397,70 @@ class MarkdownChatRegistry:
                 path=path, name=Path(path).name, content=current['text'], sha256=current['sha256'],
                 size_bytes=current['size_bytes'], observation={
                     'file_status': after['status'], 'source_revision_checked': False})
+
+    def move_file(self, binding_id, expected_head_id, source_path, source_sha256, target_folder):
+        """Move one registered current disk file; no content or receipt is rewritten.
+
+        This explicit action has no immutable move receipt. Unknown completion
+        requires read-only observation, never automatic retry or rollback.
+        """
+        moved = False
+        try:
+            with self.lock:
+                binding_id, expected_head_id = _uuid(binding_id), _uuid(expected_head_id)
+                if type(source_sha256) is not str or _SHA.fullmatch(source_sha256) is None:
+                    raise MarkdownMoveError('invalid_arguments')
+                parts = _parts(source_path)
+                if type(target_folder) is not str:
+                    raise MarkdownMoveError('invalid_arguments')
+                if target_folder:
+                    _folder_parts(target_folder)
+                target_path = '/'.join((target_folder, parts[-1])) if target_folder else parts[-1]
+                _parts(target_path)
+                if target_path == source_path:
+                    raise MarkdownMoveError('invalid_arguments')
+                self.sync._check()
+                if not self.sync.supported:
+                    raise MarkdownMoveError('unsupported_platform' if self.sync._support_error == 'unsupported_platform'
+                                            else 'move_unsupported')
+                with self.sync._ownership() as owned:
+                    if not owned:
+                        raise MarkdownMoveError('operation_conflict')
+                    with self.publisher._db() as db:
+                        if db.execute("SELECT 1 FROM markdown_sync_operations WHERE binding_id=? AND state='publishing'",
+                                      (binding_id,)).fetchone():
+                            raise MarkdownMoveError('operation_conflict')
+                    current = self.current_file(binding_id, expected_head_id)
+                    if current['path'] != source_path or current['sha256'] != source_sha256:
+                        raise MarkdownMoveError('document_changed')
+                    source = self.sync.files.inspect(source_path)
+                    target = self.sync.files.inspect(target_path)
+                    if (not source['exists'] or source['sha256'] != source_sha256
+                            or source['size_bytes'] != current['size_bytes']):
+                        raise MarkdownMoveError('document_changed')
+                    if target['exists']:
+                        raise MarkdownMoveError('target_exists')
+                    binding, selected = self._locate_current_file(binding_id, expected_head_id)
+                    if selected['paths'] != [source_path] or selected['file']['sha256'] != source_sha256:
+                        raise MarkdownMoveError('document_changed')
+                    result = self.sync.files.move_file(source_path, target_path, source['scope'],
+                        source['identity'], source_sha256, source['size_bytes'], target['scope'])
+                    moved = True
+                    after_binding, after = self._locate_current_file(binding_id, expected_head_id)
+                    if (after_binding != binding or after['paths'] != [target_path]
+                            or after['file']['sha256'] != source_sha256):
+                        raise MarkdownMoveError('move_unconfirmed', result_unknown=True)
+                    result = dict(binding_id=binding_id, head_id=expected_head_id, **result)
+                return result
+        except Exception as error:
+            if moved or getattr(error, 'result_unknown', False) is True:
+                raise MarkdownMoveError('move_unconfirmed', result_unknown=True) from None
+            if isinstance(error, MarkdownMoveError):
+                raise
+            code = getattr(error, 'code', 'io_failed')
+            if isinstance(error, MarkdownDirectoryError):
+                code = 'invalid_arguments' if code == 'invalid_folder' else 'directory_unavailable'
+            raise MarkdownMoveError(code) from None
 
     def scan(self, current_revisions):
         with self.lock, _errors():

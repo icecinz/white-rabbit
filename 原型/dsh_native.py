@@ -23,6 +23,7 @@ from dsh_native_interactions import answerable, response_for
 from native_maintenance import maintenance_state as observe_maintenance
 from service_admission import admitted_native
 from native_memory_intents import NativeMemoryIntents, NativeMemoryIntentError, validate_selection
+from native_memory_selection import NativeMemorySelections
 from memory_context import selected_memory_block
 from dsh_material_intents import DshMaterialIntents, DSHMaterialIntentError
 from dsh_material_inputs import prepare as prepare_materials, validate_text_refs
@@ -141,11 +142,12 @@ def _encoded(value):
 
 class DshNativeHolder:
     def __init__(self, store, identity, connection, *, workspace_id, memory_intents=None, memory_recall=None,
-                 materials=None, material_intents=None):
+                 materials=None, material_intents=None, memory_selections=None):
         self.store, self.identity, self.connection = store, chat_id(identity), connection
         self.workspace_id = workspace_id
         self.memory_intents, self.memory_recall = memory_intents, memory_recall
         self.materials, self.material_intents = materials, material_intents
+        self.memory_selections = memory_selections
         self._action = threading.RLock()
         self._cache = threading.Condition(threading.RLock())
         self._settle_lock = threading.Lock()
@@ -461,8 +463,24 @@ class DshNativeHolder:
                     intent['raw_request_sha256'], digest)
             metadata = {**({'material_intent': intent} if intent is not None else {}),
                         **({'memory_intent': self.memory_intents.public(memory)} if memory is not None else {})}
-            receipt = (self.store.begin(self.identity, client_id, message, self._epoch, request=request)
-                if memory is not None or intent is not None else self.store.begin(self.identity, client_id, message, self._epoch))
+            try:
+                if memory is None and intent is None and self.memory_selections is not None:
+                    with self.memory_selections.none_fence('dsh', self.identity) as assert_none:
+                        replay = _recover_send(self.store, self.material_intents, self.memory_intents, self.identity, body)
+                        if replay is not None:
+                            return replay
+                        assert_none()
+                        receipt = self.store.begin(self.identity, client_id, message, self._epoch)
+                else:
+                    receipt = self.store.begin(self.identity, client_id, message, self._epoch, request=request)
+            except BaseException:
+                try:
+                    reserved = self.store.lookup(client_id)
+                except Exception:
+                    reserved = True
+                if reserved is not None:
+                    raise _error('submission_unknown', '原请求已登记，提交尚未确认；请核对原回执，不自动重发。', unsent=False) from None
+                raise
             if not receipt['created']:
                 return {'operation': receipt, **metadata}
             with self._cache: self._active = client_id
@@ -618,6 +636,8 @@ class DshNativeChats:
         if materials is not None or existing_materials is not None:
             self.material_intents = DshMaterialIntents(catalogue_path, workspace_id=workspace_id)
         self.store = DSHNativeStore(Path(data_dir) / 'dsh-native.sqlite')
+        self.memory_selections = NativeMemorySelections(catalogue_path,
+            workspace_id=workspace_id) if len(workspace_id) == 64 else None
         self.connection, self.workspace_id = connection, workspace_id
         self.admission = admission
         self._lock, self._owners = threading.RLock(), {}
@@ -644,7 +664,8 @@ class DshNativeChats:
                 self._prepare(identity)
                 self._owners[identity] = DshNativeHolder(self.store, identity, self.connection, workspace_id=self.workspace_id,
                     memory_intents=self.memory_intents, memory_recall=self.memory_recall,
-                    materials=self.materials, material_intents=self.material_intents)
+                    materials=self.materials, material_intents=self.material_intents,
+                    memory_selections=self.memory_selections)
             return self._owners[identity]
 
     def sources(self):

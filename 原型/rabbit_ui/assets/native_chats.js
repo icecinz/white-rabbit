@@ -335,7 +335,7 @@
       syncWorkspace();
       if (!isCurrent()) return null;
       const saved = initialProfile === null ? null : window.RabbitProfiles?.profile(initialProfile, false);
-      if (initialProfile !== null && (!saved || !["codex", "pi", "hermes"].includes(agent) || saved.agent_instance_id !== "local/" + agent)) throw Error("这份配置没有可用的原生选择接口，尚未创建对话。");
+      if (initialProfile !== null && (!saved || !["codex", "pi", "hermes", "claude"].includes(agent) || saved.agent_instance_id !== "local/" + agent)) throw Error("这份配置没有可用的原生选择接口，尚未创建对话。");
       const draft = initialDraft === null ? null : creationDraft(initialDraft, saved);
       if (pending || creating) throw Error(text("先在设置中核对上次新建结果。", "Check the previous creation in settings first."));
       if (reading) throw Error(text("对话目录正在读取，请稍后再新建。", "The catalogue is loading; try creating afterward."));

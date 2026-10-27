@@ -126,6 +126,21 @@ def main(argv=None):
     # exact session guard; do not introduce a second identity/idle definition.
     queue_extension.install_image_queue(server, installed_commit=expected, expected_commit=expected,
         identity_validator=extension._identity, live_validator=extension._live, private_backend=True)
+    # This opt-in observer is not required by ordinary native chats. A changed
+    # native worktree may make it unavailable; tracked sends must probe its RPC
+    # capability before submitting, never fall back to the ordinary route.
+    try:
+        cache_spec = importlib.util.spec_from_file_location(
+            '_rabbit_hermes_result_cache', app_dir / 'result_cache.py')
+        if cache_spec is None or cache_spec.loader is None:
+            raise ValueError('The optional current-connection observer is unavailable.')
+        cache = importlib.util.module_from_spec(cache_spec)
+        cache_spec.loader.exec_module(cache)
+        cache.install_gateway_receipts(server, native_root=root, installed_commit=expected, private_backend=True)
+    except Exception:
+        # Do not echo native/source exceptions or weaken the existing guards.
+        # Settings, images and the original CLI remain usable without this RPC.
+        pass
     return cli.main()
 
 
