@@ -1,6 +1,6 @@
 # Contributing · 参与方式
 
-Try the [fictional demo](README.md#try-the-fictional-demo), then choose a small problem. Improvements to a reusable core, an accurate integration boundary, or a clear explanation are welcome alongside product features.
+For everyday use, follow the [real installation checklist](docs/install-agent.md). For interface development without an agent, try the [fictional demo](README.md#interface-preview-only-fictional-demo), then choose a small problem. Improvements to a reusable core, an accurate integration boundary, or a clear explanation are welcome alongside product features.
 
 ## Report a problem
 

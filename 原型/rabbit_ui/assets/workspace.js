@@ -14,7 +14,7 @@
   const english = Object.freeze({
     "对话": "Chats", "新对话": "New chat", "小白兔专员": "Rabbit specialist", "管理": "Manage", "设置": "Settings", "通用设置": "General", "Agent 会话": "Agent session", "先从对话列表选择一段 Agent 对话": "Select an Agent chat from the chat list first", "专员设置尚未接入。": "Specialist settings are not connected yet.", "聊天": "Chat", "外观": "Appearance", "数据": "Data", "设备": "Devices", "大模型": "Models", "AI 配置": "AI profiles", "记忆配置": "Memory profiles", "管理分类": "Management tabs", "设置分类": "Settings tabs", "管理和设置": "Management and settings", "AI 配置 · 记忆配置 · 接入连接": "AI profiles · Memory profiles · Connections", "让小白兔更适合你": "Make Rabbit work for you",
     "更多": "More", "本机 Agent": "Local Agent", "检测说明": "Status notes", "连接与手机入口": "Connection and phone access", "刷新检测": "Refresh status", "正在检测…": "Checking…", "关闭详情": "Close details", "查看设备详情": "Device details", "查看接入详情": "Connection details", "重试读取设置": "Retry settings",
-    "当前可用": "Available", "当前不可用": "Unavailable", "可用": "Available", "不可用": "Unavailable", "备注": "Notes", "使用手册": "Manual", "请求验证通过": "Request verified", "可选择 · 发送时验证": "Selectable · checked on send", "本机服务在线": "Local service online", "状态未知": "Status unknown",
+    "接入检查通过": "Setup check passed", "接入待核对": "Setup unverified", "有通过的通路": "With a passed route", "当前可用": "Available", "当前不可用": "Unavailable", "可用": "Available", "不可用": "Unavailable", "备注": "Notes", "使用手册": "Manual", "请求验证通过": "Request verified", "可选择 · 发送时验证": "Selectable · checked on send", "本机服务可达": "Local service reachable", "状态未知": "Status unknown",
     "固定使用此模型": "Use this model", "跟随当前 Agent 默认模型": "Follow Agent default", "已跟随当前 Agent 默认模型": "Following Agent default", "新建跟随默认的配置": "Create default-follow profile", "☆ 收藏": "☆ Favorite", "★ 已收藏": "★ Favorited", "全部": "All", "收藏": "Favorites",
     "搜索模型、连接或 Agent": "Search models, connections or Agents", "搜索大模型": "Search models", "跟随 Agent": "Follow Agent", "手机入口": "Phone access", "打开 IM.codes": "Open IM.codes", "如何打开正式聊天": "How to open your chats",
     "新对话默认 AI 配置": "Default AI profile", "新对话默认 Agent": "Default Agent", "管理 AI 配置": "Manage AI profiles", "发送快捷键": "Send shortcut", "Enter 发送": "Enter to send", "Ctrl / ⌘ + Enter 发送": "Ctrl / ⌘ + Enter to send",
@@ -283,7 +283,7 @@
       return Promise.allSettled([loadManagement(), external]);
     }
     function status(label, available) {
-      const item = node("span", `rbw-state ${available ? "rbw-online" : "rbw-unavailable"}`);
+      const item = node("span", available === true ? "rbw-state rbw-online" : "rbw-state");
       item.append(node("span", "rbw-dot"), node("span", "", translate(label)));
       return item;
     }
@@ -338,7 +338,7 @@
         const item = node("li", "rbw-catalog-item");
         const label = model.name || model.model || "模型";
         item.append(node("strong", "", label));
-        item.append(status(model.available === true ? "可用" : "不可用", model.available === true));
+        item.append(status(model.available === true ? "接入检查通过" : "接入待核对", model.available === true));
         list.append(item);
       }
       if (rows.length) box.append(list);
@@ -364,15 +364,15 @@
       if (!device) return;
       const grid = node("div", "rbw-grid");
       const configured = management.agents.filter((agent) => agent.available).map((agent) => agent.name).join("、");
-      const item = card(device.name || "这台电脑", `${device.platform === "Darwin" ? "macOS" : device.platform || "系统未报告"} · 执行设备`, device.online === true, device.online === true ? "本机服务在线" : "状态未知", [configured ? `当前接入：${configured}` : "当前没有报告可用 Agent"]);
+      const item = card(device.name || "这台电脑", `${device.platform === "Darwin" ? "macOS" : device.platform || "系统未报告"} · 执行设备`, device.online === true, device.online === true ? "本机服务可达" : "状态未知", [configured ? `当前接入：${configured}` : "当前没有报告已通过接入检查的 Agent"]);
       item.append(foldedDetails("连接与手机入口", [action("查看设备详情", () => { detail = detail === "device" ? null : "device"; render(); }, "rbw-button rbw-subtle"), phoneEntry()]));
       grid.append(item); container.append(grid);
-      if (detail === "device") container.append(detailPanel("本机设备详情", [["设备", device.name], ["系统", device.platform === "Darwin" ? "macOS" : device.platform], ["用途", "执行设备"], ["连接", device.online === true ? "当前请求已到达本机服务" : "未确认"], ["Agent", configured || "没有报告可用 Agent"], ["远程切换与唤醒", "后续接入；当前没有验证其他电脑的连接"]]));
+      if (detail === "device") container.append(detailPanel("本机设备详情", [["设备", device.name], ["系统", device.platform === "Darwin" ? "macOS" : device.platform], ["用途", "执行设备"], ["连接", device.online === true ? "当前请求已到达本机服务" : "未确认"], ["Agent", configured || "没有报告已通过接入检查的 Agent"], ["远程切换与唤醒", "后续接入；当前没有验证其他电脑的连接"]]));
     }
     function agentsPage(container) {
       const grid = node("div", "rbw-grid"), current = selection();
       for (const agent of management.agents) {
-        const item = card(agent.name || agent.id, translate("本机 Agent"), agent.available === true, agent.available ? "当前可用" : "当前不可用", [`默认模型：${agent.model || "未报告"}`, !agent.available ? agent.reason || "接入条件尚未满足" : ""]);
+        const item = card(agent.name || agent.id, translate("本机 Agent"), agent.available === true, agent.available === true ? "接入检查通过" : "接入待核对", [`默认模型：${agent.model || "未报告"}`, agent.available !== true ? agent.reason || "接入条件尚未满足" : ""]);
         item.dataset.selected = String(current.backend === agent.id);
         item.append(foldedDetails("备注", [
           ...(agent.provider ? [node("p", "rbw-card-meta", `连接：${agent.provider}`)] : []),
@@ -396,17 +396,24 @@
         for (const connection of connections) seen.add(connection.id);
         const available = connections.some(connection => connection.available === true);
         if (!connections.some(modelMatches) || modelFilter === "available" && !available) continue;
-        const item = card(model.name || model.model || "模型", "", available, available ? "可用" : "不可用", []);
+        const passed = connections.filter(connection => connection.available === true).length;
+        const label = language() === "en" ? `${passed}/${connections.length} routes passed setup checks` : `${passed}/${connections.length} 条通路接入检查通过`;
+        const item = card(model.name || model.model || "模型", "", passed === connections.length, label, []);
         item.dataset.modelId = model.id;
-        const list = node("ul", "rbw-model-agents"), agentNames = new Map();
+        const list = node("ul", "rbw-model-agents"), agentRoutes = new Map();
         for (const connection of connections) {
           const agent = management.agents.find(value => value.id === connection.agent_id);
           const name = agent?.name || agents.labels[connection.agent_id] || connection.agent_id;
-          agentNames.set(name, agentNames.get(name) === true || connection.available === true);
+          const counts = agentRoutes.get(connection.agent_id) || { name, passed: 0, total: 0 };
+          counts.total++; if (connection.available === true) counts.passed++;
+          agentRoutes.set(connection.agent_id, counts);
         }
-        for (const [name, connected] of agentNames) list.append(node("li", "", name + (connected ? "" : " · " + translate("不可用"))));
+        for (const { name, passed, total } of agentRoutes.values()) {
+          const label = total === 1 ? translate(passed ? "接入检查通过" : "接入待核对") : language() === "en" ? `${passed}/${total} routes passed setup checks` : `${passed}/${total} 条通路接入检查通过`;
+          list.append(node("li", "", `${name} · ${label}`));
+        }
         item.append(list);
-        const notes = [...new Set(connections.filter(connection => connection.available !== true && typeof connection.reason === "string" && connection.reason.trim()).map(connection => Array.from(connection.reason.trim()).slice(0, 160).join("")))];
+        const notes = [...new Set(connections.filter(connection => connection.available !== true && typeof connection.reason === "string" && connection.reason.trim()).map(connection => `${management.agents.find(agent => agent.id === connection.agent_id)?.name || agents.labels[connection.agent_id] || connection.agent_id}：${Array.from(connection.reason.trim()).slice(0, 160).join("")}`))];
         if (notes.length) item.append(foldedDetails("备注", notes.map(note => node("p", "rbw-card-meta", note))));
         cardsNode.append(item);
       }
@@ -417,7 +424,7 @@
       search.type = "search"; search.placeholder = translate("搜索模型、连接或 Agent"); search.value = modelQuery; search.setAttribute("aria-label", translate("搜索大模型"));
       search.addEventListener("input", () => { modelQuery = search.value; renderModels(); });
       const filters = node("div", "rbw-filters");
-      for (const [id, label] of [["all", "全部"], ["available", "当前可用"]]) {
+      for (const [id, label] of [["all", "全部"], ["available", "有通过的通路"]]) {
         const control = action(label, () => { modelFilter = id; for (const child of filters.children) child.setAttribute("aria-pressed", String(child.dataset.filter === id)); renderModels(); }, "rbw-button rbw-subtle");
         control.dataset.filter = id; control.setAttribute("aria-pressed", String(modelFilter === id)); filters.append(control);
       }

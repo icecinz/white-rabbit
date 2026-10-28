@@ -20,6 +20,17 @@ For example, Markdown display and internal-record visibility are described with 
 
 This is not an arbitrary configuration editor. The specialist reads the current schema/version, submits only supported fields, and rereads after a conflict. The catalog and interface come from shared definitions; a prose instruction alone does not create an operation.
 
+## Evidence and placement are separate
+
+| Dimension | Categories | What it tells the reader |
+| --- | --- | --- |
+| Evidence / interpretation | Program fact · AI judgment · AI explanation | What was actually observed, what the AI concludes from that evidence, and how it explains the conclusion |
+| Presentation scope | Current operation · Overview · Card · Detail | Where and at what level the same information is presented |
+
+An AI explanation in an overview is still an explanation, not a new program fact. Purple/neutral describes the access path, not which conclusion is true. The manual [status report](specialist.md#manual-status-report) follows program facts → one tool-free analysis → a saved, source-labeled report. Refresh reuses that report and can flag changed evidence; it does not automatically repair settings or repeat analysis.
+
+Configuration wording follows the same rule: **Start a new profile from this profile** describes a new saved configuration, not a copied native session. The former default-for-new-chats action has been removed from the page; the composer remains the explicit place to select a saved profile.
+
 ## Purple and neutral are interface information
 
 ![Human and AI operation semantics](../assets/design-language.svg)

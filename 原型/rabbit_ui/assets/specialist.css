@@ -58,6 +58,8 @@
 .rbs-chat-more>.rbs-originals{margin-top:10px}
 .rbs-guide-text{margin:12px 0 16px}.rbs-guide-manual{margin-top:12px}
 .rbs-submit{min-width:60px}.rbs-submit[data-composer-action="stop"]{border-color:var(--ai-control);background:var(--ai-control-soft);color:var(--ai-control)}
-.rbs-guide-check{width:100%;margin-bottom:16px;border-color:var(--ai-control);color:var(--ai-control);background:var(--ai-control-soft);font-weight:550}
+.rbs-guide-check{position:relative;width:100%;margin-bottom:16px;border-color:var(--ai-control);color:var(--ai-control);background:var(--ai-control-soft);font-weight:550}
 .rbs-guide-check:not(:disabled):hover{background:var(--paper)}
+.rbs-guide-check::after{content:attr(data-tooltip);position:absolute;top:calc(100% + 6px);left:0;z-index:20;box-sizing:border-box;width:340px;max-width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--paper);color:var(--ai-control);box-shadow:0 6px 20px #0002;font-size:13px;font-weight:400;line-height:1.65;text-align:left;white-space:normal;pointer-events:none;visibility:hidden}
+.rbs-guide-check:hover::after,.rbs-guide-check:focus-visible::after{visibility:visible}
 .rbs-operation-records>summary:focus-visible,.rbs-chat-more>summary:focus-visible{outline:2px solid var(--ai-control);outline-offset:3px}

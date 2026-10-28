@@ -12,19 +12,52 @@ These routes create or recover supported native sessions managed by White Rabbit
 
 Keep credentials in the original agent's configuration. Do not put them in startup arguments, this repository, chat messages, or project documents.
 
-## Base command
+## Persistent installation
 
-Run from the repository root. Use a dedicated local data directory, not an agent's original transcript directory:
+When Codex, Hermes, or DSH is installing for a user, follow [the installation checklist](install-agent.md) to complete one real route first. This JSON contains local paths, not accounts or keys. Put **one of these groups** in `$HOME/.white-rabbit-connections.json`, outside the checkout, replacing every `/absolute/path/to/...` with a verified absolute path. JSON does not expand `$HOME` or `~`.
+
+Codex:
+
+```json
+{"schema_version":1,"connections":{"codex":{"cli":"/absolute/path/to/codex"}}}
+```
+
+Hermes:
+
+```json
+{"schema_version":1,"connections":{"hermes":{"node":"/absolute/path/to/node","python":"/absolute/path/to/hermes-agent/venv/bin/python","root":"/absolute/path/to/hermes-agent"}}}
+```
+
+DeepSeek Harness:
+
+```json
+{"schema_version":1,"connections":{"dsh":{"node":"/absolute/path/to/node","cli":"/absolute/path/to/deepseek-harness/lib/bin.js","root":"/absolute/path/to/deepseek-harness"}}}
+```
+
+From the repository root, preflight and install:
+
+```sh
+python3 -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+python3 -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+```
+
+Preflight checks basic requirements and paths without starting an agent or calling a model. Authentication, SDK/CLI compatibility, and real conversation still need verification. The installer keeps a private program copy and data under `$HOME/.imcodes/one-ai` and registers a per-user login service; IM.codes is not required. Later, double-click `打开小白兔.command` there or run `python3 -B "$HOME/.imcodes/one-ai/manage.py" open`.
+
+For an existing installation, omit `--native-config` on update to retain saved connections. Supplying JSON replaces the complete `connections` set; merge existing entries before adding an agent. Get one real conversation working before adding memory, the specialist, or more agents.
+
+## Foreground debugging command
+
+Run from the repository root. Use a separate development data directory and port, apart from the installed service and the agent's original transcripts:
 
 ```sh
 python3 -B 原型/server.py \
-  --data-dir "$HOME/.white-rabbit" \
-  --port 17860
+  --data-dir "$HOME/.white-rabbit-dev" \
+  --port 17861
 ```
 
-Append **one of the argument groups below to the same command**. Replace all `/absolute/path/to/...` examples with paths on your own machine. Open <http://127.0.0.1:17860/>, choose the configured native agent/profile, and send a short request deliberately. The base command alone does not enable these native connections.
+Append **one of the argument groups below to the same command**. Replace all `/absolute/path/to/...` examples with paths on your own machine. Open <http://127.0.0.1:17861/>, choose the configured native agent/profile, and send a short request deliberately. The base command alone does not enable these native connections.
 
-For the complete current argument list, run `python3 -B 原型/server.py --help`.
+This mode runs in the current terminal for development or troubleshooting; it does not provide login startup. For the complete current argument list, run `python3 -B 原型/server.py --help`.
 
 ### Codex
 
@@ -108,6 +141,8 @@ The separate management assistant needs an existing Python environment with the 
 ```
 
 It keeps a separate fixed native conversation and calls the same supported application-management interfaces as the UI. Its current role requests a fixed model/reasoning configuration, so availability also depends on the native account. The optional work-document mode requires separately supplied project role documents and is not needed for this starting path. See [what the specialist can do](specialist.md).
+
+The manual **Check and update** report has a separate analysis dependency: an available, already configured Claude text adapter with tools and native session persistence disabled. It analyzes only the four program-supplied metadata facts, records its requested/connection-reported model source, and does not acquire the Codex specialist's management tools. If this optional route is missing, facts can still be saved while the explanation remains incomplete. Refreshing a saved report does not trigger another analysis or change settings. See the [report pipeline](specialist.md#manual-status-report); configuring this route is not required for the first real-agent installation.
 
 ## What to expect
 

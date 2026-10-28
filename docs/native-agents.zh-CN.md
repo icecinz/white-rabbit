@@ -12,19 +12,52 @@
 
 凭据继续留在原 Agent 的配置中，不写进启动参数、仓库、聊天或项目说明。
 
-## 基础命令
+## 持久安装
 
-在仓库根目录运行。使用独立的本地数据目录，不要指向 Agent 原有的正文目录：
+让 Codex、Hermes 或 DSH 帮用户安装时，先按[安装清单](install-agent.zh-CN.md)完成一条真实通路。下面的 JSON 只记录本机路径，不存账号或 Key；**任选一组**写到仓库外的 `$HOME/.white-rabbit-connections.json`，把所有 `/absolute/path/to/...` 换成已核实的绝对路径。JSON 内不会展开 `$HOME` 或 `~`。
+
+Codex：
+
+```json
+{"schema_version":1,"connections":{"codex":{"cli":"/absolute/path/to/codex"}}}
+```
+
+Hermes：
+
+```json
+{"schema_version":1,"connections":{"hermes":{"node":"/absolute/path/to/node","python":"/absolute/path/to/hermes-agent/venv/bin/python","root":"/absolute/path/to/hermes-agent"}}}
+```
+
+DeepSeek Harness：
+
+```json
+{"schema_version":1,"connections":{"dsh":{"node":"/absolute/path/to/node","cli":"/absolute/path/to/deepseek-harness/lib/bin.js","root":"/absolute/path/to/deepseek-harness"}}}
+```
+
+在仓库根目录预检并安装：
+
+```sh
+python3 -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+python3 -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+```
+
+预检不启动 Agent、不调用模型，只核基础环境及路径；登录、SDK／CLI 兼容和真实对话还需后续核验。安装器保存私有程序副本和数据在 `$HOME/.imcodes/one-ai`，注册当前用户登录启动，不需要另外安装 IM.codes。以后双击该目录的 `打开小白兔.command`，或运行 `python3 -B "$HOME/.imcodes/one-ai/manage.py" open`。
+
+已有安装更新时省略 `--native-config` 可保留原连接。传入 JSON 会完整替换 `connections`；加新 Agent 前先合并原条目。先让一个 Agent 真正聊通，再配记忆、专员或其他 Agent。
+
+## 前台调试命令
+
+在仓库根目录运行。使用单独的调试数据目录和端口，不要与已安装服务或 Agent 正文目录混用：
 
 ```sh
 python3 -B 原型/server.py \
-  --data-dir "$HOME/.white-rabbit" \
-  --port 17860
+  --data-dir "$HOME/.white-rabbit-dev" \
+  --port 17861
 ```
 
-将下面**任选一组参数追加到同一条命令末尾**。所有 `/absolute/path/to/...` 都需要换成本机路径。打开 <http://127.0.0.1:17860/>，选择已配置的原生 Agent／配置，再明确发送一条简短请求。只运行基础命令不会启用这些原生连接。
+将下面**任选一组参数追加到同一条命令末尾**。所有 `/absolute/path/to/...` 都需要换成本机路径。打开 <http://127.0.0.1:17861/>，选择已配置的原生 Agent／配置，再明确发送一条简短请求。只运行基础命令不会启用这些原生连接。
 
-完整参数以 `python3 -B 原型/server.py --help` 为准。
+此方式在当前终端前台运行，便于开发或排查，不负责登录启动。完整参数以 `python3 -B 原型/server.py --help` 为准。
 
 ### Codex
 
@@ -108,6 +141,8 @@ python3 -B 原型/server.py \
 ```
 
 它保留独立固定原生对话，调用与界面共用的应用管理接口。当前角色请求固定模型／强度，能否使用还取决于原生账号。可选的工作说明模式另需项目角色文档，入门路径不需要开启。见[专员能做什么](specialist.zh-CN.md)。
+
+手动**核对并更新**报告另有分析依赖：已有、可用的 Claude 文字适配器，关闭工具和原生会话持久化，只分析程序给定的四项元数据，并记录请求／连接报告的型号来源，不取得 Codex 专员的管理工具。缺少这条可选通路时仍可保存程序事实，说明保持未完成；刷新旧报告不重复分析、不改设置。见[报告流程](specialist.zh-CN.md#手动状态报告)。首次安装并接通一个真实 Agent 不要求先配置这条分析路线。
 
 ## 使用边界
 

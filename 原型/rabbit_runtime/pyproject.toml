@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rabbit-runtime"
-version = "0.1.7"
+version = "0.1.8"
 description = "Explicit native Agent transport and Codex, Pi, DSH, Claude and Hermes execution foundations"
 readme = "README.md"
 requires-python = ">=3.11"

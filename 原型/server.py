@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -67,6 +68,7 @@ from agent_registry import IDS as AGENT_IDS, LABELS as AGENT_LABELS, has as regi
 from history_sources import HistorySources, HistorySourceError
 from rabbit_preparation import prepare_file_context
 from specialist_http import SpecialistHTTP, SpecialistHTTPError, decode_body as decode_specialist_body
+import status_check_service
 from rabbit_preparation import handoff as native_handoff, MaterialReferenceError
 from native_materials import NativeMaterials, NativeMaterialError
 from native_profile_catalog import (NativeProfileUnavailable, resolve_native_profile,
@@ -319,6 +321,7 @@ class Service:
         if external_work_reader_factory is not None and not callable(external_work_reader_factory):
             raise ValueError('外部工作读取器需要可信宿主明确提供。')
         self._external_work = None
+        self._status_checks = None
         if specialist_factory is not None and specialist_connection is not None:
             raise ValueError('专员只能使用一个可信原生构造入口。')
         if specialist_factory is not None and not callable(specialist_factory):
@@ -557,6 +560,7 @@ class Service:
                         excluded_sources=self.native_chat_sources, reader=reader)
                     self.dsh_history = NativeHistoryService(self, manager, adoption)
                     manager.adopted_open_checker = self.dsh_history.verify_open
+            self._status_checks = status_check_service.StatusChecks(self)
             # All local initialization and recovery checks finish before any
             # background work begins. Memory starts last, with no later setup.
             if repair_sources:
@@ -1233,6 +1237,26 @@ class Service:
     @admitted_service
     def external_work_operation(self, body):
         return self._external_work.operation(body)
+
+    @admitted_service
+    def status_check(self, check_id=None):
+        return {'workspace_id': self.workspace_id, 'report': self._status_checks.read(check_id)}
+
+    @admitted_service
+    def start_status_check(self, body):
+        try:
+            fields = self._profile_write_fields(body, ('check_id', 'target'))
+            if set(fields) != {'check_id', 'target'}:
+                raise ValueError('状态检查需要本次编号和明确范围。')
+            if type(fields['check_id']) is not str or str(uuid.UUID(fields['check_id'])) != fields['check_id']:
+                raise ValueError('状态检查编号无效。')
+            fields['target'] = status_check_service.target_fields(fields['target'])
+        except (ValueError, TypeError, AttributeError) as error:
+            # This attempt has not entered create()/submission. A prior record
+            # under an explicitly reused UUID is not cancelled by this refusal.
+            raise SpecialistHTTPError(400, 'status_check_rejected', str(error), accepted=False) from None
+        return {'workspace_id': self.workspace_id,
+                'report': self._status_checks.start(fields['check_id'], fields['target'])}
 
     def _native_profile_capabilities(self):
         native = self.native_chats
@@ -1933,9 +1957,16 @@ class Service:
         saved = self.profiles.saved_state()
         connection = self._memory_connection()
         notice = self.profile_migration_notice
+        status_report = None
+        if self._status_checks is not None:
+            try:
+                status_report = self._status_checks.read()
+            except (ValueError, OSError, sqlite3.Error):
+                pass  # Optional reports cannot disable the configuration list.
         if saved.get('default_unavailable') and not notice:
             notice = '原默认 AI 配置暂不可读取，原选择保留；请从已有配置中选择。'
         return {'workspace_id': self.workspace_id,
+                'status_report': status_report,
                 'ai_profiles': [self._public_ai_profile(profile) for profile in saved['profiles']],
                 'native_profile_capabilities': self._native_profile_capabilities(),
                 'memory_profiles': [{'id': 'none', 'name': '不使用长期记忆', 'available': True,
@@ -3479,6 +3510,8 @@ class Service:
 
     def request_shutdown(self):
         """Signal accepted workers; leave their stores and HTTP leases intact."""
+        if self._status_checks is not None:
+            self._status_checks.stop()
         with self.worker_lock:
             self._memory_stop.set()
             self._memory_wake.set()
@@ -3486,6 +3519,11 @@ class Service:
                 cancel.set()
 
     def shutdown(self):
+        if self._status_checks is not None:
+            try:
+                self._status_checks.stop(wait=True)
+            except RuntimeError as error:
+                raise BusyError(str(error)) from None
         with self.worker_lock:
             self._memory_stop.set()
             self._memory_wake.set()
@@ -3879,6 +3917,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.service.markdown_chat_preview(unquote(markdown_preview[1]))
             if path == '/api/preferences':
                 return self.service.preferences.read()
+            if path == status_check_service.PATH:
+                self._require_bodyless_get('status_check_invalid', '状态检查')
+                fields = parse_qs(route.query, keep_blank_values=True, strict_parsing=True, errors='strict')
+                if fields and (set(fields) != {'check_id'} or len(fields['check_id']) != 1):
+                    raise ValueError('请使用原状态检查编号。')
+                return self.service.status_check(fields.get('check_id', [None])[0])
             if path == app_settings.PATH:
                 if route.query:
                     raise ValueError('设置目录不接受查询参数。')
@@ -4177,6 +4221,10 @@ class Handler(BaseHTTPRequestHandler):
                 if self.command != 'POST' or route.query:
                     native_model_management.invalid()
                 return self.service.prepare_native_model_catalog(body)
+            if path == status_check_service.PATH:
+                if self.command != 'POST' or route.query:
+                    raise ValueError('请手动发起状态检查。')
+                return self.service.start_status_check(body)
             if path == '/api/management/memory-profile-operations':
                 if self.command != 'POST' or route.query:
                     raise ValueError('请使用记忆配置管理的固定操作入口。')

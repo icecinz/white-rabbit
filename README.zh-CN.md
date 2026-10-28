@@ -14,6 +14,8 @@
 
 **早期开发版 · macOS／POSIX · Python 3.11+**。界面目前仍以中文为主，基础导航、管理和设置标签可切换英文；文档提供中英文两版。
 
+**第一次安装：** 把[本项目链接](https://github.com/icecinz/white-rabbit)交给你的 Agent，让它按[安装清单](docs/install-agent.zh-CN.md)完成真实安装和对话验收。仓库根目录的 [AGENTS.md](AGENTS.md)也指向同一清单。下面的虚构演示仅用于看界面。
+
 ![使用虚构对话的小白兔演示界面](assets/demo.png)
 
 *截图使用虚构对话和明确标记的本地规则回复，不能用来判断真实模型效果。*
@@ -68,6 +70,8 @@ flowchart TD
 
 一些低频设置只保留可读目录、当前值和说法示例，不再增加一排开关。需要修改时告诉专员：先读当前版本，再调用有限接口，并说明结果。登录、授权与原生审批仍由使用者处理。
 
+**核对并更新**是一份独立的手动报告：程序先读取限定范围的四项元数据，可用的无工具文字连接只分析一次冻结证据，应用再带来源保存报告。刷新读取已有报告，不重新分析；缺失或变化的依据继续标明。管理专员本体仍是 Codex，当前报告分析走已有的 Claude 配置文字适配器，并单独显示执行来源；检查不自动改设置，也不代表每个模型／工具都已实测。[报告怎样生成](docs/specialist.zh-CN.md#手动状态报告)
+
 [认识小白兔专员](docs/specialist.zh-CN.md)
 
 ## 颜色说明谁能操作
@@ -81,7 +85,31 @@ flowchart TD
 
 颜色描述已有接口，不额外授予权限，也不证明操作已经执行。它作用于完整条目，不只给按钮着色。[设计原则](docs/design.zh-CN.md)
 
-## 先试虚构演示
+## 安装并使用真实 Agent
+
+可以直接对你的 Codex、Hermes 或 DSH 说：
+
+> 帮我安装 https://github.com/icecinz/white-rabbit ，按仓库 AGENTS.md 和安装清单操作。先接通一个我已经在使用的 Agent，保留原模型、提供商和登录配置；用真实对话、刷新后续聊验收，最后告诉我以后怎么打开。
+
+安装 Agent 应先检查 macOS、Python 3.11+、已有安装和所选 Agent 的依赖，写入只含本机路径的连接配置，再运行随包安装器。不要把 `demo.py` 或未启用原生连接的空页面当成安装完成。
+
+```sh
+git clone https://github.com/icecinz/white-rabbit.git
+cd white-rabbit
+python3 -B 原型/install_local.py check --source-dir "$PWD/原型"
+```
+
+首次检查提示需要连接配置是正常的。按[安装清单](docs/install-agent.zh-CN.md)和[连接配置示例](docs/native-agents.zh-CN.md)配置一个 Agent，然后检查、安装、打开。安装器复用现有本机方案：登录启动、私有运行副本、持久数据及打开入口。**专员、额外记忆服务、手机连接均可稍后配置。**
+
+下次可双击 `~/.imcodes/one-ai/打开小白兔.command`，或运行：
+
+```sh
+python3 -B "$HOME/.imcodes/one-ai/manage.py" open
+```
+
+数据保存在 `~/.imcodes/one-ai`；这个旧目录名不表示需要安装 IM.codes。更新时保留已有配置和记录，端口冲突时先核对已有服务。当前持久安装支持 macOS；其他 POSIX 系统只有手动前台路径，Windows 尚未支持。
+
+## 只看界面：虚构演示
 
 ```sh
 git clone https://github.com/icecinz/white-rabbit.git

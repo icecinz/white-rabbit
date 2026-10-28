@@ -14,6 +14,8 @@ The longer-term aim is one place to reach your AI agents and the devices where t
 
 **Early development release · macOS/POSIX · Python 3.11+**. The interface is still mainly Chinese; English covers basic navigation, management, and settings labels. Documentation is available in both languages.
 
+**Installing for the first time?** Give [this repository](https://github.com/icecinz/white-rabbit) to your agent and ask it to follow the [installation checklist](docs/install-agent.md). The root [AGENTS.md](AGENTS.md) points to the same checklist. The fictional demo below is a separate interface preview.
+
 ![White Rabbit with fictional demo conversations](assets/demo.png)
 
 *Invented demo conversations and explicitly marked, rule-based replies. This screenshot is not evidence of real model performance.*
@@ -68,6 +70,8 @@ You can ask, for example:
 
 Some infrequent settings are presented as a readable catalog with current values and examples, rather than another row of switches. Ask the specialist to apply a supported change. It reads the current version, uses the bounded interface, and reports the outcome. Login, authorization, and native approvals still belong to the person using the application.
 
+**Check and update** is a separate manual report: the program gathers four scoped metadata facts, an available tool-free text connection analyzes that frozen evidence once, and the application saves the report with its sources. Refreshing reads that report instead of rerunning the analysis; changed or missing evidence remains marked. The management specialist is still Codex; the current report-analysis route uses the existing Claude-configured text adapter, with its execution source shown separately. This check does not change settings or test every model/tool. [How the report works](docs/specialist.md#manual-status-report)
+
 [Meet the specialist](docs/specialist.md)
 
 ## Color explains who can operate an item
@@ -81,7 +85,31 @@ Some infrequent settings are presented as a readable catalog with current values
 
 Color describes an available interface. It grants no additional permission and does not prove an action has run. The same boundary applies to the whole entry, not just its button. [Design principles](docs/design.md)
 
-## Try the fictional demo
+## Install with a real agent
+
+You can tell Codex, Hermes, or DSH:
+
+> Install https://github.com/icecinz/white-rabbit following AGENTS.md and the installation checklist. Connect one agent I already use, preserve its model, provider, and login settings, verify a real reply and continuation after refresh, and tell me how to open it next time.
+
+The installing agent checks macOS, Python 3.11+, any existing installation, and the selected agent's dependencies; creates a connection file containing local paths only; then runs the bundled installer. Running `demo.py` or opening a page with no native connection does not complete installation.
+
+```sh
+git clone https://github.com/icecinz/white-rabbit.git
+cd white-rabbit
+python3 -B 原型/install_local.py check --source-dir "$PWD/原型"
+```
+
+A fresh check normally asks for a connection configuration. Follow the [checklist](docs/install-agent.md) and [connection examples](docs/native-agents.md) to configure one agent, check, install, and open. The existing local installer provides login startup, a private runtime copy, persistent data, and a reusable entry. **The specialist, extra memory services, and mobile access are optional later steps.**
+
+Next time, double-click `~/.imcodes/one-ai/打开小白兔.command`, or run:
+
+```sh
+python3 -B "$HOME/.imcodes/one-ai/manage.py" open
+```
+
+Data lives in `~/.imcodes/one-ai`; this legacy directory name does not require IM.codes. Preserve existing settings and records during updates, and identify an existing service before resolving port conflicts. Persistent installation currently supports macOS; other POSIX systems have only the manual foreground route. Windows is unsupported.
+
+## Interface preview only: fictional demo
 
 ```sh
 git clone https://github.com/icecinz/white-rabbit.git

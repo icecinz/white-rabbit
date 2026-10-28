@@ -1,5 +1,25 @@
 # Public snapshots · 公开更新
 
+## 0.1.0-alpha.3 — 2026-10-28
+
+- Put real installation before the fictional demo; added a short root `AGENTS.md` and bilingual installation-agent checklists.
+- Included the existing macOS installer, a read-only preflight, finite native connection examples, login startup, and a persistent open entry. Credentials remain in the selected agent.
+- Separate source/path readiness, enabled native routes, authentication, and a verified real conversation. A demo or reachable page cannot satisfy installation acceptance.
+- Preserve existing connection configuration on updates; explicit replacements require the complete intended connection set. The specialist and memory services remain optional.
+- Added manual status reports: program facts → one tool-free analysis → locally saved facts, judgments, and explanation, with source/time metadata and changed-evidence handling. Refresh reuses the report rather than resubmitting analysis or changing settings.
+- Keep the Codex management specialist separate from the existing Claude-configured text analysis route; a missing route or unknown outcome remains incomplete without automatic retry.
+- Clarified configuration creation as starting a new profile from an existing one, removed the default-for-new-chats page action, and included immediate button help. Offline verification does not establish another user's login, model access, or macOS permissions.
+
+### 中文
+
+- 真实安装前置，增加根目录 `AGENTS.md` 与中英文安装 Agent 清单。
+- 随包提供现有 macOS 安装器、只读预检、有限连接配置示例、登录启动与长期打开入口；凭据保留在所选 Agent 中。
+- 区分源码／路径准备、原生入口启用、认证和真实对话通过；演示或网页可打开不能算安装完成。
+- 更新默认保留旧连接，显式替换需包含完整连接集合；专员和记忆服务可稍后配置。
+- 增加手动状态报告：程序事实 → 一次无工具分析 → 在本机保存事实、判断和说明，保留来源／时间及依据变化状态；刷新复用报告，不重新分析或改设置。
+- Codex 管理专员与已有 Claude 配置文字分析通路分别说明；缺少连接或结果未知时保持未完成，不自动重试。
+- 配置创建改为“从此配置开始新建配置”，去掉页面的新对话默认动作，并提供即时按钮说明；离线核对不等于其他用户的登录、模型权限或 macOS 授权已验证。
+
 ## 0.1.0-alpha.2 — 2026-10-27
 
 - Synced the current native-runtime, management, material, memory, and UI source allowlists.

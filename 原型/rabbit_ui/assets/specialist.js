@@ -48,7 +48,7 @@
   Object.assign(en, { "命令": "Command", "命令执行中": "Command running", "命令失败": "Command failed", "已拒绝": "Declined", "命令完成": "Command completed", "命令已结束": "Command ended", "状态未返回": "Status not returned", "退出码": "Exit code", "未返回退出码": "Exit code not returned", "退出码格式不受支持": "Unsupported exit-code format", "工作目录": "Working directory", "命令输出": "Command output", "原始命令结果": "Original command result", "修改中": "Changing files", "修改已完成": "File changes completed", "修改失败": "File changes failed" });
   Object.assign(en, { "消息已由原生 Agent 接收，正在等待本轮结束；原草稿暂时保留。": "The native Agent has received the message. Waiting for this turn to end; the original draft is kept for now.", "正在发送；原始消息与配置已保存。": "Sending; the original message and configuration have been saved.", "上次发送尚未确认；保留原始回执，不会自动再次发送。": "The previous send is unconfirmed; its original receipt is kept, and it will not be sent again automatically." });
   function node(tag, cls, text) { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = String(text); if (["button", "input", "select", "textarea", "summary"].includes(tag)) n.setAttribute("data-control-interface", "human"); return n; }
-  function create({ root, api, getWorkspace = () => "", onError = () => {}, openDocument = null, session = null, onManageProfiles = null, materialImages = null, materialFiles = null, materialInputs = false, composerRoot = null, composerLabel = null, settingsRoot = null, guideRoot = null, guideText: guideSource = "", onOpenManual = null, getGuideContext = () => null, onTurnSettled = null, onGuideCheckContext = null, getCommandContext = null }) {
+  function create({ root, api, getWorkspace = () => "", onError = () => {}, openDocument = null, session = null, onManageProfiles = null, materialImages = null, materialFiles = null, materialInputs = false, composerRoot = null, composerLabel = null, settingsRoot = null, guideRoot = null, guideText: guideSource = "", onOpenManual = null, getGuideContext = () => null, onTurnSettled = null, onGuideCheckContext = null, getCommandContext = null, onStatusCheck = null }) {
     if (!root || typeof api !== "function") throw Error("专员页面缺少入口或接口。");
     if (getCommandContext !== null && typeof getCommandContext !== "function") throw Error("当前工作对象入口无效。");
     // A renderer owns one immutable HTTP/storage scope. Switching chats creates
@@ -83,6 +83,7 @@
     const page = node("div", "rbs-page"), header = node("header", "rbs-header"), connection = node("p", "rbs-status"), actions = node("div", "rbs-actions");
     const configurationStatus = chatId === null ? null : node("section", "rbs-configuration-status");
     const guide = chatId === null ? node("section", "rbs-guide") : null, guideActions = guide && node("div", "rbs-guide-actions"), guideSheet = guide && node("div", "rbs-guide-sheet");
+    const statusReportMount = guide && node("section", "rbs-status-report-mount");
     let guideChoice = guideMount ? "model" : "", guideCache = null;
     const guideTerminalTurns = new Set(), guideOwnClients = new Set(), guideOwnTurns = new Set(); let guideTurnScope = null;
     const notices = node("div", "rbs-notices"), feed = node("div", "rbs-feed"), historyNote = node("p", "rbs-note"), moreBox = node("div", "rbs-actions"), requests = node("section", "rbs-requests"), composer = node("div", "rbs-composer"), input = node("textarea", "rbs-input"), composerActions = node("div", "rbs-actions"), materialBox = node("section", "rbn-materials");
@@ -124,7 +125,7 @@
     if (guide) guideActions.append(node("span", "rbs-guide-label"), agentGuide, modelGuide, closeGuide);
     const guideCheckButton = guide && button("核对并更新", checkGuide, "rbs-button rbs-guide-check");
     const manualButton = guide && typeof onOpenManual === "function" ? button("打开手册", () => onOpenManual(guideChoice === "agent" ? "设置 Agent" : "切换大模型"), "rbs-guide-choice rbs-guide-manual") : null;
-    if (guide) { guide.replaceChildren(guideCheckButton, guideActions, guideSheet); guideCheckButton.setAttribute("data-control-interface", "ai"); }
+    if (guide) { guide.replaceChildren(guideCheckButton, statusReportMount, guideActions, guideSheet); guideCheckButton.setAttribute("data-control-interface", "ai"); statusReportMount.setAttribute("data-control-interface", "ai"); }
     const openButton = button("打开专员", () => mutate("open", {})), sendButton = button("发送", submitComposer, "rbs-button rbs-primary rbs-submit"), checkButton = button("核对上次发送", reconcile), moreButton = button("继续读取原生记录", () => refresh({ cursor: nextCursor }));
     (settingsActions || moreBox).append(openButton);
     const disconnectLabel = chatId === null ? "断开连接，保留原对话" : "断开连接";
@@ -861,6 +862,7 @@
     }
     function submitComposer() { return draft.trim() ? send() : activeTurn() ? interrupt() : undefined; }
     function canCheckGuide() {
+      if (typeof onStatusCheck === "function") return chatId === null && visible && !settingsVisible && !document.hidden && enabled && !destroyed && !!workspace && !guideCheckReading;
       return chatId === null && visible && !settingsVisible && !document.hidden && enabled && !destroyed && snapshotReadable
         && !guideCheckReading && !reading && !openingForSend && !mutating && !preparing && !answering && !pending && !draftStorageInvalid
         && !draft.trim() && !draftMaterials.length && !nativePending().length && !activeTurn() && !hasUnresolvedRequests()
@@ -868,6 +870,15 @@
     }
     async function checkGuide() {
       syncWorkspace(); if (!canCheckGuide()) return;
+      if (typeof onStatusCheck === "function") {
+        const scope = workspace, stamp = generation;
+        const isCurrent = () => !destroyed && enabled && workspace === scope && scope === String(getWorkspace() || "") && generation === stamp;
+        guideCheckReading = true; render();
+        try { await onStatusCheck({ workspace_id: scope, isCurrent }); }
+        catch (error) { if (isCurrent()) onError(error); }
+        finally { guideCheckReading = false; if (isCurrent()) render(); }
+        return;
+      }
       const stamp = generation, view = viewVersion, scope = workspace, edits = draftEdits;
       const isCurrent = () => !destroyed && enabled && visible && !settingsVisible && !document.hidden && generation === stamp && viewVersion === view && workspace === scope && scope === String(getWorkspace() || "") && draftEdits === edits && !draft.trim() && !draftMaterials.length;
       guideCheckReading = true; render();
@@ -1256,6 +1267,12 @@
       const english = language === "en";
       guideActions.children[0].textContent = english ? "Guides" : "指南";
       guideCheckButton.textContent = guideCheckReading ? english ? "Checking…" : "正在核对…" : english ? "Check and update" : "核对并更新";
+      const checkDescription = english
+        ? "Check the current AI configuration, existing model catalogue, specialist tool connections and selected memory, then update the report. Anything unverified will be marked."
+        : "检查当前 AI 配置、已有模型目录、专员工具连接和所选记忆，并更新检查报告。未能核实的内容会标明。";
+      guideCheckButton.setAttribute("data-tooltip", checkDescription);
+      guideCheckButton.setAttribute("aria-description", checkDescription);
+      guideCheckButton.setAttribute("aria-label", guideCheckButton.textContent);
       guideCheckButton.disabled = !canCheckGuide();
       agentGuide.textContent = english ? "Set up Agent" : "设置 Agent";
       modelGuide.textContent = english ? "Choose model" : "切换大模型";
@@ -1301,8 +1318,10 @@
           const group = node("details", "rbs-guide-candidates"); group.open = id === backend;
           group.append(node("summary", "", labels[id]));
           const source = catalog?.native_profile_capabilities?.[id];
-          if (!["codex", "pi", "hermes", "claude"].includes(id) || source?.catalogue_available !== true || !Array.isArray(source.models) || !source.models.length) {
-            group.append(node("p", "", ["codex", "pi", "hermes", "claude"].includes(id) ? english ? "Models and reasoning options are unverified." : "模型与强度尚未核对。" : english ? "Uses native settings." : "沿用原生设置。"));
+          if (!["codex", "pi", "hermes", "claude"].includes(id) || source?.catalogue_available !== true || !Array.isArray(source.models)) {
+            group.append(node("p", "", ["codex", "pi", "hermes", "claude"].includes(id) ? english ? "Models and reasoning options are unverified." : "模型与强度尚未核对。" : english ? "Model catalogue is not connected here." : "本入口未接入模型目录。"));
+          } else if (!source.models.length) {
+            group.append(node("p", "", english ? "Catalogue read; no candidates were reported." : "目录已读取，暂无可显示候选。"));
           } else {
             const rows = source.models.filter(row => guideText(row.name) && guideText(row.model));
             const table = node("table", "rbs-guide-table"), head = node("tr"), body = node("tbody");
@@ -1315,6 +1334,14 @@
             group.append(table);
             if (!bundledGuide && id === "pi") group.append(node("p", "rbs-guide-source", english ? "Pi: none maps to native off. Provider behavior may differ." : "Pi：none 对应原生 off；提供商行为可能不同。"));
             if (!bundledGuide && id === "hermes") group.append(node("p", "rbs-guide-source", english ? "Hermes lists request levels; the provider may map them differently." : "Hermes 这里列的是请求强度，提供商可能另作映射。"));
+          }
+          if (source?.catalogue_available === true) {
+            const evidence = node("details", "rbs-guide-evidence");
+            evidence.append(node("summary", "", english ? "Catalogue source" : "目录来源"),
+              node("p", "rbs-guide-source", (english ? "Source: " : "来源：") + (guideText(source.source) || (english ? "Not reported" : "未报告"))),
+              node("p", "rbs-guide-source", (english ? "Last observed: " : "上次目录观察：") + (guideText(source.observed_at) || (english ? "Not reported" : "未报告"))));
+            if (guideText(source.source_chat_id)) evidence.append(node("p", "rbs-guide-source", (english ? "Source conversation: " : "来源对话：") + guideText(source.source_chat_id)));
+            group.append(evidence);
           }
           guideSheet.append(group);
         }
@@ -1495,7 +1522,7 @@
     function destroy() { destroyed = true; hide(); toolStatus?.destroy(); generation++; fullReadPending = false; if (composerMount) composer.remove(); if (guideMount) guide.remove(); settingsPanel?.remove(); if (document.removeEventListener) document.removeEventListener("visibilitychange", visibility); }
     function getConfigurationContext() { return { agent_instance_id: "local/codex", profile_id: selectedProfile?.id || null, profile_name: selectedProfile?.name || null, profile_revision: selectedProfile?.revision || null, model_id: selectedProfile?.model_id || null, reasoning_effort: selectedProfile?.reasoning_effort ?? null }; }
     function updateGuideContext() { guideCache = null; renderGuide(); }
-    render(); return { show, showSettings, hide, refresh, setLanguage, setEnabled, setMaterialInputs, destroy, selectSavedProfile, putDraft, getTextSnapshot, getConfigurationContext, updateGuideContext, openGuide };
+    render(); return { show, showSettings, hide, refresh, setLanguage, setEnabled, setMaterialInputs, destroy, selectSavedProfile, putDraft, getTextSnapshot, getConfigurationContext, updateGuideContext, openGuide, getStatusReportMount: () => statusReportMount };
   }
   window.RabbitSpecialist = Object.freeze({ create });
 })();

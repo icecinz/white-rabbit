@@ -100,6 +100,10 @@ Pi保留原生配置、工具、扩展询问和原始事件。连接使用明确
 
 账本`validate_uuid`保留原错误类型与精确UUID规则；`maintenance_state()`只返回原三项有界维护计数。原历史仍由同一个SDK定位，保留原文件、目录身份和完整内容核验。上层对话、HTTP、材料／记忆事务和原生发送协调由宿主提供。
 
+Claude 账本 V2 可在 `finish(..., result=record)` 的原终态事务内冻结成功 SDK Result 的有限投影，正文最多 128 KiB。它与原请求、session、epoch、用户及 Result UUID 一起保存，不保存 SDK 的费用、用量等额外字段。普通回执仍只有元数据；`completed_result(chat_id, client_id)` 单独读取保存结果，不调用 Agent，也不把历史 epoch 说成当前执行者状态。
+
+只有精确匹配的 V1 库可在写入者首次打开时原子升级；旧行结果保持空，不从历史补填。只读 V1 不升级。损坏或身份不符会拒绝读取，不用最新回答替代。V2 库不能直接交回旧 V1 程序，部署和回滚须保留对应数据库快照。
+
 ## Hermes底座
 
 `rabbit_runtime.hermes`提供`HermesNativeConnection`、`HermesRpc`、`HermesNativeStore`、模型／消息codec与原生修订核验。宿主明确提供Node、原有Hermes Python、源码根、工作目录和可选home、commit及扩展开关。原生配置、profile初始化、工具、审批和后台服务仍由Hermes决定；启动原生连接不等于只读操作。

@@ -1063,6 +1063,7 @@
   let specialistGuideTarget = null;
   let specialistLocationRevision = 0, specialistCommandTarget = null;
   let specialistGuideGeneration = 0, specialistGuideRead = 0, specialistGuideSelection = null, specialistGuideVerification = "";
+  let statusChecks = null;
   const specialist = window.RabbitSpecialist ? window.RabbitSpecialist.create({
     root: $("specialist-panel"),
     composerRoot: $("specialist-composer-mount"), composerLabel: $("specialist-composer-label"), settingsRoot: settingsMounts.specialist,
@@ -1071,12 +1072,29 @@
     getGuideContext: () => ({ catalog: profiles?.catalog(), target: specialistGuideTarget?.workspace_id === state.status?.workspace_id ? specialistGuideTarget : null, verification: specialistGuideVerification }),
     getCommandContext: captureSpecialistCommandContext,
     onTurnSettled: refreshSpecialistGuide, onGuideCheckContext: specialistCheckContext,
+    onStatusCheck: window.RabbitStatusChecks ? () => statusChecks?.start() : null,
     // Native submissions and answers are never replayed by the common 403
     // retry path. Only an explicit check can reconcile an unknown receipt.
     api: (path, options = {}) => api(path, options, false),
     getWorkspace: () => state.status?.workspace_id || "", openDocument,
     onError: error => toast(userError(error, "专员请求尚未确认，草稿与原请求保留。")),
   }) : null;
+  const statusReportMount = specialist?.getStatusReportMount?.();
+  if (statusReportMount && window.RabbitStatusChecks) statusChecks = window.RabbitStatusChecks.create({
+    root: statusReportMount, api: (path, options = {}) => api(path, options, false),
+    getWorkspace: () => state.status?.workspace_id || "",
+    getTarget: () => {
+      const source = specialistGuideTarget?.workspace_id === state.status?.workspace_id ? specialistGuideTarget : null;
+      if (!source) return {};
+      return Object.fromEntries(["agent", "chat_id", "profile_id", "profile_revision", "memory_profile_id", "memory_profile_revision"]
+        .filter(key => source[key] != null).map(key => [key, source[key]]));
+    },
+    onPublished: async report => {
+      if (report.workspace_id !== state.status?.workspace_id) return;
+      await profiles?.loadFresh(); specialist?.updateGuideContext?.();
+    },
+    onError: error => toast(userError(error, "状态报告尚未完整读回。")),
+  });
   // The current work identity is separate from the guide's descriptive snapshot.
   // It never reads conversation contents, resolves a name or opens an Agent.
   function currentSpecialistWorkContext() {
@@ -1730,6 +1748,7 @@
     state.page = page;
     $("specialist-layout").hidden = page !== "specialist";
     if (page !== "specialist") specialist?.hide();
+    if (page !== "specialist") statusChecks?.hide();
     if (page !== "native-chats") nativeChats?.hide();
     document.querySelectorAll(".page-nav").forEach((node) => {
       const active = node.dataset.page === (page === "specialist" || page === "native-chats" ? "conversations" : page);
@@ -1744,7 +1763,15 @@
     } else if (page === "native-chats") {
       workspaceHeader(); workspace?.hide(); nativeChats.show();
     } else if (page === "specialist") {
-      workspaceHeader(); workspace?.hide(); specialist.show({ restoreHistory: true });
+      workspaceHeader(); workspace?.hide(); statusChecks?.hide();
+      const location = specialistLocationRevision, scope = state.status?.workspace_id;
+      // Initial native-history restoration uses the same holder as tool facts.
+      // Read the report after it releases that holder, and only for this visit.
+      Promise.resolve(specialist.show({ restoreHistory: true })).then(() => {
+        if (state.page === "specialist" && location === specialistLocationRevision && scope === state.status?.workspace_id && specialistEnabled()) return statusChecks?.show();
+      }).catch(error => {
+        if (state.page === "specialist" && location === specialistLocationRevision && scope === state.status?.workspace_id) toast(userError(error, "专员记录尚未读完，状态报告暂未读取。"));
+      });
     } else {
       workspaceHeader(); if (workspace) workspace.show(page, tab || state.workspaceSections[page]);
       if (page === "settings" && state.workspaceSections.settings === "specialist") specialist?.showSettings();

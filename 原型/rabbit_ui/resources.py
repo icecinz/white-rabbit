@@ -13,7 +13,7 @@ import stat
 INLINE_STYLES = ('style.css', 'workspace.css', 'specialist.css', 'work_status.css')
 INLINE_SCRIPTS = (
     'agents.js', 'markdown-it.min.js', 'rich_text.js', 'materials.js',
-    'profiles.js', 'native_memory.js', 'work_status.js', 'workspace.js', 'browser_state.js',
+    'status_checks.js', 'profiles.js', 'native_memory.js', 'work_status.js', 'workspace.js', 'browser_state.js',
     'text_file_download.js', 'file_tasks.js', 'file_materials.js',
     'project_publish.js', 'markdown_chats.js', 'conversation_groups.js',
     'history_quotes.js', 'native_materials.js', 'handoff_view.js',

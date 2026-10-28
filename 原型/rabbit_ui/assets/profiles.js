@@ -167,11 +167,12 @@
     if (native_memory_sources.some(source => source.linked_profile_id && !memories.some(row => row.id === source.linked_profile_id && row.source_kind === nativeMemoryKind && row.native_source_ref === source.source_ref))) throw new Error("原有记忆的接入配置没有读完整，请刷新配置。");
     const native_profile_capabilities = nativeCapabilities(value.native_profile_capabilities);
     if (native_profile_capabilities !== undefined && !value.workspace_id) throw new Error("原生配置能力快照缺少所属工作区。");
-    return { ai_profiles: rows, memory_profiles: memories, memory_connections, native_memory_sources, default_ai_profile_id: value.default_ai_profile_id, default_ai_profile_revision: defaultRevision, default_memory_profile_id: "none", revision: value.revision, ...(value.workspace_id === undefined ? {} : { workspace_id: value.workspace_id }), ...(native_profile_capabilities === undefined ? {} : { native_profile_capabilities }) };
+    const status_report = value.status_report == null ? null : window.RabbitStatusChecks.normalize(value.status_report, value.workspace_id);
+    return { ai_profiles: rows, memory_profiles: memories, memory_connections, native_memory_sources, status_report, default_ai_profile_id: value.default_ai_profile_id, default_ai_profile_revision: defaultRevision, default_memory_profile_id: "none", revision: value.revision, ...(value.workspace_id === undefined ? {} : { workspace_id: value.workspace_id }), ...(native_profile_capabilities === undefined ? {} : { native_profile_capabilities }) };
   }
   function create({ api, root, getSelection, onChoose, onManage, onCatalog = () => {}, getInventory = () => null, getCapabilities = () => ({}), getWorkspace = () => "", getNativeAgents = () => [], onChooseNative = null, onMemoryManual = null }) {
     let data = null, loading = null, requestVersion = 0, picker = null, editor = null, manager = null, managerKind = "ai", returnFocus = null;
-    let workspace = "", pendingCreation = null, creationBusy = false, creationInvalid = false, creationNotice = "", defaultBusy = false, defaultBlocked = false, defaultNotice = "";
+    let workspace = "", pendingCreation = null, creationBusy = false, creationInvalid = false, creationNotice = "";
     const nativeAttach = { saving: false, unknownSources: new Set(), confirmedProfileId: null, confirmedSourceRef: undefined, errorSourceRef: undefined, error: "", notice: "" };
     const nativeRefresh = { version: 0, open: false, listing: false, reading: false, loaded: false, rows: [], selected: "", notice: "", error: "" };
     const node = (tag, name, text) => { const result = document.createElement(tag); if (name) result.className = name; if (text !== undefined) result.textContent = text; return result; };
@@ -206,7 +207,7 @@
       const id = String(getWorkspace() || ""); if (id === workspace) return;
       workspace = id; requestVersion++; loading = null; data = null;
       resetNativeRefresh();
-      pendingCreation = null; creationBusy = creationInvalid = false; creationNotice = ""; defaultBusy = defaultBlocked = false; defaultNotice = "";
+      pendingCreation = null; creationBusy = creationInvalid = false; creationNotice = "";
       editor = null;
       if (id) try { const saved = window.sessionStorage.getItem(creationKey()); if (saved !== null) pendingCreation = creationRecord(JSON.parse(saved)); }
       catch (_) { creationInvalid = true; creationNotice = "浏览器的待核创建记录无法读取；尚未提交新的创建或复制，请先保留并核对原记录。"; }
@@ -294,7 +295,7 @@
       loading = (async () => {
         if (pendingCreation && !creationBusy) try { await verifyCreationHash(pendingCreation); if (version === requestVersion) creationInvalid = false; }
         catch (_) { if (version === requestVersion) { creationInvalid = true; creationNotice = "待核创建指纹无法验证；原请求保留，尚未提交核对或重试。"; } }
-        try { const received = catalog(await api("/api/profiles")); if (received.workspace_id !== undefined && workspace && received.workspace_id !== workspace) throw Error("配置列表不属于当前工作区，原请求保留。"); if (version === requestVersion && workspace === String(getWorkspace() || "")) { data = received; if (!defaultBusy) defaultBlocked = false; reconcileNativeAttach(); onCatalog(received); if (picker) renderPicker(); renderManager(); } return received; }
+        try { const received = catalog(await api("/api/profiles")); if (received.workspace_id !== undefined && workspace && received.workspace_id !== workspace) throw Error("配置列表不属于当前工作区，原请求保留。"); if (version === requestVersion && workspace === String(getWorkspace() || "")) { data = received; reconcileNativeAttach(); onCatalog(received); if (picker) renderPicker(); renderManager(); } return received; }
         finally { if (version === requestVersion) loading = null; }
       })();
       return loading;
@@ -843,33 +844,40 @@
       }
       const nativeBackends = ["codex", "pi", "hermes", "claude"].filter(backend => nativeSource(backend)?.enabled === true);
       if (pendingCreation || creationInvalid || creationNotice) manager.append(creationPanel());
-      if (defaultNotice) manager.append(aiControl(node("p", "profile-note", defaultNotice)));
       const cards = node("div", "profile-card-grid");
       for (const row of data?.ai_profiles || []) {
         const card = aiControl(node("article", "rbw-card")), selected = current().ai_profile_id === row.id;
-        const native = nativeSource(agents.backendOfInstance(row.agent_instance_id))?.enabled === true;
-        card.dataset.profileId = row.id; card.append(node("h3", "", row.name), node("p", "profile-note", `${selected ? "本对话已选 · " : ""}第 ${row.revision} 版 · 普通对话${row.available ? "可用" : "未接通"}${native ? row.native_available === true ? " · 原生目录支持" : " · 原生目录待核对" : ""}`), node("p", "rbw-card-meta", `${agentName(row.agent_instance_id)} · ${savedModelLabel(row)} · 强度 ${effortLabel(row)}`));
+        const source = nativeSource(agents.backendOfInstance(row.agent_instance_id)), native = source?.enabled === true;
+        const state = native ? !source.catalogue_available ? "原生目录待核对"
+          : row.native_available !== true ? "原生参数待核对"
+          : !row.model_id && row.reasoning_effort === null ? "沿用原生参数" : "原生参数检查通过"
+          : row.available ? "文字通路参数检查通过" : "文字通路待核对";
+        card.dataset.profileId = row.id;
+        card.append(node("h3", "", row.name), node("p", "rbw-card-meta", `${agentName(row.agent_instance_id)} · ${savedModelLabel(row)} · 强度 ${effortLabel(row)}`), node("p", "profile-note", `${selected ? "本对话已选 · " : ""}已保存 · ${state}`));
         const reasons = [];
         if (!row.available && row.reason) reasons.push("普通对话：" + row.reason);
         if (native && row.native_available !== true && row.native_reason) reasons.push(`原生 ${agentName(row.agent_instance_id)}：` + row.native_reason);
         const actions = humanControl(node("div", "profile-actions")); actions.append(action("编辑", () => openEditor(row))); card.append(actions);
         const details = node("details", "profile-identifiers"); details.append(humanControl(node("summary", "", "更多")));
-        if (reasons.length) details.append(node("p", "profile-note", "状态说明"), ...reasons.map(reason => node("p", "profile-note", reason)));
-        const secondary = humanControl(node("div", "profile-actions")); const copyButton = action("复制配置", () => openEditor(row, true)); copyButton.disabled = !!pendingCreation || creationInvalid || creationBusy; secondary.append(copyButton);
-        const defaultRevision = data.default_ai_profile_revision, scope = workspace;
-        const makeDefault = action(data.default_ai_profile_id === row.id ? "新对话默认" : "设为新对话默认", async () => {
-          if (!sameWorkspace(scope) || defaultBusy || defaultBlocked) return;
-          defaultBusy = true; defaultNotice = ""; renderManager();
-          try {
-            const received = catalog(await api("/api/profiles/default", { method: "POST", body: JSON.stringify({ ai_profile_id: row.id, default_revision: defaultRevision }) }, false));
-            if (!sameWorkspace(scope)) return;
-            if (received.workspace_id !== undefined && received.workspace_id !== scope) throw Error("默认配置回读工作区不匹配，请刷新核对。");
-            if (data && data.default_ai_profile_revision > received.default_ai_profile_revision) defaultNotice = "这次默认选择已确认保存；页面已读取更新版本，继续保留当前显示。";
-            else data = received; onCatalog(data);
-          } catch (error) {
-            if (sameWorkspace(scope)) { defaultBlocked = true; defaultNotice = error.status === 409 ? `“${row.name}”尚未设为默认：另一入口已更新默认选择。请先刷新配置，再明确选择；没有覆盖新版本。` : readable(error, "默认配置暂时没有确认，请先刷新列表核对；没有自动重复保存。"); }
-          } finally { if (sameWorkspace(scope)) { defaultBusy = false; renderManager(); } }
-        }); aiControl(makeDefault); makeDefault.disabled = defaultBusy || defaultBlocked || data.default_ai_profile_id === row.id || !row.available; secondary.append(makeDefault); details.append(secondary); card.append(details); cards.append(card);
+        details.append(node("p", "profile-note", `程序检查 · 配置第 ${row.revision} 版`), node("p", "profile-note", `普通文字通路：${row.available ? "参数检查通过" : "待核对"}`));
+        if (native) {
+          details.append(node("p", "profile-note", `原生目录：${source.catalogue_available ? "已有目录快照" : "尚未取得目录快照"}`), node("p", "profile-note", `目录来源：${source.source}`), node("p", "profile-note", `上次目录观察：${source.observed_at || "未报告"}`));
+          if (source.source_chat_id) details.append(node("p", "profile-note", `来源对话：${source.source_chat_id}`));
+        }
+        details.append(node("p", "profile-note", "检查范围：已保存参数与目录快照；本页未核对实际调用。"));
+        if (reasons.length) details.append(node("p", "profile-note", "检查发现"), ...reasons.map(reason => node("p", "profile-note", reason)));
+        const report = data.status_report, configFact = report?.facts.find(fact => fact.id === "configuration");
+        if (report?.analysis && configFact?.data.profiles?.some(profile => profile.id === row.id)) {
+          const comment = report.analysis.items.find(item => item.evidence_id === "configuration");
+          const sameVersion = configFact.data.profiles.some(profile => profile.id === row.id && profile.revision === row.revision);
+          if (comment) {
+            details.append(node("p", "profile-note", comment.applicable && sameVersion ? "专员说明 · 本次配置检查" : "上次专员说明 · 依据已变化，待更新"));
+            details.append(node("p", "profile-note", comment.note), node("p", "profile-note", `检查时间：${report.published_at || report.created_at}`),
+              node("p", "profile-note", `分析来源：Claude · ${report.analysis.source.model} · 无工具文字分析`));
+          }
+        }
+        const secondary = humanControl(node("div", "profile-actions")); const copyButton = action("从此配置开始新建配置", () => openEditor(row, true)); copyButton.disabled = !!pendingCreation || creationInvalid || creationBusy; secondary.append(copyButton);
+        details.append(secondary); card.append(details); cards.append(card);
       }
       if (!data) cards.append(aiControl(node("p", "profile-note", "正在读取已保存配置…")));
       else if (!data.ai_profiles.length) cards.append(aiControl(node("p", "profile-note", "还没有 AI 配置。接入可用 Agent 后，可以新建配置；已有聊天和草稿仍保留。")));
