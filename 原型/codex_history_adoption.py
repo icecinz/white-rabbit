@@ -79,6 +79,10 @@ def is_adopted_binding(workspace_id, identity, thread_id):
 
 
 class CodexHistoryAdoption:
+    # Lets the shared service identify these finite errors without importing
+    # this Agent's runtime or interpreting errors from other Agents.
+    _preview_error_type = CodexHistoryAdoptionError
+
     def __init__(self, history, codex_root, catalogue, store, read_native, *,
                  workspace_id, excluded_sources=lambda: (), reserved_sources=lambda: ()):
         if (getattr(catalogue, 'agent', None) != 'codex' or not callable(read_native)
@@ -106,6 +110,13 @@ class CodexHistoryAdoption:
         value = dict(row)
         if (value['kind'] != 'root' or value['archived'] != 0
                 or value['parent_session_id'] is not None or value['forked_from_id'] is not None):
+            # This is an index observation, not a claim about the current
+            # native session. Unknown/malformed index values stay generic.
+            if (value['kind'] in ('root', 'child') and type(value['archived']) is int
+                    and value['archived'] in (0, 1)
+                    and all(v is None or type(v) is str and bool(v)
+                            for v in (value['parent_session_id'], value['forked_from_id']))):
+                _error('index_branch')
             _error('unsupported_source_branch')
         path, cwd = _path(value['source_path']), _path(value['cwd'])
         if path.suffix != '.jsonl' or self.root / 'sessions' not in path.parents:
@@ -130,8 +141,10 @@ class CodexHistoryAdoption:
                     or (payload.get('id') or payload.get('session_id')) != session_id
                     or payload.get('cwd') != str(cwd)
                     or payload.get('forked_from_id') is not None
-                    or _has_parent(payload)
-                    or any(payload.get(key) for key in ('dynamicTools', 'dynamic_tools'))):
+                    or _has_parent(payload)):
+                _error('source_header_mismatch_or_unsupported_tools')
+            tool_values = [payload.get(key) for key in ('dynamicTools', 'dynamic_tools')]
+            if any(value and type(value) is not list for value in tool_values):
                 _error('source_header_mismatch_or_unsupported_tools')
             after = os.fstat(descriptor)
             named = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
@@ -153,6 +166,10 @@ class CodexHistoryAdoption:
                 _error('invalid_source_title')
             title.encode('utf-8')
             display_title = _title((title.strip() or 'Codex ' + session_id[:8])[:80])
+            # Only report known dynamic tools after identity and both file and
+            # directory stability checks, without retaining tool details.
+            if any(type(value) is list and value for value in tool_values):
+                _error('header_dynamic_tools')
             return dict(session_id=session_id, title=display_title, source_title_sha256=_hash(title), cwd=str(cwd),
                 cwd_identity=list(cwd_identity), source_path=str(path),
                 source_identity=list(_identity(before)), header_sha256=hashlib.sha256(raw).hexdigest())

@@ -247,8 +247,7 @@ textarea.native-handoff-control { resize: vertical; min-height: 80px; }
 
 /* Shared nameplate; configuration choices remain in their original row. */
 .profile-status{min-width:0;max-width:100%;margin:0 0 12px;color:var(--ai-control);font-size:12px;line-height:1.65}
-.profile-nameplate{display:block;min-width:0;max-width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-underline-offset:3px}
-.profile-nameplate:hover{text-decoration:underline}.profile-nameplate:focus-visible{outline:2px solid var(--ai-control);outline-offset:3px}
+.profile-nameplate{display:block;min-width:0;max-width:100%;color:inherit;font:inherit;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text}
 .operation-records{max-width:790px;margin:14px auto;color:var(--ai-control);font-size:12px;line-height:1.7;min-width:0}
 .operation-records>summary{cursor:pointer;width:fit-content}.operation-records>summary:hover{text-decoration:underline}.operation-records[open]>.message{margin-top:14px}
 .send-button[data-composer-action="stop"] svg{fill:currentColor;stroke:none}

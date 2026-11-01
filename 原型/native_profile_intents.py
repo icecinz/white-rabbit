@@ -22,9 +22,10 @@ import uuid
 
 from agent_registry import valid_model_id
 from rabbit_runtime.native_session_store import request_sha256, NativeSessionStoreError
-from profiles import (AIProfiles, make_profile_snapshot, validate_profile_id,
+from profiles import (make_profile_snapshot, validate_profile_id,
                       validate_profile_revision, REASONING_EFFORTS)
-from native_chat_selection import assert_selection_in
+from native_chat_selection import (assert_selection_in, resolve_profile_in,
+                                   NativeChatLocalScopeError, NativeChatSelectionCorrupt)
 from native_memory_selection import assert_memory_selection_in
 from native_memory_intents import validate_selection
 from native_materials import validate_refs
@@ -207,11 +208,16 @@ class NativeProfileIntents:
             _fail('intent_conflict')
         return record
 
-    def _saved_in(self, db, profile_id):
+    def _saved_in(self, db, profile_id, chat_id):
         try:
-            return _profile(AIProfiles.get_in(db, profile_id), self.request_kind)
+            return _profile(resolve_profile_in(db, self.workspace_id,
+                self.request_kind, chat_id, profile_id), self.request_kind)
         except KeyError:
             _fail('profile_not_found')
+        except NativeChatLocalScopeError:
+            _fail('profile_scope')
+        except NativeChatSelectionCorrupt:
+            _fail('invalid_record')
 
     @staticmethod
     def _request_identity(body, request_kind='codex'):
@@ -271,7 +277,7 @@ class NativeProfileIntents:
                 return previous
             assert_selection_in(db, self.workspace_id, self.request_kind, chat_id, profile_id, revision)
             assert_memory_selection_in(db, self.workspace_id, self.request_kind, chat_id, memory_id, memory_revision)
-            profile = self._saved_in(db, profile_id) if explicit else None
+            profile = self._saved_in(db, profile_id, chat_id) if explicit else None
             if profile is not None and profile['revision'] != revision:
                 _fail('profile_conflict')
         # Discovery/native read-only work must not hold a database transaction.
@@ -292,7 +298,7 @@ class NativeProfileIntents:
                 return previous
             assert_selection_in(db, self.workspace_id, self.request_kind, chat_id, profile_id, revision)
             assert_memory_selection_in(db, self.workspace_id, self.request_kind, chat_id, memory_id, memory_revision)
-            if explicit and self._saved_in(db, profile_id) != profile:
+            if explicit and self._saved_in(db, profile_id, chat_id) != profile:
                 _fail('profile_conflict')
             db.execute('INSERT INTO native_profile_intents VALUES(?,?,?,?,?,?,?)',
                        (self.workspace_id, client_id, chat_id, digest,

@@ -24,10 +24,12 @@ The longer-term aim is one place to reach your AI agents and the devices where t
 
 - **Continue native-agent work:** use experimental connections for Codex, Hermes, Pi, Claude Code, and DeepSeek Harness, preserving their native sessions, tools, and approval rules.
 - **Find and organize project material:** search indexed histories, group related conversations, and keep Markdown references or snapshots alongside files and results.
-- **Carry forward selected context:** preview messages and versioned files before handing them to another agent. Compatible images depend on the route and model.
+- **Continue between Codex and Hermes:** preview selected text, complete registered files, and original images as fixed snapshots. Prepare a draft first; only Send creates the new native conversation, with a route back to its source.
 - **Choose AI and memory separately:** saved AI profiles describe agent/model settings; memory profiles independently select additional long-term material.
 - **Ask the Rabbit specialist:** use a dedicated management conversation to change supported settings, organize work, or hand a task to an existing native conversation.
 - **Reuse the parts:** take an independently packaged core into another Python application without adopting the entire White Rabbit host.
+
+Codex, Hermes, and Pi now keep the same composer path from the home draft into a native conversation: saved AI/memory choices, files, sending, and continuation after refresh. Codex also has per-draft/per-conversation model and reasoning adjustments; a specialist suggestion counts as applied only after the originating page saves it and returns a receipt. Claude Code and DSH retain their existing entries; their unified-composer migration is not included in this release. [Daily workflow](docs/native-agents.md#daily-workflow)
 
 ## The idea and the current scope
 
@@ -35,7 +37,7 @@ The longer-term aim is one place to reach your AI agents and the devices where t
 | --- | --- | --- |
 | One entry for AI work | Five native-agent routes; status and navigation for White Rabbit's own connected work | Direct control of ongoing Codex desktop or WorkBuddy tasks is not connected |
 | External work discovery | Optional, manual HAPI Hub discovery and links to the original session page | HAPI sending, approvals, and stopping remain in HAPI; discovery is not control |
-| Context and memory | Explicit materials; Hindsight and separate Hermes document-memory routes | Mem0 is an optional read-only bridge needing configuration; automatic Mem0 saving is not connected |
+| Context and memory | Codex ↔ Hermes continuation with selected materials; Hindsight and separate Hermes document-memory routes | Continuation does not migrate internal agent state; Mem0 still needs configuration and has no automatic saving |
 | Human and AI operations | Shared application interfaces, versioned settings, and the dedicated specialist | GUI-only application operation and AI/mixed interface modes are not connected |
 | Devices | Local Mac; phone access through a separately configured IM.codes route | Cross-computer routing, device management, and remote wake-up remain future work |
 
@@ -91,20 +93,22 @@ You can tell Codex, Hermes, or DSH:
 
 > Install https://github.com/icecinz/white-rabbit following AGENTS.md and the installation checklist. Connect one agent I already use, preserve its model, provider, and login settings, verify a real reply and continuation after refresh, and tell me how to open it next time.
 
-The installing agent checks macOS, Python 3.11+, any existing installation, and the selected agent's dependencies; creates a connection file containing local paths only; then runs the bundled installer. Running `demo.py` or opening a page with no native connection does not complete installation.
+The installing agent checks macOS, Python 3.11+, any existing installation, and the selected agent's dependencies; creates a connection file containing local paths only; then runs the bundled installer. Running `demo.py` or opening a page with no native connection does not complete installation. Follow the [checklist](docs/install-agent.md) to find a stable absolute Python 3.11+ path; replace the example below.
 
 ```sh
 git clone https://github.com/icecinz/white-rabbit.git
 cd white-rabbit
-python3 -B 原型/install_local.py check --source-dir "$PWD/原型"
+RABBIT_PYTHON="/absolute/path/to/python3.11"
+"$RABBIT_PYTHON" --version
+"$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型"
 ```
 
 A fresh check normally asks for a connection configuration. Follow the [checklist](docs/install-agent.md) and [connection examples](docs/native-agents.md) to configure one agent, check, install, and open. The existing local installer provides login startup, a private runtime copy, persistent data, and a reusable entry. **The specialist, extra memory services, and mobile access are optional later steps.**
 
-Next time, double-click `~/.imcodes/one-ai/打开小白兔.command`, or run:
+Next time, double-click `~/.imcodes/one-ai/打开小白兔.command`; no terminal variable needs to persist. Alternatively use the Python absolute path selected at installation (replace the example):
 
 ```sh
-python3 -B "$HOME/.imcodes/one-ai/manage.py" open
+"/absolute/path/to/python3.11" -B "$HOME/.imcodes/one-ai/manage.py" open
 ```
 
 Data lives in `~/.imcodes/one-ai`; this legacy directory name does not require IM.codes. Preserve existing settings and records during updates, and identify an existing service before resolving port conflicts. Persistent installation currently supports macOS; other POSIX systems have only the manual foreground route. Windows is unsupported.
@@ -142,7 +146,7 @@ It provides file snapshots, content storage, publication receipts, and Markdown 
 - Native history reading, saved-session recovery, and control of a live external task are different capabilities. One working CLI route does not establish desktop-application takeover.
 - A handoff carries selected text and compatible materials, not another agent's complete internal state. Agent/model combinations, images, recovery, and tools need route-specific validation.
 - Real mode reads local agent sources and can launch agents. Data sent to online models leaves the machine through the selected provider; there is no independent cloud backup here.
-- Unknown send results retain their original request identity and are checked, rather than automatically resent. Result retention varies: Pi/Hermes use current-connection caches; eligible Claude final replies can be kept in a bounded local receipt.
+- Unknown send results retain their original request identity and are checked, rather than automatically resent. Eligible Claude final replies can be stored locally; Pi/Hermes complete results are saved after their first exact successful read. Missing or interrupted results are not reconstructed.
 - Windows, automatic Markdown-body synchronization, and complete native feature/performance equivalence are not current release promises.
 
 [Architecture](ARCHITECTURE.md) · [Design](docs/design.md) · [Specialist](docs/specialist.md) · [Native agents](docs/native-agents.md) · [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)

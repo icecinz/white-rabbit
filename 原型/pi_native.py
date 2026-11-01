@@ -147,6 +147,7 @@ class PiNativeHolder:
         self._profiles_enabled = profile_intents is not None and callable(getattr(connection, 'model_capabilities', None))
         self._pending_verified = None
         self._task_result_context = None
+        self._settle_worker = self._settle_target = None
 
     def _fault(self, code):
         with self._cache:
@@ -173,6 +174,7 @@ class PiNativeHolder:
             try:
                 event = self._rpc.next_event(timeout=.25)
             except TimeoutError:
+                self._ensure_settle_worker()
                 continue
             except Exception:
                 if not self._stop.is_set(): self._fault('event_stream_closed')
@@ -182,9 +184,68 @@ class PiNativeHolder:
                     self._event(event)
                     self._seen_events += 1
                     self._cache.notify_all()
+                if event.get('type') in ('agent_end', 'auto_retry_end', 'compaction_end'):
+                    self._schedule_settle()
+                else:
+                    self._ensure_settle_worker()
             except Exception:
                 self._fault('invalid_native_event')
                 return
+
+    def _schedule_settle(self):
+        # One event-triggered check, not a status poller. The event reader must
+        # keep draining while _read_native waits at its existing barrier.
+        with self._cache:
+            if (self._stop.is_set() or self._state != 'ready' or self._active is None
+                    or self._terminal is None or self._continuations):
+                return
+            self._settle_target = (self._rpc, self._epoch, self._active, self._terminal)
+        self._ensure_settle_worker()
+
+    def _ensure_settle_worker(self):
+        # A new terminal may arrive while the previous worker is returning.
+        # Retain that target until the event reader next sees the worker exit.
+        with self._cache:
+            if (self._stop.is_set() or self._settle_target is None
+                    or self._settle_worker is not None and self._settle_worker.is_alive()):
+                return
+            worker = threading.Thread(target=self._settle_completed,
+                name='rabbit-pi-completion', daemon=True)
+            self._settle_worker = worker
+            try:
+                worker.start()
+            except Exception:
+                self._settle_worker = None
+                self._settle_target = None
+                if not self._problem: self._problem = 'completion_unverified'
+
+    def _settle_completed(self):
+        while True:
+            with self._cache:
+                target, self._settle_target = self._settle_target, None
+                if target is None or self._stop.is_set():
+                    return
+            # Send still holds this lock until its original ACK/receipt and
+            # view are settled. Stop must let close() join while holding it.
+            acquired = False
+            while not self._stop.is_set() and not acquired:
+                acquired = self._action.acquire(timeout=.1)
+            if not acquired:
+                return
+            try:
+                with self._cache:
+                    current = (not self._stop.is_set() and self._state == 'ready'
+                        and self._rpc is target[0] and self._epoch == target[1]
+                        and self._active == target[2] and self._terminal is target[3]
+                        and not self._continuations)
+                if current:
+                    try:
+                        self._read_native(expected_terminal=target[3])
+                    except Exception:
+                        with self._cache:
+                            if not self._problem: self._problem = 'completion_unverified'
+            finally:
+                self._action.release()
 
     def _event(self, event):
         if type(event) is not dict or type(event.get('type')) is not str:
@@ -242,7 +303,7 @@ class PiNativeHolder:
                 if self._requests[first]['state'] == 'pending': break
                 self._requests.pop(first)
 
-    def _read_native(self):
+    def _read_native(self, *, expected_terminal=None):
         state = self._request('get_state')
         messages = self._request('get_messages')
         self._barrier()
@@ -279,7 +340,8 @@ class PiNativeHolder:
             # The native response is already an owned JSON value. Retain its
             # complete originals; only view() builds a bounded UI projection.
             self._native_state, self._messages = public_state, messages['messages']
-            if (self._active and self._terminal is not None and not state['isStreaming']
+            if (self._active and self._terminal is not None
+                    and (expected_terminal is None or self._terminal is expected_terminal) and not state['isStreaming']
                     and not state['isCompacting'] and state['pendingMessageCount'] == 0 and not self._continuations):
                 operation = self.store.operation(self._active)
                 assistants = [v for v in self._terminal.get('messages', []) if type(v) is dict and v.get('role') == 'assistant']
@@ -288,6 +350,7 @@ class PiNativeHolder:
                 if operation['status'] == 'accepted' and terminal and metadata is not None:
                     self.store.finish(self._active, terminal)
                     self._active = self._terminal = None
+                    if self._problem == 'completion_unverified': self._problem = ''
         if metadata is not None and self._pending_verified is not None:
             pending = self._pending_verified
             if pending['identity'] != self._startup_identity():
@@ -497,6 +560,15 @@ class PiNativeHolder:
                         or context[0] is not self._rpc or context[1:3] != (self._epoch,
                             (self._live_identity or {}).get('session_id'))):
                     return unavailable
+                # Persist only this exact current completion. A write failure
+                # does not relabel or discard the already verified live answer.
+                try:
+                    self.store.remember_result(self.identity, client_id, value)
+                except PiStoreError as error:
+                    if error.code not in ('io_failed', 'readonly'):
+                        raise
+                except OSError:
+                    pass
                 return _copy(value)
             except Exception:
                 return unavailable
@@ -777,6 +849,11 @@ class PiNativeHolder:
     def close(self):
         with self._action:
             self._stop.set()
+            with self._cache:
+                worker, self._settle_target = self._settle_worker, None
+            if worker is not None:
+                worker.join(timeout=3)
+                if worker.is_alive(): raise RuntimeError('Pi结束核对者仍未退出。')
             if self._rpc is not None:
                 self._rpc.close()
                 stats = self._rpc.stats

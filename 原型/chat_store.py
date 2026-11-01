@@ -793,6 +793,26 @@ class ChatStore:
             self._handoff_memory_in(db, chat_id, result['messages'])
             return result
 
+    def material_snapshot(self, chat_id):
+        """Finite material identities only; never load message or memory text."""
+        with self.lock, self._open() as db:
+            db.execute('PRAGMA query_only=ON')
+            db.execute('BEGIN')
+            row = db.execute('''SELECT c.id,COALESCE(cr.revision,0) AS revision
+                FROM chats c LEFT JOIN chat_revisions cr ON cr.chat_id=c.id WHERE c.id=?''',
+                (chat_id,)).fetchone()
+            if row is None:
+                raise KeyError('找不到这段共同对话。')
+            messages = [dict(item) for item in db.execute('''SELECT id,role,status,
+                attachment_ids,native_attachments FROM messages WHERE chat_id=? ORDER BY ordinal''', (chat_id,))]
+            runs = [dict(item) for item in db.execute('''SELECT id,message_id,user_message_id,status,
+                task_intent,file_inputs,
+                CASE WHEN json_valid(context_info) THEN json_extract(context_info,'$.file_input_refs') END AS file_input_refs,
+                (context_info IS NULL OR json_valid(context_info)) AS context_valid
+                FROM runs WHERE chat_id=? AND task_intent IS NOT NULL ORDER BY created_at,id''', (chat_id,))]
+            return {'chat_id': row['id'], 'revision': str(row['revision']),
+                    'messages': messages, 'runs': runs}
+
     @staticmethod
     def _handoff_memory_in(db, chat_id, messages):
         """Attach only one completed reply's immutable, safe recall evidence.

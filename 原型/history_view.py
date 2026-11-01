@@ -687,6 +687,7 @@ class HistoryView:
                                           "ORDER BY " + history_order(agent) + " LIMIT ? OFFSET ?",
                                           (agent, session_id, limit, offset))
             messages = []
+            page_attachments = []
             for row in rows:
                 message = dict(row)
                 message["message_index"] = offset + len(messages)
@@ -697,16 +698,34 @@ class HistoryView:
                 private_descriptors = connection.execute("SELECT * FROM app_history_attachments "
                     "WHERE agent=? AND session_id=? AND message_id=? ORDER BY attachment_ordinal",
                     (agent, session_id, message["message_id"])).fetchall()
+                originals = [dict(private) for private in private_descriptors]
+                page_attachments.append(originals)
+                messages.append(message)
+            # A real native materializer can resolve a page in one bounded pass
+            # per source. Older/custom materializers keep their existing API.
+            batch = None
+            resolve_many = getattr(type(self.materializer), 'materialize_many', None) if self.materializer is not None else None
+            if callable(resolve_many):
+                requests = [(message['role'], original) for message, originals in zip(messages, page_attachments) for original in originals]
+                try:
+                    batch = self.materializer.materialize_many(agent, session_id, requests)
+                    if not isinstance(batch, list) or len(batch) != len(requests):
+                        batch = [None] * len(requests)
+                except (ValueError, TypeError, KeyError, OSError, sqlite3.Error):
+                    # Never fall back to an unbounded per-image rescan on error.
+                    batch = [None] * len(requests)
+            batch_index = 0
+            for message, originals in zip(messages, page_attachments):
                 descriptors, attachment_ids = [], []
-                for private in private_descriptors:
-                    original = dict(private)
+                for original in originals:
                     result = {key: original.get(key) for key in NATIVE_ATTACHMENT_SOURCE_FIELDS}
                     result.update(attachment_id=None,
                         material_state="not_materialized" if result.get("state") == "embedded" else "unavailable",
                         material_reason="not_materialized" if result.get("state") == "embedded" else result.get("reason") or "native_unavailable")
                     if self.materializer is not None:
                         try:
-                            resolved = self.materializer.materialize(agent, session_id, message["role"], original)
+                            resolved = (batch[batch_index] if batch is not None else
+                                        self.materializer.materialize(agent, session_id, message["role"], original))
                             if not isinstance(resolved, dict):
                                 raise ValueError("Invalid materializer result")
                             # The public projection is fixed. Even an adapter
@@ -724,9 +743,9 @@ class HistoryView:
                     else:
                         result["attachment_id"] = None
                     descriptors.append(result)
+                    batch_index += 1
                 message.update(native_attachments=descriptors, attachment_ids=attachment_ids,
                     attachment_summary=attachment_summary(descriptors))
-                messages.append(message)
         following = offset + len(messages)
         return {"session": session, "messages": messages, "total": total,
                 "next_offset": following if following < total else None}

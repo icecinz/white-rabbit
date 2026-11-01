@@ -10,23 +10,23 @@ import secrets
 import stat
 
 
-INLINE_STYLES = ('style.css', 'workspace.css', 'specialist.css', 'work_status.css')
+INLINE_STYLES = ('style.css', 'workspace.css', 'specialist.css', 'work_status.css', 'composer_shell.css', 'soft_paper.css')
 INLINE_SCRIPTS = (
     'agents.js', 'markdown-it.min.js', 'rich_text.js', 'materials.js',
     'status_checks.js', 'profiles.js', 'native_memory.js', 'work_status.js', 'workspace.js', 'browser_state.js',
     'text_file_download.js', 'file_tasks.js', 'file_materials.js',
     'project_publish.js', 'markdown_chats.js', 'conversation_groups.js',
     'history_quotes.js', 'native_materials.js', 'handoff_view.js',
-    'specialist_context.js', 'specialist_tools.js', 'specialist.js', 'pi_native_history.js',
+    'specialist_context.js', 'specialist_tools.js', 'composer_shell.js', 'specialist.js', 'pi_native_history.js',
     'pi_native.js', 'hermes_native_history.js', 'hermes_attachment_state.js',
     'hermes_native.js', 'claude_material_draft.js', 'claude_native.js',
     'dsh_material_draft.js', 'dsh_native.js', 'native_chats.js',
     'native_handoff.js', 'native_adoption.js', 'native_text_quote.js',
-    'native_file_quote.js', 'app.js',
+    'native_file_quote.js', 'continuations.js', 'app.js',
 )
 HELP_FILES = ('manual.md', 'specialist-guide.md')
-INLINE_ASSETS = frozenset(('index.html', 'rabbit-app-1024.png') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES)
-ASSET_FILES = ('index.html', 'rabbit-app-1024.png', 'app.webmanifest',
+INLINE_ASSETS = frozenset(('index.html', 'rabbit-app-1024.png', 'soft-paper.jpg') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES)
+ASSET_FILES = ('index.html', 'rabbit-app-1024.png', 'soft-paper.jpg', 'app.webmanifest',
                'markdown-it.LICENSE') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES
 MAX_INLINE_ASSET_BYTES = 2 * 1024 * 1024
 _ROUTES = {'/': 'index.html', **{'/' + name: name for name in ASSET_FILES if name != 'markdown-it.LICENSE'}}
@@ -35,6 +35,7 @@ _CONTENT_TYPES = {
     '.css': 'text/css; charset=utf-8',
     '.js': 'text/javascript; charset=utf-8',
     '.png': 'image/png',
+    '.jpg': 'image/jpeg',
     '.webmanifest': 'application/manifest+json; charset=utf-8',
     '.md': 'text/markdown; charset=utf-8',
 }
@@ -93,7 +94,7 @@ def _asset(root, name, *, text=False, inline=False):
 
 
 def self_contained_document(web_root, *, agent_bootstrap):
-    """Bundle only fixed public assets, preserving their exact UTF-8 source.
+    """Bundle fixed public assets, inlining only the known CSS paper image.
 
     The authenticated preview can load its initial HTML by an access ticket,
     while cross-site native frames cannot reuse Strict cookies for CSS/JS.
@@ -153,9 +154,21 @@ def self_contained_document(web_root, *, agent_bootstrap):
     if logo_count != 1:
         raise ValueError('界面图标入口不完整。')
 
+    paper = asset('soft-paper.jpg')
+    if not paper.startswith(b'\xff\xd8\xff'):
+        raise ValueError('界面纸纹格式无效。')
+    paper_uri = 'data:image/jpeg;base64,' + base64.b64encode(paper).decode('ascii')
+
+    def source(name):
+        text = (agent_bootstrap if name == 'agents.js' else '') + asset(name, text=True)
+        if name == 'soft_paper.css':
+            # This is one fixed public leaf, never a CSS path resolver.
+            text = re.sub(r'''url\(\s*(["']?)/soft-paper\.jpg\1\s*\)''',
+                          lambda _match: 'url("' + paper_uri + '")', text)
+        return text
+
     def encoded(names):
-        return json.dumps([base64.b64encode(((agent_bootstrap if name == 'agents.js' else '')
-                                            + asset(name, text=True)).encode('utf-8')).decode('ascii') for name in names])
+        return json.dumps([base64.b64encode(source(name).encode('utf-8')).decode('ascii') for name in names])
 
     nonce = secrets.token_urlsafe(24)
     decode = "function decode(value){return new TextDecoder().decode(Uint8Array.from(atob(value),function(c){return c.charCodeAt(0);}));}"

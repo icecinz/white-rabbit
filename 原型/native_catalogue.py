@@ -115,6 +115,14 @@ class NativeChatCatalogue:
             raise _error(404, 'native_chat_not_found', '找不到这段原生对话。', unsent=True)
         return self._public(row)
 
+    def creation(self, creation_id):
+        """Read the original creation snapshot; never prepare a workspace."""
+        creation_id = chat_id(creation_id)
+        with self._db() as db:
+            row = db.execute(f'SELECT * FROM {self.table} WHERE creation_id=?',
+                             (creation_id,)).fetchone()
+        return self._public(row) if row is not None else None
+
     def rename(self, identity, expected_title, title):
         """Compare the current name and rename in one existing DB transaction.
 

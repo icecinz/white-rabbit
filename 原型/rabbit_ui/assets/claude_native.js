@@ -314,6 +314,43 @@
       if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedMemory = previous.memory; selectedProfile = previous.profile; draftRevision = previous.revision; throw Error("浏览器不能保存Claude原生草稿；原内容保留，尚未发送。"); }
       if (hasMemory) memoryVersion++; if (hasProfile) profileVersion++; render(); return true;
     }
+    // Quoting only appends text to this exact native draft. Existing file
+    // references and the original session/configuration remain untouched.
+    function captureQuoteDraft() {
+      if (!workspace || workspace !== String(getWorkspace() || "") || !enabled || destroyed || !visible || root.hidden || document.hidden
+          || !readable || !snapshot?.connection || snapshot.workspace_id !== workspace || snapshot.chat_id !== chatId
+          || !["not_open", "closed", "ready"].includes(snapshot.connection.state) || snapshot.connection.problem || snapshot.disconnect_unconfirmed === true
+          || snapshot.activity?.state !== "idle" || filePicker?.busy() || reading || writing || posting || openingForSend || autoOpenBlocked
+          || pending || storageInvalid || unsettled() || pendingRequest() || Object.values(answerJournal).includes("submitted_unknown")
+          || !selectionReady() || !memorySelectionReady() || input.value !== draft) return null;
+      const refs = materialRefs(draftMaterials);
+      const stamp = canonical([workspace, chatId, generation, viewVersion, draftRevision, draft, refs,
+        selectedProfile, profileVersion, selectedMemory, memoryVersion,
+        configurationSelection?.checkpoint(), memorySelection?.checkpoint(),
+        snapshot.epoch, snapshot.connection.state, snapshot.binding?.session_id ?? null, snapshot.activity,
+        snapshot.operation ? [snapshot.operation.client_id, snapshot.operation.kind, snapshot.operation.status, snapshot.operation.session_id, snapshot.operation.request_sha256] : null,
+        snapshot.operations.map(row => [row.client_id, row.kind, row.status, row.session_id, row.request_sha256]),
+        snapshot.requests.map(row => [row.token, row.state, row.answerable, row.epoch, row.session_id, row.tool_use_id])]);
+      return { stamp, text: draft, material_refs: refs };
+    }
+    function applyQuoteDraft(expected, value, material_refs, material_preview) {
+      try {
+        const current = captureQuoteDraft();
+        if (!current || !exact(expected, ["stamp", "text", "material_refs"]) || canonical(expected) !== canonical(current)
+            || !text(value) || !value.startsWith(current.text) || Array.from(value).length > 30000
+            || typeof TextEncoder !== "function" || new TextEncoder().encode(value).length > 128 * 1024) return false;
+        const refs = materialRefs(material_refs);
+        const before = current.material_refs;
+        if (refs.length < before.length || canonical(refs.slice(0, before.length)) !== canonical(before)
+            || refs.slice(before.length).some(ref => ref.kind !== "text")
+            || refs.length > before.length && (!materialsEnabled || !materialDraft || !nativeMaterials || material_preview === undefined)) return false;
+        if (refs.length > before.length) nativeMaterials.seed(refs, material_preview);
+        const previous = { draft, input: input.value, refs: draftMaterials, revision: draftRevision };
+        draft = value; input.value = value; draftMaterials = refs; draftRevision++;
+        if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; draftRevision = previous.revision; render(); return false; }
+        render(); return true;
+      } catch (_) { return false; }
+    }
     function selectSavedProfile(value) {
       syncWorkspace();
       if (!exact(value, ["workspace_id", "chat_id", "profile"]) || value.workspace_id !== workspace || value.chat_id !== chatId
@@ -618,7 +655,7 @@
       if (destroyed || !workspace || workspace !== String(getWorkspace() || "")) return null;
       return { agent_instance_id: "local/claude", profile_id: selectedProfile?.id || null, profile_name: selectedProfile?.name || null, profile_revision: selectedProfile?.revision || null, model_id: profileReady() ? selectedProfile?.model_id || null : null, reasoning_effort: null };
     }
-    render(); return { show, showSettings, hide, destroy, refresh, setLanguage, setEnabled, setMaterialInputs, getConfigurationContext, selectSavedProfile, putDraft, getTextSnapshot };
+    render(); return { sendDraft: send, show, showSettings, hide, destroy, refresh, setLanguage, setEnabled, setMaterialInputs, getConfigurationContext, selectSavedProfile, putDraft, captureQuoteDraft, applyQuoteDraft, getTextSnapshot };
   }
   window.RabbitClaudeNative = Object.freeze({ create });
 })();

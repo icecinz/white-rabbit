@@ -24,10 +24,12 @@
 
 - **继续原生 Agent 的工作：** 实验性接入 Codex、Hermes、Pi、Claude Code、DeepSeek Harness，保留各自原生会话、工具和审批规则。
 - **找回和整理项目资料：** 搜索已索引历史，为相关对话分组，把 Markdown 引用或快照与文件、成果放在一起。
-- **明确带上所需前文：** 先预览消息和固定版本的文件，再交给另一个 Agent；原图能力按具体通路和模型开放。
+- **在 Codex 与 Hermes 间接着聊：** 选择已读文字、完整登记文件和原图，按固定快照预览；先准备草稿，按发送才新建原生对话，并保留返回来源的入口。
 - **分别选择 AI 和记忆：** 保存好的 AI 配置描述 Agent／模型组合，记忆配置独立决定额外带入的长期资料。
 - **吩咐小白兔专员：** 通过固定管理对话调整已接通设置、整理工作，或向已有原生对话交办任务。
 - **单独复用部件：** 把独立打包的核心装进自己的 Python 项目，不必接入整个小白兔宿主。
+
+Codex、Hermes、Pi 已从首页草稿到原生对话沿用统一输入路径，保留 AI／记忆选择、文件、发送和刷新后续聊。Codex 还可单独细调草稿／本对话的模型与强度；专员建议需原页面实际保存并返回回执，才算应用完成。Claude Code 与 DSH 保留已有入口，本版不包含它们的统一输入区改造。[日常操作](docs/native-agents.zh-CN.md#日常操作)
 
 ## 愿景与当前范围
 
@@ -35,7 +37,7 @@
 | --- | --- | --- |
 | AI 工作的统一入口 | 五种原生 Agent 通路；查看小白兔已持有工作的状态并回到原会话 | Codex 桌面、WorkBuddy 进行中任务尚未直接接通 |
 | 外部工作发现 | 可选、手动的 HAPI Hub 工作发现，打开原会话页面 | 发送、审批、停止仍在 HAPI；发现工作不等于接管 |
-| 前文与记忆 | 明确选择材料；Hindsight 和独立 Hermes 文档记忆 | Mem0 是待配置的可选只读桥，自动保存尚未接入 |
+| 前文与记忆 | Codex ↔ Hermes 选择材料接续；Hindsight 和独立 Hermes 文档记忆 | 接续不迁移 Agent 内部状态；Mem0 仍需配置，自动保存未接入 |
 | 人与 AI 操作 | 共用应用接口、按版本改设置、独立专员 | 只有界面的应用代操作、AI／混合接口尚未接通 |
 | 设备 | 本机 Mac；通过另行配置的 IM.codes 从手机访问 | 跨电脑调度、设备管理与远程唤醒仍待实现 |
 
@@ -91,20 +93,22 @@ flowchart TD
 
 > 帮我安装 https://github.com/icecinz/white-rabbit ，按仓库 AGENTS.md 和安装清单操作。先接通一个我已经在使用的 Agent，保留原模型、提供商和登录配置；用真实对话、刷新后续聊验收，最后告诉我以后怎么打开。
 
-安装 Agent 应先检查 macOS、Python 3.11+、已有安装和所选 Agent 的依赖，写入只含本机路径的连接配置，再运行随包安装器。不要把 `demo.py` 或未启用原生连接的空页面当成安装完成。
+安装 Agent 应先检查 macOS、Python 3.11+、已有安装和所选 Agent 的依赖，写入只含本机路径的连接配置，再运行随包安装器。不要把 `demo.py` 或未启用原生连接的空页面当成安装完成。按[安装清单](docs/install-agent.zh-CN.md)找到稳定的 Python 3.11+ 绝对路径；下例中的路径需要替换。
 
 ```sh
 git clone https://github.com/icecinz/white-rabbit.git
 cd white-rabbit
-python3 -B 原型/install_local.py check --source-dir "$PWD/原型"
+RABBIT_PYTHON="/absolute/path/to/python3.11"
+"$RABBIT_PYTHON" --version
+"$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型"
 ```
 
 首次检查提示需要连接配置是正常的。按[安装清单](docs/install-agent.zh-CN.md)和[连接配置示例](docs/native-agents.zh-CN.md)配置一个 Agent，然后检查、安装、打开。安装器复用现有本机方案：登录启动、私有运行副本、持久数据及打开入口。**专员、额外记忆服务、手机连接均可稍后配置。**
 
-下次可双击 `~/.imcodes/one-ai/打开小白兔.command`，或运行：
+下次可双击 `~/.imcodes/one-ai/打开小白兔.command`，无需设置变量。也可用安装时选定的 Python 绝对路径运行（替换示例路径）：
 
 ```sh
-python3 -B "$HOME/.imcodes/one-ai/manage.py" open
+"/absolute/path/to/python3.11" -B "$HOME/.imcodes/one-ai/manage.py" open
 ```
 
 数据保存在 `~/.imcodes/one-ai`；这个旧目录名不表示需要安装 IM.codes。更新时保留已有配置和记录，端口冲突时先核对已有服务。当前持久安装支持 macOS；其他 POSIX 系统只有手动前台路径，Windows 尚未支持。
@@ -142,7 +146,7 @@ python3 -m pip install ./原型/rabbit_content
 - 读取历史、恢复保存的会话、控制外部存活任务是不同能力。CLI 能工作，不代表原桌面应用已经被接管。
 - 交接的是选定文字与兼容材料，不迁移另一家 Agent 的完整内部状态。模型组合、图片、恢复和工具需要分别核验。
 - 真实模式会读取本机 Agent 来源，也可以启动 Agent。在线模型会通过所选服务接收发送的资料；当前没有独立云备份。
-- 发送结果未知时保留原编号并核对，不自动重发。结果保存因通路而异：Pi／Hermes 使用当前连接缓存，符合条件的 Claude 最终回答可保存在有界的本机回执中。
+- 发送结果未知时保留原编号并核对，不自动重发。符合条件的 Claude 最终回答可在本机保存；Pi／Hermes 的完整结果在首次按原编号成功读回后保存。缺失或中断的结果不补造。
 - Windows、Markdown 正文自动同步，以及完整原生能力／性能等价，不是当前版本承诺。
 
 [模块结构](ARCHITECTURE.md) · [设计原则](docs/design.zh-CN.md) · [小白兔专员](docs/specialist.zh-CN.md) · [原生接入](docs/native-agents.zh-CN.md) · [近期路线](ROADMAP.md) · [更新记录](CHANGELOG.md) · [参与方式](CONTRIBUTING.md)

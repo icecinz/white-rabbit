@@ -55,11 +55,21 @@ An instruction to change one conversation must not edit a shared profile used by
 
 The profile UI says **Start a new profile from this profile**, rather than implying that a native conversation is duplicated. The previous **Set as default for new chats** action is no longer shown; select the intended saved profile in the composer. Existing saved choices and records are preserved.
 
+## Codex draft and conversation settings
+
+Codex supports a local model/reasoning adjustment for **one existing conversation** or the **unsent home draft**. Human controls and specialist management use the same save rules. Repeated edits update one internal setting; they do not create more named profiles or alter the global default. Selecting a named profile exits the local adjustment. Other agents retain saved-profile selection; their local fine-tuning is not connected in this release.
+
+For a home draft, the specialist receives its ID and configuration metadata, not the unsent message or files. Its suggestion remains pending until the **originating browser page** saves against the expected version and returns an application receipt. Submission alone is not completion. Existing text, files, and memory choice remain; first Send creates the conversation and binds the setting to it. A changed configuration or a send already in progress prevents an older suggestion from overwriting the new choice.
+
+Navigation or refresh retains the original target. A new tab does not silently take over a pending suggestion; use the explicit review/apply action when needed. An unknown save/application result is checked under the original ID, not proposed or applied again. Model-catalog evidence must be available for supported fine-tuning; refreshing the UI does not secretly start an agent to fill a missing catalog.
+
 Some infrequent settings have no individual graphical switch. Their readable catalog is still available to the person; the specialist or another supported program interface performs the change. Purple describes this implemented access path, not approval to act. [Color and settings design](design.md)
 
 ## Delegation and its current limits
 
-Native target input/result routes exist for all five agents. End-to-end specialist delegation has narrower evidence: Codex has a verified complete route, and a Claude material handoff has corroborated input and exact result retrieval. That does not establish every target, tool, or interruption case. Pi/Hermes exact results remain current-connection scoped.
+Native target input/result routes exist for all five agents. End-to-end specialist delegation has narrower evidence: Codex and a Pi material handoff have complete verified routes; a Claude material handoff has corroborated input and exact result retrieval. Hermes's full specialist chain still needs validation. This does not establish every target, tool, or interruption case.
+
+Pi/Hermes save eligible complete results after the first exact successful retrieval, allowing later reads by the original task ID after service reconstruction. Before that first read, a broken connection may leave the answer unavailable. A saved result is explicitly previous evidence, not a current-owner observation.
 
 Claude can retain a bounded final-answer body in its **local operation ledger**: a successful, non-truncated, top-level SDK final Result of at most 128 KiB, with its original request identity and SHA-256. A matching stored result can be read after the connection owner is closed or rebuilt. It is labeled `stored_sdk_result`, not presented as evidence of a live connection. Older receipts without a saved body, failures, subtasks, oversized/truncated results, corruption, or identity mismatches do not produce a successful saved answer. This is not unlimited result storage or recovery of the complete native session state.
 

@@ -37,8 +37,10 @@ import native_model_management
 import native_work_status
 import external_work
 import native_chat_management
+import native_material_inventory
 from model_catalog import ModelCatalog
 from rabbit_content.materials import ImageStore, MAX_FILE_BYTES
+import native_origins
 from native_history_materials import NativeHistoryMaterials
 from profiles import (AIProfiles, ProfileConflict, ProfileCreationConflict, DefaultProfileConflict,
                       PROFILE_FIELDS, UNSET as PROFILE_UNSET, make_profile_snapshot, validate_request_snapshot)
@@ -63,12 +65,14 @@ from rabbit_content.markdown_sync_files import MarkdownMoveError
 import native_task_input
 import native_task_result
 from rabbit_content.file_intent import validate_intent, validate_inputs
+from rabbit_content.attachments import validate_native_attachments, MAX_HISTORY_IMAGES
 from rabbit_content.file_task_store import FileTaskStore, FileTaskStoreError
 from agent_registry import IDS as AGENT_IDS, LABELS as AGENT_LABELS, has as registered_agent, browser_definitions
 from history_sources import HistorySources, HistorySourceError
 from rabbit_preparation import prepare_file_context
 from specialist_http import SpecialistHTTP, SpecialistHTTPError, decode_body as decode_specialist_body
 import status_check_service
+from rabbit_specialist import model_guide_history, draft_configuration
 from rabbit_preparation import handoff as native_handoff, MaterialReferenceError
 from native_materials import NativeMaterials, NativeMaterialError
 from native_profile_catalog import (NativeProfileUnavailable, resolve_native_profile,
@@ -805,7 +809,7 @@ class Service:
             raise SpecialistHTTPError(503, 'native_chats_closing', '本机服务正在收尾，请稍后核对原回执。',
                                       accepted=False if method != 'GET' else None)
         return self._native_configuration_result('codex', method, path,
-            self.native_chats.dispatch(method, path, query=query, body=body))
+            native_material_inventory.dispatch(self, 'codex', self.native_chats, method, path, query=query, body=body))
 
     def _close_native_chats(self):
         if self.codex_history is not None:
@@ -832,7 +836,7 @@ class Service:
         from rabbit_runtime.pi.session_store import PiStoreError
         try:
             return self._native_configuration_result('pi', method, path,
-                self.pi_native_chats.dispatch(method, path, query=query, body=body))
+                native_material_inventory.dispatch(self, 'pi', self.pi_native_chats, method, path, query=query, body=body))
         except PiStoreError as error:
             raise SpecialistHTTPError(409, 'pi_native_' + error.code,
                 'Pi原生绑定或回执需要核对，未自动覆盖或重发。') from None
@@ -862,7 +866,7 @@ class Service:
         from rabbit_runtime.hermes.session_store import HermesStoreError
         try:
             return self._native_configuration_result('hermes', method, path,
-                self.hermes_native_chats.dispatch(method, path, query=query, body=body))
+                native_material_inventory.dispatch(self, 'hermes', self.hermes_native_chats, method, path, query=query, body=body))
         except HermesStoreError as error:
             raise SpecialistHTTPError(409, 'hermes_native_' + error.code,
                 'Hermes原生绑定或回执需要核对，未自动覆盖或重发。') from None
@@ -892,7 +896,7 @@ class Service:
         from rabbit_runtime.claude.session_store import ClaudeStoreError
         try:
             return self._native_configuration_result('claude', method, path,
-                self.claude_native_chats.dispatch(method, path, query=query, body=body))
+                native_material_inventory.dispatch(self, 'claude', self.claude_native_chats, method, path, query=query, body=body))
         except ClaudeStoreError as error:
             raise SpecialistHTTPError(409, 'claude_native_' + error.code,
                 'Claude原生绑定或回执需要核对，未自动覆盖或重发。') from None
@@ -919,7 +923,7 @@ class Service:
         from rabbit_runtime.dsh.session_store import DSHStoreError
         try:
             return self._native_configuration_result('dsh', method, path,
-                self.dsh_native_chats.dispatch(method, path, query=query, body=body))
+                native_material_inventory.dispatch(self, 'dsh', self.dsh_native_chats, method, path, query=query, body=body))
         except DSHStoreError as error:
             raise SpecialistHTTPError(409, 'dsh_native_' + error.code,
                 'DSH原生绑定或回执需要核对，未自动覆盖或重发。') from None
@@ -976,6 +980,10 @@ class Service:
         # Browser recovery follows this durable local store across service
         # restarts without exposing its path or relying on a session nonce.
         self.workspace_id = hashlib.sha256(str(self.store.path).encode('utf-8')).hexdigest()
+        self._native_material_index = native_material_inventory.NativeMaterialIndex(self.store, self.workspace_id)
+        self._native_origins = native_origins.NativeOrigins(self.store, self.workspace_id)
+        self._model_guide_history = model_guide_history.ModelGuideHistory(self.store, self.workspace_id)
+        self._draft_configuration = draft_configuration.DraftConfiguration(self.store, self.workspace_id)
         self.store.recover_interrupted()
         self.file_tasks = FileTaskStore(self.data_dir / 'file-tasks')
         self.file_tasks.recover()
@@ -1224,6 +1232,7 @@ class Service:
         result = management(self.backends(fresh=fresh))
         result['models'] = self.model_catalog.models(fresh=fresh)
         result['native_profile_capabilities'] = self._native_profile_capabilities()
+        result['workspace_id'] = self.workspace_id
         return result
 
     @admitted_service
@@ -1305,6 +1314,44 @@ class Service:
                 '找不到指定的原生对话。', accepted=False) from None
         return self._native_configuration_payload(value)
 
+    def _native_origin_catalogue(self, agent, chat_id):
+        native_origins.target(agent, chat_id)
+        manager = getattr(self, native_origins.AGENTS[agent], None)
+        if manager is None:
+            raise native_origins.NativeOriginError('unavailable')
+        try:
+            manager.catalogue.get(chat_id)
+        except SpecialistHTTPError as error:
+            kind = 'not_found' if error.status == 404 else 'unavailable'
+            raise native_origins.NativeOriginError(kind) from None
+        except (sqlite3.Error, OSError):
+            raise native_origins.NativeOriginError('unavailable') from None
+        return manager.catalogue
+
+    @admitted_service
+    def native_chat_origin(self, agent, chat_id):
+        self._native_origin_catalogue(agent, chat_id)
+        return dict(workspace_id=self.workspace_id, scope=native_origins.SCOPE,
+                    origin=self._native_origins.read(agent, chat_id))
+
+    @admitted_service
+    def save_native_chat_origin(self, body):
+        try:
+            fields = self._profile_write_fields(body, native_origins.FIELDS)
+        except (ValueError, TypeError):
+            raise native_origins.NativeOriginError() from None
+        value = native_origins.record(fields, self.workspace_id)
+        target = self._native_origin_catalogue(value['target_agent'], value['target_chat_id'])
+        self._native_origin_catalogue(value['source_view']['agent'], value['source_view']['chat_id'])
+        try:
+            created = target.creation(value['creation_id'])
+        except (sqlite3.Error, OSError):
+            raise native_origins.NativeOriginError('unavailable') from None
+        if created is None or created['id'] != value['target_chat_id']:
+            raise native_origins.NativeOriginError('creation_mismatch')
+        return dict(workspace_id=self.workspace_id, scope=native_origins.SCOPE,
+                    origin=self._native_origins.save(value))
+
     @admitted_service
     def select_native_chat_configuration(self, body):
         fields = self._profile_write_fields(body, ('agent', 'chat_id', 'expected_revision',
@@ -1318,6 +1365,97 @@ class Service:
             raise SpecialistHTTPError(404, 'native_chat_selection_not_found',
                 '找不到指定的原生对话。', accepted=False) from None
         return self._native_configuration_payload(value)
+
+    @admitted_service
+    def save_native_chat_local_configuration(self, body):
+        fields = self._profile_write_fields(body, ('agent', 'chat_id', 'expected_revision',
+            'base_profile_id', 'base_profile_revision', 'parameters', 'operation_id'))
+        if set(fields) != {'agent', 'chat_id', 'expected_revision', 'base_profile_id',
+                           'base_profile_revision', 'parameters', 'operation_id'}:
+            raise ValueError('请指定原生对话、原选择与基值版本、完整参数和本次操作编号。')
+        self._native_configuration_agent(fields['agent'])
+        if fields['agent'] != 'codex':
+            raise ValueError('本对话细调目前只接通普通Codex；其他Agent仍选择已保存配置。')
+        def validate_local(parameters):
+            self._resolve_native_profile_from_cache(parameters)
+        try:
+            value = self.native_selections.save_local_configuration(
+                **fields, validator=validate_local)
+        except KeyError:
+            raise SpecialistHTTPError(404, 'native_chat_selection_not_found',
+                '找不到指定的原生对话或基值配置。', accepted=False) from None
+        return dict(value, scope='native_local_configuration',
+                    inference_performed=False, connection_checked=False)
+
+    @admitted_service
+    def apply_draft_configuration(self, body):
+        fields = draft_configuration.request({key: value for key, value in body.items()
+                                              if key != '_one_ai_csrf'})
+        action = fields['operation']
+        # Snapshot the fixed holder before taking a chat DB write transaction.
+        # Service admission keeps shutdown out; the holder guard verifies liveness.
+        holder = self.specialist
+        if 'parameters' in fields:
+            try:
+                validate_model_id(fields['parameters']['model_id'], 'codex')
+            except ValueError:
+                raise draft_configuration.DraftConfigurationError() from None
+
+        def read_base(db, identity, revision):
+            try:
+                profile = make_profile_snapshot(AIProfiles.get_in(db, identity))['ai_profile']
+            except (KeyError, ValueError):
+                raise draft_configuration.DraftConfigurationError('conflict') from None
+            if (profile['revision'] != revision or profile['agent_instance_id'] != 'local/codex'
+                    or profile['device_id'] != 'local'):
+                raise draft_configuration.DraftConfigurationError('conflict')
+            local = db.execute("SELECT type FROM sqlite_master WHERE name='native_chat_local_configurations'").fetchone()
+            if local is not None and (local[0] != 'table' or db.execute(
+                    'SELECT 1 FROM native_chat_local_configurations WHERE id=?', (identity,)).fetchone()):
+                raise draft_configuration.DraftConfigurationError('corrupt')
+            return profile
+
+        def active_guard(client_id, callback):
+            from rabbit_runtime.specialist_service import SpecialistServiceError
+            if holder is None or self._memory_stop.is_set():
+                raise draft_configuration.DraftConfigurationError('active_turn_unconfirmed')
+            try:
+                return holder.apply_during_active_client(client_id, callback)
+            except SpecialistServiceError:
+                raise draft_configuration.DraftConfigurationError('active_turn_unconfirmed') from None
+
+        if action == 'register':
+            # Register current intent without opening an Agent or warming its catalogue.
+            return self._draft_configuration.register(fields, read_base)
+        if action in ('read', 'inspect'):
+            if 'client_id' not in fields:
+                fields['client_id'] = active_guard(None, lambda client, _turn: client)
+                fields = draft_configuration.request(fields)
+            return self._draft_configuration.read(fields, owner=action == 'read')
+        if action == 'propose':
+            def validate(profile):
+                try:
+                    self._resolve_native_profile_from_cache(profile)
+                except (ValueError, KeyError, RuntimeError):
+                    raise draft_configuration.DraftConfigurationError('conflict') from None
+            self._draft_configuration.propose(fields, read_base, validate, active_guard)
+            # No holder or database lock is held while the original browser applies.
+            return self._draft_configuration.wait(fields)
+        if action == 'settle':
+            return self._draft_configuration.settle(fields)
+
+        def terminal_check(client_id, native_turn):
+            from rabbit_runtime.native_session_store import NativeSessionStoreError
+            store = self._specialist_store
+            try:
+                receipt = store.read_operation(client_id, session_key='specialist/codex') if store else None
+            except NativeSessionStoreError:
+                receipt = None
+            if (type(receipt) is not dict or receipt.get('kind') != 'turn_start'
+                    or receipt.get('status') not in ('completed', 'failed', 'interrupted')
+                    or any(receipt.get(key) != native_turn[key] for key in ('thread_id', 'turn_id'))):
+                raise draft_configuration.DraftConfigurationError('active_turn_unconfirmed')
+        return self._draft_configuration.resume(fields, terminal_check)
 
     @staticmethod
     def _native_memory_configuration_payload(value):
@@ -1404,6 +1542,31 @@ class Service:
         return native_model_management.refresh_specialist(self)
 
     @admitted_service
+    def dsh_model_guide(self):
+        manager = self.dsh_native_chats
+        snapshot = manager.catalogue_snapshot() if manager is not None else None
+        if snapshot is not None:
+            if snapshot.get('workspace_id') != self.workspace_id:
+                raise ValueError('DSH模型目录不属于当前工作区。')
+            snapshot = {key: value for key, value in snapshot.items() if key != 'workspace_id'}
+        return {'workspace_id': self.workspace_id, 'catalogue': snapshot}
+
+    @admitted_service
+    def model_guide_history(self):
+        return self._model_guide_history.read()
+
+    @admitted_service
+    def save_model_guide_history(self, body):
+        fields = self._profile_write_fields(body, ('workspace_id', 'observations'))
+        # Only the already-validated in-memory native projections may be saved.
+        # Historical snapshots are never put back into native profile validation.
+        sources = self._native_profile_capabilities()
+        dsh = self.dsh_native_chats.catalogue_snapshot() if self.dsh_native_chats is not None else None
+        if dsh is not None and dsh.get('workspace_id') == self.workspace_id:
+            sources['dsh'] = dsh
+        return self._model_guide_history.save(fields, sources)
+
+    @admitted_service
     def prepare_native_model_catalog(self, body):
         fields = self._profile_write_fields(body, ('agent', 'chat_id'))
         return native_model_management.prepare(self, fields)
@@ -1473,6 +1636,27 @@ class Service:
     def saved_memory_profile_inventory(self):
         return dict(memory_management.saved_memory_profiles(self.memory_profiles,
             self.native_memory_bindings), workspace_id=self.workspace_id)
+
+    @admitted_service
+    def managed_native_memory_sources(self):
+        rows = self._native_source_inventory(self._memory_connection())
+        fields = ('id', 'name', 'source_ref', 'available', 'reason', 'linked_profile_id')
+        return dict(workspace_id=self.workspace_id, scope='native_memory_metadata',
+                    inference_performed=False, memory_read=False,
+                    native_memory_sources=[{key: row[key] for key in fields} for row in rows])
+
+    @admitted_service
+    def attach_managed_native_memory(self, body):
+        fields = self._profile_write_fields(body, ('source_ref',))
+        if (set(fields) != {'source_ref'} or type(fields['source_ref']) is not str
+                or re.fullmatch(r'nativesrc_[0-9a-f]{32}', fields['source_ref']) is None):
+            raise ValueError('请先读取并核对原有记忆来源编号。')
+        result = self.attach_native_memory(fields)
+        profile = self.memory_profiles.get(result['profile']['id'])
+        return dict(workspace_id=self.workspace_id, scope='native_memory_binding',
+                    inference_performed=False, memory_read=False, source_ref=fields['source_ref'],
+                    profile=memory_management.saved_memory_profile(profile, self.native_memory_bindings),
+                    created=result['created'])
 
     @admitted_service
     def memory_profile_creation_receipt(self, creation_id):
@@ -2540,6 +2724,10 @@ class Service:
         finally:
             self.refresh_lock.release()
 
+    @admitted_service
+    def history_source_changes(self):
+        return {'workspace_id': self.workspace_id, 'state': self.history_sources.source_changes()}
+
     @staticmethod
     def _creation_key(body):
         creation_key = body.get('client_id')
@@ -3302,6 +3490,120 @@ class Service:
             raise SpecialistHTTPError(409, error.code, str(error), accepted=False) from None
 
     @admitted_service
+    def chat_materials(self, chat_id, *, kind='chat', agent=None):
+        """Read registered material metadata, not chat/memory or file bodies."""
+        if kind == 'native':
+            return native_material_inventory.inventory(self, agent, chat_id)
+        if kind != 'chat' or agent is not None:
+            raise ValueError('共同对话与原生对话的材料范围不能混用。')
+        try:
+            if type(chat_id) is not str or str(uuid.UUID(chat_id)) != chat_id:
+                raise ValueError
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError('需要明确的共同对话编号。') from None
+        snapshot = self.store.material_snapshot(chat_id)
+        files = self.file_tasks.handoff_artifacts(chat_id)
+        records, by_id, by_run = [], {}, {}
+        def identity(value):
+            return type(value) is str and str(uuid.UUID(value)) == value
+        def missing(record, kind, identifier, origin, reason):
+            item = dict(kind=kind, id=identifier, origin=origin, reason=reason)
+            if item not in record['unavailable']: record['unavailable'].append(item)
+        def label(item):
+            if (type(item['name']) is not str or not item['name'] or len(item['name']) > 255
+                    or any(ord(c) < 32 or ord(c) == 127 for c in item['name'])
+                    or type(item['size_bytes']) is not int or not 0 <= item['size_bytes'] <= 2**53-1):
+                raise ValueError
+            item['name'].encode('utf-8')
+            return dict(name=item['name'], size_bytes=item['size_bytes'])
+        def text_material(record, frozen, origin, source_chat=None):
+            identifier = frozen['id']
+            try:
+                ref = dict(kind='text', id=identifier, sha256=frozen['sha256'])
+                if source_chat is not None:
+                    if not identity(source_chat): raise ValueError
+                    ref['source_chat_id'] = source_chat
+                item = self.file_tasks.input_snapshot(identifier, chat_id=source_chat or chat_id,
+                    expected_sha256=frozen['sha256'], content=False)['artifact']
+                if item.get('available') is not True:
+                    missing(record, 'text', identifier, origin, 'metadata_unavailable'); return
+                material = dict(ref=ref, origin=origin, **label(item))
+                if material not in record['materials']: record['materials'].append(material)
+            except (FileTaskStoreError, KeyError, ValueError, TypeError, AttributeError):
+                missing(record, 'text', identifier, origin, 'metadata_unavailable')
+        for message in snapshot['messages']:
+            if not identity(message['id']) or message['role'] not in ('user', 'assistant'):
+                raise ValueError('共同对话的材料关联无法核对。')
+            record = dict(message_id=message['id'], role=message['role'], run_id=None,
+                          materials=[], unavailable=[])
+            by_id[message['id']] = record; records.append(record)
+            try:
+                image_ids = self.store.validate_attachment_ids(json.loads(message['attachment_ids'] or '[]'), maximum=MAX_HISTORY_IMAGES)
+                descriptions = validate_native_attachments(json.loads(message['native_attachments'] or '[]'))
+            except (ValueError, TypeError):
+                missing(record, 'image', None, 'attachment', 'source_incomplete'); image_ids = []; descriptions = []
+            for description in descriptions:
+                if description.get('material_state') != 'ready':
+                    missing(record, 'image', None, 'attachment',
+                            'source_incomplete' if description['kind'] == 'inspection_summary' else 'not_saved')
+                elif description['attachment_id'] not in image_ids:
+                    missing(record, 'image', None, 'attachment', 'source_incomplete')
+                    image_ids.append(description['attachment_id'])
+            for identifier in image_ids:
+                try:
+                    item = self.materials.metadata_image(identifier)
+                    record['materials'].append(dict(ref=dict(kind='image', id=identifier, sha256=item['sha256']),
+                        origin='attachment', **label(item)))
+                except (ValueError, OSError, KeyError, AttributeError):
+                    missing(record, 'image', identifier, 'attachment', 'metadata_unavailable')
+        for run in snapshot['runs']:
+            if not identity(run['id']): raise ValueError('共同对话的任务关联无法核对。')
+            by_run[run['id']] = run
+            for field in ('user_message_id', 'message_id'):
+                record = by_id.get(run[field])
+                if record is not None:
+                    if record['run_id'] not in (None, run['id']): raise ValueError('共同对话的任务关联不唯一。')
+                    record['run_id'] = run['id']
+            record = by_id.get(run['user_message_id'])
+            if record is None or record['role'] != 'user': raise ValueError('文件输入的消息归属无法核对。')
+            try:
+                intent = validate_intent(json.loads(run['task_intent']))
+                frozen = validate_inputs(json.loads(run['file_inputs'] or '[]'), intent)
+                if not frozen: continue
+                if not run['context_valid']: raise ValueError
+                refs = json.loads(run['file_input_refs']) if run['file_input_refs'] is not None else []
+                if type(refs) is not list: raise ValueError
+                for item in frozen:
+                    matches = [ref for ref in refs if type(ref) is dict and ref.get('id') == item['id']]
+                    if any(ref.get('sha256', item['sha256']) != item['sha256'] for ref in matches):
+                        missing(record, 'text', item['id'], 'input', 'metadata_changed'); continue
+                    scopes = {ref.get('source_chat_id', ref.get('chat_id', chat_id)) for ref in matches} or {chat_id}
+                    if len(scopes) != 1: missing(record, 'text', item['id'], 'input', 'metadata_changed'); continue
+                    text_material(record, item, 'input', next(iter(scopes)))
+            except (ValueError, TypeError, KeyError):
+                missing(record, 'text', None, 'input', 'source_incomplete')
+        for artifact in files['artifacts']:
+            run = by_run.get(artifact['run_id'])
+            record = by_id.get(run['message_id']) if run else None
+            if (artifact['chat_id'] != chat_id or record is None or record['role'] != 'assistant'
+                    or run['status'] != 'completed'):
+                raise ValueError('文件成果的消息归属无法核对。')
+            text_material(record, artifact, 'output', chat_id)
+        current = self.store.changes(chat_id)['selected']
+        if (current is None or current['revision'] != snapshot['revision']
+                or self.file_tasks.revision(chat_id) != files['revision']):
+            raise native_handoff.HandoffConflict('聊天或成果正在变化，请重新读取材料清单。')
+        records = [record for record in records if record['materials'] or record['unavailable']]
+        if len(records) > 512 or sum(len(r['materials']) + len(r['unavailable']) for r in records) > 2048:
+            raise ValueError('材料清单超过一次读取容量，没有截断返回。')
+        result = dict(workspace_id=self.workspace_id, chat_id=chat_id, scope='common_chat_materials',
+                    source_revision=snapshot['revision'], file_revision=files['revision'],
+                    content_verification='not_performed', complete=not any(r['unavailable'] for r in records), records=records)
+        if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')) > 512 * 1024:
+            raise ValueError('材料清单超过一次读取容量，没有截断返回。')
+        return result
+
+    @admitted_service
     def native_handoff(self, chat_id, body=None):
         # Independently frozen chat and artifact metadata, guarded by both
         # revisions. Only selected materials cause full file reads.
@@ -3656,7 +3958,11 @@ class Handler(BaseHTTPRequestHandler):
                 or path.startswith('/api/management/ai-profiles/')
                 or path.startswith('/api/management/ai-profile-creations/')
                 or path == '/api/management/memory-profiles'
+                or path == '/api/management/native-memory'
                 or path == '/api/management/native-chat-configuration'
+                or path == '/api/management/native-chat-local-configuration'
+                or path == native_origins.PATH
+                or path == draft_configuration.PATH
                 or path == '/api/management/native-chat-memory-configuration'
                 or path == '/api/management/memory-profile-operations'
                 or path.startswith('/api/management/memory-connections/')
@@ -3667,11 +3973,24 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, action, status=200):
         selection_prefix = {
             '/api/management/native-chat-configuration': 'native_chat_selection_',
+            '/api/management/native-chat-local-configuration': 'native_chat_selection_',
+            native_origins.PATH: 'native_chat_origin_',
+            draft_configuration.PATH: 'draft_configuration_',
             '/api/management/native-chat-memory-configuration': 'native_chat_memory_selection_',
         }.get(urlsplit(self.path).path)
         try:
             result = action()
             self._reply(status, result)
+        except native_origins.NativeOriginError as error:
+            payload = {'workspace_id': self.service.workspace_id, 'error': str(error), 'code': error.code}
+            if error.accepted is not None:
+                payload['accepted'] = error.accepted
+            self._reply(error.status, payload)
+        except draft_configuration.DraftConfigurationError as error:
+            payload = {'workspace_id': self.service.workspace_id, 'error': str(error), 'code': error.code}
+            if error.accepted is not None:
+                payload['accepted'] = error.accepted
+            self._reply(error.status, payload)
         except SpecialistHTTPError as error:
             if selection_prefix:
                 payload = error.payload()
@@ -3837,6 +4156,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.service.dsh_native_request('GET', path, query=route.query)
             if path == '/api/status':
                 return self.service.status()
+            if path == '/api/history/source-changes':
+                self._require_bodyless_get('history_source_changes_invalid', '历史来源')
+                if route.query:
+                    raise ValueError('历史来源状态不接受查询参数。')
+                return self.service.history_source_changes()
             handoff = re.fullmatch(r'/api/chats/([^/]+)/native-handoff', path)
             if handoff:
                 if route.query:
@@ -3967,12 +4291,31 @@ class Handler(BaseHTTPRequestHandler):
                 if set(fields) != {'agent', 'chat_id'} or any(len(values) != 1 for values in fields.values()):
                     raise ValueError('请只指定一个Agent和一个准确的对话编号。')
                 return self.service.native_chat_configuration(fields['agent'][0], fields['chat_id'][0])
+            if path == native_origins.PATH:
+                self._require_bodyless_get('native_chat_origin_invalid', '原生接续来源')
+                fields = parse_qs(route.query, keep_blank_values=True, strict_parsing=True, errors='strict')
+                if set(fields) != {'agent', 'chat_id'} or any(len(values) != 1 for values in fields.values()):
+                    raise native_origins.NativeOriginError()
+                return self.service.native_chat_origin(fields['agent'][0], fields['chat_id'][0])
             if path == '/api/management/native-chat-memory-configuration':
                 self._require_bodyless_get('native_chat_memory_selection_invalid', '原生下轮共享记忆')
                 fields = parse_qs(route.query, keep_blank_values=True, strict_parsing=True)
                 if set(fields) != {'agent', 'chat_id'} or any(len(values) != 1 for values in fields.values()):
                     raise ValueError('请只指定一个Agent和一个准确的对话编号。')
                 return self.service.native_chat_memory_configuration(fields['agent'][0], fields['chat_id'][0])
+            if path == '/api/management/native-memory':
+                self._require_bodyless_get('native_memory_invalid', '原有记忆来源')
+                if route.query:
+                    raise ValueError('原有记忆来源清单不接受查询参数。')
+                return self.service.managed_native_memory_sources()
+            if path == '/api/management/chat-materials':
+                self._require_bodyless_get('chat_materials_invalid', '对话材料清单')
+                fields = parse_qs(route.query, keep_blank_values=True, strict_parsing=True)
+                if (set(fields) not in ({'chat_id'}, {'chat_id', 'kind', 'agent'})
+                        or any(len(values) != 1 for values in fields.values())
+                        or 'kind' in fields and fields['kind'] != ['native']):
+                    raise ValueError('请指定一段共同对话，或明确原生 Agent 和对话编号。')
+                return self.service.chat_materials(**{key: values[0] for key, values in fields.items()})
             if path == '/api/management/memory-profiles':
                 self._require_bodyless_get('memory_profile_invalid', '记忆配置目录')
                 if route.query:
@@ -4006,6 +4349,16 @@ class Handler(BaseHTTPRequestHandler):
                 if route.query:
                     native_model_management.invalid()
                 return self.service.refresh_specialist_model_catalog()
+            if path == native_model_management.DSH_GUIDE_PATH:
+                self._require_bodyless_get('native_model_catalog_invalid', '模型目录')
+                if route.query:
+                    native_model_management.invalid()
+                return self.service.dsh_model_guide()
+            if path == model_guide_history.PATH:
+                self._require_bodyless_get('model_guide_history_invalid', '模型指南记录')
+                if route.query:
+                    raise ValueError('模型指南记录不接受查询参数。')
+                return self.service.model_guide_history()
             if path.startswith('/api/management/ai-profile-creations/'):
                 if route.query:
                     raise ValueError('创建回执只接受固定请求编号。')
@@ -4093,9 +4446,13 @@ class Handler(BaseHTTPRequestHandler):
                                or raw_path == '/api/native-materials/preview')
         specialist_mutation = specialist_mutation or raw_path.startswith('/api/native-history/')
         specialist_mutation = specialist_mutation or raw_path == '/api/management/native-chat-configuration'
+        specialist_mutation = specialist_mutation or raw_path == '/api/management/native-chat-local-configuration'
+        specialist_mutation = specialist_mutation or raw_path == native_origins.PATH
+        specialist_mutation = specialist_mutation or raw_path == draft_configuration.PATH
         specialist_mutation = specialist_mutation or raw_path == '/api/management/native-chat-memory-configuration'
         specialist_mutation = specialist_mutation or raw_path == '/api/markdown-chats/move'
         specialist_mutation = specialist_mutation or raw_path == '/api/management/native-tasks'
+        specialist_mutation = specialist_mutation or raw_path == '/api/management/native-memory'
         if not self._guard(known_unsent=specialist_mutation):
             return
 
@@ -4114,8 +4471,12 @@ class Handler(BaseHTTPRequestHandler):
             external = path == external_work.PATH
             native_history = path.startswith('/api/native-history/')
             native_management = path in ('/api/management/native-chat-configuration',
+                                         '/api/management/native-chat-local-configuration',
+                                         native_origins.PATH,
+                                         draft_configuration.PATH,
                                          '/api/management/native-chat-memory-configuration',
-                                         native_model_management.PREPARATION_PATH)
+                                         native_model_management.PREPARATION_PATH, model_guide_history.PATH,
+                                         '/api/management/native-memory')
             specialist = native_history or dsh_chat or claude_chat or hermes_chat or pi_chat or native_chat or path == '/api/specialist' or path.startswith('/api/specialist/')
             # This boundary finishes all local body/CSRF checks before any
             # holder method. Its rejection applies to this attempt only.
@@ -4213,6 +4574,18 @@ class Handler(BaseHTTPRequestHandler):
                 if self.command != 'POST' or route.query:
                     raise ValueError('请使用原生下轮配置的固定POST入口。')
                 return self.service.select_native_chat_configuration(body)
+            if path == '/api/management/native-chat-local-configuration':
+                if self.command != 'POST' or route.query:
+                    raise ValueError('请使用本对话细调的固定POST入口。')
+                return self.service.save_native_chat_local_configuration(body)
+            if path == native_origins.PATH:
+                if self.command != 'POST' or route.query:
+                    raise native_origins.NativeOriginError()
+                return self.service.save_native_chat_origin(body)
+            if path == draft_configuration.PATH:
+                if self.command != 'POST' or route.query:
+                    raise draft_configuration.DraftConfigurationError()
+                return self.service.apply_draft_configuration(body)
             if path == '/api/management/native-chat-memory-configuration':
                 if self.command != 'POST' or route.query:
                     raise ValueError('请使用原生下轮共享记忆的固定POST入口。')
@@ -4221,10 +4594,18 @@ class Handler(BaseHTTPRequestHandler):
                 if self.command != 'POST' or route.query:
                     native_model_management.invalid()
                 return self.service.prepare_native_model_catalog(body)
+            if path == model_guide_history.PATH:
+                if self.command != 'POST' or route.query:
+                    raise ValueError('请手动保存本次模型指南。')
+                return self.service.save_model_guide_history(body)
             if path == status_check_service.PATH:
                 if self.command != 'POST' or route.query:
                     raise ValueError('请手动发起状态检查。')
                 return self.service.start_status_check(body)
+            if path == '/api/management/native-memory':
+                if self.command != 'POST' or route.query:
+                    raise ValueError('请使用原有记忆接入的固定POST入口。')
+                return self.service.attach_managed_native_memory(body)
             if path == '/api/management/memory-profile-operations':
                 if self.command != 'POST' or route.query:
                     raise ValueError('请使用记忆配置管理的固定操作入口。')

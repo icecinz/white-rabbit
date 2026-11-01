@@ -52,11 +52,17 @@
     return { material_refs: expected, images, files, ...(typeof value.context_text === "string" ? { context_text: value.context_text } : {}) };
   }
   function context(value) {
-    if (typeof value !== "string" || !value.startsWith(contextPrefix)) return null;
+    if (!text(value) || !value.startsWith(contextPrefix) || new TextEncoder().encode(value).length > 900 * 1024) return null;
     try {
-      const data = JSON.parse(value.slice(contextPrefix.length));
-      if (!object(data) || Object.keys(data).sort().join(",") !== "files,images,kind,schema_version" || data.kind !== "native_materials" || data.schema_version !== 1 || !Array.isArray(data.images) || data.images.length || !Array.isArray(data.files) || !data.files.length) return null;
-      const selected = refs(data.files.map(file => ({ kind: "text", id: file.id, sha256: file.sha256, ...(file.source_chat_id === undefined ? {} : { source_chat_id: file.source_chat_id }) })));
+      const raw = value.slice(contextPrefix.length), data = JSON.parse(raw);
+      // The existing native material frame is compact JSON. Round-trip equality
+      // rejects duplicate keys or a trailing segment; no paths are resolved.
+      if (JSON.stringify(data) !== raw || !object(data) || Object.keys(data).sort().join(",") !== "files,images,kind,schema_version" || data.kind !== "native_materials" || data.schema_version !== 1
+          || !Array.isArray(data.images) || !Array.isArray(data.files) || !data.images.length && !data.files.length
+          || data.images.some(row => !object(row) || Object.keys(row).some(key => !["id", "kind", "mime", "name", "size_bytes", "width", "height", "status", "source", "sha256"].includes(key)))
+          || data.files.some(row => !object(row) || Object.keys(row).some(key => !["id", "name", "sha256", "size_bytes", "source", "text", "source_chat_id"].includes(key)))) return null;
+      const selected = refs([...data.images.map(image => ({ kind: "image", id: image.id, sha256: image.sha256 })),
+        ...data.files.map(file => ({ kind: "text", id: file.id, sha256: file.sha256, ...(file.source_chat_id === undefined ? {} : { source_chat_id: file.source_chat_id }) }))]);
       return preview(selected, data);
     } catch (_) { return null; }
   }

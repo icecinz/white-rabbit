@@ -149,15 +149,23 @@ class WorkStatusTests(unittest.TestCase):
             holder.observe_work.side_effect = codex_observe
         self.assertTrue(status.snapshot(service)['complete'])
 
-    def test_busy_registry_or_owner_is_partial_and_never_returns_ready_for_that_agent(self):
+    def test_busy_registry_is_unavailable_but_busy_owner_is_an_unknown_slot(self):
         for target in ('registry', 'owner'):
             service, entries = service_fixture()
             _identity, manager, owner, _holder = entries['codex']
             with held_elsewhere(manager._lock if target == 'registry' else owner.lock):
                 result = status.snapshot(service)
             self.assertFalse(result['complete'])
-            self.assertEqual(self.agent(result, 'codex')['reason'], 'lock_busy')
-            self.assertEqual({row['agent'] for row in result['works']}, {'pi', 'hermes', 'claude', 'dsh'})
+            if target == 'registry':
+                self.assertEqual(self.agent(result, 'codex')['reason'], 'lock_busy')
+                self.assertFalse(any(row['agent'] == 'codex' for row in result['works']))
+            else:
+                self.assertEqual(self.agent(result, 'codex')['reason'], 'partial_observation')
+                row = next(row for row in result['works'] if row['agent'] == 'codex')
+                self.assertFalse(row['complete'])
+                self.assertEqual((row['status'], row['reason']), ('unknown', 'lock_busy'))
+            self.assertEqual({row['agent'] for row in result['works'] if row['agent'] != 'codex'},
+                             {'pi', 'hermes', 'claude', 'dsh'})
 
     def test_replaced_registry_or_owner_or_holder_invalidates_sample(self):
         for replacement in ('manager', 'owner', 'holder', 'slot'):
@@ -183,6 +191,90 @@ class WorkStatusTests(unittest.TestCase):
             result = status.snapshot(service)
             self.assertEqual(self.agent(result, 'codex')['reason'], 'connection_changed')
             self.assertFalse(any(row['agent'] == 'codex' for row in result['works']))
+
+    def test_one_unknown_slot_does_not_hide_a_separately_proven_codex_work(self):
+        for unknown_role in ('specialist', 'chat'):
+            with self.subTest(unknown_role=unknown_role):
+                service, entries = service_fixture()
+                _identity, manager, _owner, healthy = entries['codex']
+                healthy.value.update(status='running')
+                unavailable = Holder(raw(complete=False, reason='turn_unconfirmed', status='unknown',
+                                         connection_state='ready', epoch=None, native_session_id=None,
+                                         pending_requests=None))
+                if unknown_role == 'specialist':
+                    service.specialist = unavailable
+                else:
+                    manager._owners[str(uuid.uuid4())] = SimpleNamespace(
+                        holder=unavailable, lock=threading.RLock(), reserved=True)
+                result = status.snapshot(service)
+                self.assertFalse(result['complete'])
+                self.assertEqual(self.agent(result, 'codex')['reason'], 'partial_observation')
+                rows = [row for row in result['works'] if row['agent'] == 'codex']
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(sum(row['complete'] and row['status'] == 'running' for row in rows), 1)
+                self.assertEqual(sum(not row['complete'] and row['status'] == 'unknown' for row in rows), 1)
+                self.assertTrue(any(row['role'] == unknown_role and row['reason'] == 'turn_unconfirmed'
+                                    for row in rows))
+
+    def test_unknown_then_ready_needs_a_second_proven_snapshot_for_that_slot(self):
+        service, entries = service_fixture()
+        _identity, _manager, _owner, healthy = entries['codex']
+        healthy.value.update(status='running')
+        service.specialist = holder = Holder()
+        unknown = dict(holder.value, complete=False, reason='turn_unconfirmed', status='unknown')
+        holder.observe_work.side_effect = [unknown, deepcopy(holder.value)]
+        result = status.snapshot(service)
+        rows = [row for row in result['works'] if row['agent'] == 'codex']
+        self.assertEqual(self.agent(result, 'codex')['reason'], 'partial_observation')
+        self.assertEqual(next(row for row in rows if row['role'] == 'chat')['status'], 'running')
+        specialist = next(row for row in rows if row['role'] == 'specialist')
+        self.assertFalse(specialist['complete'])
+        self.assertEqual(specialist['status'], 'unknown')
+
+    def test_a_busy_owner_does_not_hide_another_stable_codex_connection(self):
+        service, entries = service_fixture()
+        _identity, manager, _owner, healthy = entries['codex']
+        healthy.value.update(status='running')
+        unavailable = Holder()
+        owner = SimpleNamespace(holder=unavailable, lock=threading.RLock(), reserved=True)
+        manager._owners[str(uuid.uuid4())] = owner
+        with held_elsewhere(owner.lock):
+            result = status.snapshot(service)
+        rows = [row for row in result['works'] if row['agent'] == 'codex']
+        self.assertEqual(self.agent(result, 'codex')['reason'], 'partial_observation')
+        self.assertEqual({(row['status'], row['reason']) for row in rows},
+                         {('running', None), ('unknown', 'lock_busy')})
+        unavailable.observe_work.assert_not_called()
+
+    def test_known_identity_changes_still_invalidate_the_whole_agent(self):
+        service, entries = service_fixture()
+        holder = entries['codex'][3]
+        first = dict(holder.value, status='running')
+        holder.observe_work.side_effect = [first, dict(first, native_session_id=None)]
+        result = status.snapshot(service)
+        self.assertEqual(self.agent(result, 'codex')['reason'], 'connection_changed')
+        self.assertFalse(any(row['agent'] == 'codex' for row in result['works']))
+
+    def test_known_identity_conflict_on_an_unknown_slot_invalidates_the_agent(self):
+        service, entries = service_fixture()
+        entries['codex'][3].value.update(status='running')
+        service.specialist = holder = Holder()
+        unknown = dict(holder.value, complete=False, reason='turn_unconfirmed', status='unknown')
+        holder.observe_work.side_effect = [unknown, dict(unknown, epoch='b' * 32)]
+        result = status.snapshot(service)
+        self.assertEqual(self.agent(result, 'codex')['reason'], 'connection_changed')
+        self.assertFalse(any(row['agent'] == 'codex' for row in result['works']))
+
+    def test_invalid_specialist_payload_still_discards_all_codex_work(self):
+        service, entries = service_fixture()
+        entries['codex'][3].value.update(status='running')
+        service.specialist = holder = Holder()
+        holder.observe_work.side_effect = None
+        holder.observe_work.return_value = dict(holder.value, private_transcript='PRIVATE_SENTINEL')
+        result = status.snapshot(service)
+        self.assertEqual(self.agent(result, 'codex')['reason'], 'invalid_observation')
+        self.assertFalse(any(row['agent'] == 'codex' for row in result['works']))
+        self.assertNotIn('PRIVATE_SENTINEL', str(result))
 
     def test_slot_limit_invalid_reserved_registry_and_closing_are_bounded(self):
         for mutation, reason in (('limit', 'connection_limit'), ('reserved', 'invalid_observation'), ('closing', 'closing')):
@@ -226,8 +318,16 @@ class WorkStatusTests(unittest.TestCase):
         self.assertTrue(self.agent(result, 'pi')['complete'])
 
     def test_unavailable_and_poisoned_payloads_are_sanitized_not_idle(self):
-        for value in (raw(complete=False, reason='cache_unavailable', status='unknown'),
-                      dict(raw(), transcript='private body'), raw(native_session_id='/private/token'),
+        service, entries = service_fixture()
+        entries['codex'][3].observe_work.side_effect = None
+        entries['codex'][3].observe_work.return_value = raw(
+            complete=False, reason='cache_unavailable', status='unknown')
+        result = status.snapshot(service)
+        self.assertEqual(self.agent(result, 'codex')['reason'], 'partial_observation')
+        row = next(row for row in result['works'] if row['agent'] == 'codex')
+        self.assertFalse(row['complete'])
+        self.assertEqual(row['status'], 'unknown')
+        for value in (dict(raw(), transcript='private body'), raw(native_session_id='/private/token'),
                       raw(reason='private message with spaces'), raw(pending_requests=True),
                       raw(epoch='private'), raw(complete=1)):
             service, entries = service_fixture()
@@ -266,8 +366,10 @@ class WorkStatusTests(unittest.TestCase):
                                        connection_state='unknown', epoch=None, native_session_id=None,
                                        pending_requests=None))
         result = status.snapshot(service)
-        self.assertEqual(self.agent(result, 'codex')['reason'], 'lock_busy')
-        self.assertFalse(any(row['agent'] == 'codex' for row in result['works']))
+        self.assertEqual(self.agent(result, 'codex')['reason'], 'partial_observation')
+        rows = [row for row in result['works'] if row['agent'] == 'codex']
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row['status'] == 'unknown' for row in rows))
 
 
 if __name__ == '__main__':

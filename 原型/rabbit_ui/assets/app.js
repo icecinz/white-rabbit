@@ -33,7 +33,8 @@
     selected: { type: "new", id: null }, chat: null, historySession: null, historyMessages: [], historyReady: false,
     historyMessageTotal: 0, historyMessageNext: null, historyMessagePrev: null, historyMessageStart: 0,
     historyMatch: null, historyPageLoading: false, run: null, chatMessages: [], exporting: false, rawMessages: false,
-    backend: "codex", model_id: "", sending: false, creating: false, cancelling: false,
+    backend: "codex", model_id: "", homeNativeChoice: null, homeConfiguration: null, homeNativeHandoff: null, homeConfigurationReceipt: null, homeTextCompatibility: false, nativeHomeSending: false, sending: false, creating: false, cancelling: false,
+    continuations: [], currentContinuation: null,
     openVersion: 0, pollTimer: null, searchTimer: null, toastTimer: null,
     drafts: new Map(), draftAttachments: new Map(), taskIntents: new Map(), task_intent: { mode: "chat", artifact_ids: [] }, fileMaterialChecks: new Map(), fileMaterialJobs: new Map(), fileMaterialError: "", attachment_ids: [], materialUploads: new Map(), materialError: "", messageSignature: "", transientError: "",
     pendingSubmission: null, pendingSubmissions: new Map(), newCreationId: null, historyCreationIds: new Map(), historyBackendChoices: new Map(), historyModelChoices: new Map(), historyContinuationIds: new Map(), historyChoices: new Map(),
@@ -47,8 +48,13 @@
     profile_snapshot: null, profileChoices: new Map(), profileSelection: null, profileSelectionSync: null, profileSelectionIntent: false, profilesInventory: null, profilesRevision: null, profileNotice: "", profileLegacy: false, memoryChatCreation: null, memoryRecallError: false,
   };
   ui.input.placeholder = "在此输入";
+  window.RabbitComposerShell?.mount({ root: $("composer-form"), status: $("conversation-config-status"),
+    choices: document.querySelector(".profile-choice-row"), input: ui.input,
+    label: document.querySelector('label[for="message-input"]'),
+    materials: [$("image-input"), $("composer-materials"), $("text-file-input"), $("composer-files"), $("file-material-status"), $("material-upload-status"), $("image-model-status")],
+    support: $("composer-more"), send: ui.send, hint: ui.hint });
   for (const control of [ui.send, $("new-chat"), $("refresh-history")]) control.dataset.controlInterface = "ai";
-  let browserStore = null, browserRestoreSnapshot = null;
+  let browserStore = null, browserRestoreSnapshot = null, profileCatalogReadback = 0;
   $("brand-agents").textContent = agents.ids.map(id => agents.labels[id]).join(" · ");
   for (const id of agents.ids) { const item = document.createElement("button"); item.type = "button"; item.className = "source-filter"; item.dataset.agent = id; item.textContent = agents.labels[id]; item.setAttribute("aria-pressed", "false"); $("source-filters").append(item); }
   const sourceFilters = () => [...document.querySelectorAll(".source-filter")].filter(n => n.dataset.agent === "all" || agents.has(n.dataset.agent));
@@ -68,24 +74,12 @@
   }) : null;
   const profiles = window.RabbitProfiles ? window.RabbitProfiles.create({ api, root: $("profile-picker"), getWorkspace: () => state.status?.workspace_id || "", getSelection: profileView, onChoose: chooseProfile,
     getNativeAgents: () => nativeHandoffTargets().filter(item => item.enabled).map(item => ({ agent: item.agent, label: item.label })),
-    onChooseNative: async (agent, view, isCurrent, savedProfile = null) => {
-      if (view !== profileView().view || state.page !== "conversations" || state.selected.type !== "new" || !isCurrent()) return false;
-      let source, initialDraft;
-      const current = () => isCurrent() && sameNativeDraft(source);
-      try {
-        source = captureNativeDraft("new");
-        initialDraft = await prepareNativeDraft(agent, source, current);
-        if (!current()) return false;
-        if (initialDraft && saveDraft() !== true) throw Error("浏览器不能保存当前草稿，尚未新建；文字和材料保留。");
-        if (!initialDraft) saveDraft();
-      } catch (error) { error.nativeCreationUnsent = true; throw error; }
-      const opened = await nativeChats?.createNew(agent, current, savedProfile, initialDraft);
-      if (!opened) throw Error("新建结果尚未确认，请到设置的 Agent 会话核对；原文字和材料保留在首页，没有发送。");
-      if (initialDraft) clearNativeDraft(source);
-      profiles.close(false);
-      return true;
-    },
-    onManage: kind => showPage("management", kind === "memory" ? "memory-profiles" : "ai-profiles"), onMemoryManual: openManual, onCatalog: acceptProfileCatalog, getInventory: () => state.management, getCapabilities: () => state.status?.profiles || {} }) : null;
+    onChooseNative: chooseHomeConfiguration,
+    onLocalConfiguration: (parameters, view, retry) => state.page === "native-chats" ? nativeChats?.saveLocalConfiguration?.(parameters, view, retry) ?? false : saveHomeLocalConfiguration(parameters, view),
+    onManage: (kind, named) => {
+      showPage("management", kind === "memory" ? "memory-profiles" : "ai-profiles");
+      if (named) try { profiles.editNamed(kind, named.id, named.revision); } catch (error) { toast(userError(error, "配置尚未打开，原编辑保留。")); }
+    }, onAskSpecialist: askSpecialistForConfiguration, canAskSpecialist: specialistEnabled, onMemoryManual: openManual, onCatalog: acceptProfileCatalog, getInventory: () => state.management, getCapabilities: () => state.status?.profiles || {} }) : null;
   const activeRunStates = new Set(["queued", "running", "cancelling"]);
   const backendLabels = agents.labels;
   const isImCodesPreview = window.location.hostname === "app.im.codes" && /^\/api\/server\/[^/]+\/local-web\/[^/]+(?:\/|$)/.test(window.location.pathname);
@@ -222,7 +216,66 @@
     return { mode: !text && window.RabbitNativeAdoption && nativeAdoptionEnabled(state.selected.agent) ? "native" : "text", memory_explicit: false };
   }
   function historyUsesNative() { return historyChoice()?.mode === "native"; }
+  function homeNativeChoice() { return state.status?.demo_mode === true ? null : state.selected.type === "new" ? state.homeNativeChoice : null; }
+  function nextHomeConfiguration(fresh = false) {
+    const previous = fresh ? null : state.homeConfiguration;
+    if (previous) {
+      if (!Number.isSafeInteger(previous.revision + 1)) throw Error("这份首页配置的版本已不能继续增加，请保留草稿。");
+      return { draft_id: previous.draft_id, revision: previous.revision + 1 };
+    }
+    const id = crypto.randomUUID?.();
+    if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id || "")) throw Error("浏览器不能保存稳定的草稿编号，原稿保留。");
+    return { draft_id: id, revision: 1 };
+  }
+  function homeLocalSupported(parameters) {
+    if (!parameters || Object.keys(parameters).length !== 2 || !Object.hasOwn(parameters, "model_id") || !Object.hasOwn(parameters, "reasoning_effort")
+        || !agents.validModelId(parameters.model_id, "codex")) return false;
+    const catalog = profiles?.catalog(), source = catalog?.workspace_id === state.status?.workspace_id && catalog?.native_profile_capabilities?.codex;
+    if (!source?.enabled || !source.catalogue_available) return false;
+    if (!parameters.model_id) return parameters.reasoning_effort === null;
+    const model = source.models.find(row => row.id === parameters.model_id);
+    return !!model && (parameters.reasoning_effort === null || model.explicit_effort_supported === true && model.supported_efforts.includes(parameters.reasoning_effort));
+  }
+  function homeLocalView() {
+    const choice = homeNativeChoice();
+    if (choice?.agent !== "codex" || !choice.profile) return null;
+    const base = choice.local_base || choice.profile, latest = profiles?.get(base.id), identity = state.homeConfiguration;
+    const catalog = profiles?.catalog(), source = catalog?.workspace_id === state.status?.workspace_id && catalog?.native_profile_capabilities?.codex;
+    const available = !!identity && latest?.native_available === true && sameProfile(toProfileSnapshot(latest, { id: "none" }), toProfileSnapshot(base, { id: "none" }))
+      && !!source?.enabled && !!source.catalogue_available;
+    return { scope: "home", workspace_id: state.status?.workspace_id || "", draft_id: identity?.draft_id || null, chat_id: null, profile: choice.profile,
+      available, pending: null, reason: available ? "" : "先选择一份已保存配置，并核对 Codex 模型目录" };
+  }
+  function saveHomeLocalConfiguration(parameters, view) {
+    const choice = homeNativeChoice(), current = profileView();
+    if (state.page !== "conversations" || !choice || current.view !== view || current.busy || !homeLocalView()?.available || !homeLocalSupported(parameters)) return false;
+    if (!writeHomeConfiguration(parameters)) throw Error("浏览器不能保存首页配置，原参数与草稿保留。");
+    return true;
+  }
+
+  function homeChoice(profile, memory, agent = agents.backendOfInstance(profile.agent_instance_id)) {
+    return { agent, profile: profile && window.RabbitProfiles.profile(profile, false), memory: window.RabbitProfiles.memoryProfile(memory, false) };
+  }
+  async function chooseHomeConfiguration(agent, view, isCurrent, savedProfile = null, compatibility = false) {
+    if (view !== profileView().view || state.page !== "conversations" || state.selected.type !== "new" || state.nativeHomeSending || !isCurrent()) return false;
+    if (!compatibility && !nativeHandoffTargets().some(item => item.agent === agent && item.enabled)) return false;
+    const profile = savedProfile && window.RabbitProfiles.profile(savedProfile, false);
+    if (profile && profile.agent_instance_id !== "local/" + agent) return false;
+    const previous = { identity: state.homeConfiguration, choice: state.homeNativeChoice, backend: state.backend, model: state.model_id, compatibility: state.homeTextCompatibility, snapshot: state.profile_snapshot, remembered: state.profileChoices.get("__new__"), hasRemembered: state.profileChoices.has("__new__") };
+    const memory = draftMemoryProfile(), identity = nextHomeConfiguration();
+    state.homeNativeChoice = compatibility ? null : homeChoice(profile, memory, agent); state.homeTextCompatibility = compatibility;
+    state.homeConfiguration = identity;
+    state.profile_snapshot = profile ? toProfileSnapshot(profile, memory) : null;
+    state.backend = agent; state.model_id = profile?.model_id || ""; state.backendChoiceVersion++;
+    if (saveDraft() !== true) {
+      state.homeConfiguration = previous.identity; state.homeNativeChoice = previous.choice; state.backend = previous.backend; state.model_id = previous.model; state.homeTextCompatibility = previous.compatibility; state.profile_snapshot = previous.snapshot;
+      if (previous.hasRemembered) state.profileChoices.set("__new__", previous.remembered); else state.profileChoices.delete("__new__");
+      updateComposer(); throw Error("浏览器不能保存所选配置，原选择和草稿保留。");
+    }
+    invalidateContextPreview(); state.profileNotice = ""; updateComposer(); return true;
+  }
   function draftMemoryProfile() {
+    if (homeNativeChoice()) return homeNativeChoice().memory;
     const choice = historyChoice();
     return choice?.memory_explicit && Object.hasOwn(choice, "memory_profile") ? choice.memory_profile : state.profile_snapshot?.memory_profile || { id: "none" };
   }
@@ -230,11 +283,17 @@
   function sameProfile(a, b) { if (a == null || b == null) return a == null && b == null; return window.RabbitProfiles?.sameSnapshot(a, b) === true; }
   function toProfileSnapshot(row, memory = state.profile_snapshot?.memory_profile || { id: "none" }) { return profileSnapshot({ schema_version: 2, ai_profile: row, memory_profile: memory, used_memory_references: [] }); }
   function profileBody(value = state.profile_snapshot) { const snap = profileSnapshot(value); return snap ? { ai_profile_id: snap.ai_profile.id, ai_profile_revision: snap.ai_profile.revision, memory_profile_id: snap.memory_profile.id, ...(snap.memory_profile.id === "none" ? {} : { memory_profile_revision: snap.memory_profile.revision }) } : {}; }
-  function profileView() { return { ai_profile_id: state.profile_snapshot?.ai_profile.id || null, memory_profile_id: draftMemoryProfile().id, existing: state.selected.type !== "new" || !!state.chatMessages.length, native_history: historyUsesNative(), view: `${state.page}:${state.openVersion}:${state.contextNavigationVersion}:${draftKey()}`, busy: state.sending || state.creating || state.backendChoosing, notice: state.profileNotice }; }
+  function profileView() {
+    if (state.page === "continuation") return continuations?.getComposerView?.() || { view: "continuation-unavailable", busy: true };
+    const native = state.page === "native-chats" && nativeChats?.getComposerView?.();
+    if (native) return native;
+    const home = homeNativeChoice(), local = homeLocalView();
+    return { ...(local ? { native_agent: "codex", local_configuration: local } : {}), ai_profile_id: home ? home.profile?.id || null : state.profile_snapshot?.ai_profile.id || null, memory_profile_id: draftMemoryProfile().id, existing: state.selected.type !== "new" || !!state.chatMessages.length, native_history: historyUsesNative() || !!home, view: `${state.page}:${state.openVersion}:${state.contextNavigationVersion}:${draftKey()}:${state.selected.type === "new" ? state.homeConfiguration?.revision || 0 : ""}`, busy: state.sending || state.creating || state.backendChoosing || state.nativeHomeSending, notice: state.profileNotice };
+  }
   function migratedProfile(backend = state.backend, modelId = state.model_id) { return state.profilesInventory?.ai_profiles.find(row => row.agent_instance_id === agents.instanceId(backend) && row.model_id === modelId && row.reasoning_effort === null) || null; }
   function adoptProfile(value, { frozen = false, remember = false } = {}) {
     let snap = profileSnapshot(value);
-    if (snap && !frozen) {
+    if (snap && !frozen && state.selected.type !== "new") {
       const latest = profiles?.get(snap.ai_profile.id), choice = historyChoice();
       const memory = choice?.memory_explicit && Object.hasOwn(choice, "memory_profile") ? choice.memory_profile
         : snap.memory_profile.id === "none" ? { id: "none" } : profiles?.getMemory(snap.memory_profile.id) || snap.memory_profile;
@@ -242,6 +301,11 @@
     }
     state.profile_snapshot = snap; state.profileLegacy = !snap;
     if (snap) { state.backend = agents.backendOfInstance(snap.ai_profile.agent_instance_id); state.model_id = snap.ai_profile.model_id; }
+    if (snap && state.selected.type === "new" && !state.homeTextCompatibility) {
+      const next = homeChoice(snap.ai_profile, snap.memory_profile);
+      if (!state.homeConfiguration || JSON.stringify(state.homeNativeChoice) !== JSON.stringify(next)) state.homeConfiguration = nextHomeConfiguration();
+      state.homeNativeChoice = next;
+    }
     if (remember) state.profileChoices.set(draftKey(), snap);
   }
   const sameProfileSelection = (a, b) => !!a && !!b && a.revision === b.revision && a.ai_profile_id === b.ai_profile_id && a.memory_profile_id === b.memory_profile_id;
@@ -279,15 +343,19 @@
     if (!data) return;
     const previousIntent = state.profile_snapshot;
     state.profilesInventory = data; state.profilesRevision = data.revision;
-    if (!(state.selected.type === "chat" && (state.profileSelectionSync || commonProfileBusy()))) {
+    if (profileCatalogReadback && !changed) { profiles?.selectChanged(); return; }
+    if (!homeNativeChoice() && !(state.selected.type === "chat" && (state.profileSelectionSync || commonProfileBusy()))) {
       if (state.profile_snapshot) adoptProfile(state.profile_snapshot);
       else if (!state.profileLegacy && !browserRestoreSnapshot) { const row = state.selected.type === "new" ? profiles?.get(data.default_ai_profile_id) : migratedProfile(); if (row) adoptProfile(toProfileSnapshot(row, { id: "none" })); }
     }
-    if (!(state.selected.type === "chat" && (state.profileSelectionSync || commonProfileBusy())) && changed && (kind === "ai" ? state.profile_snapshot?.ai_profile.id : state.profile_snapshot?.memory_profile.id) === changed.id) { adoptProfile(kind === "ai" ? toProfileSnapshot(changed) : toProfileSnapshot(state.profile_snapshot.ai_profile, changed), { remember: true }); invalidateContextPreview("配置已保存新版本，请重新查看本轮上下文。"); }
+    if (!homeNativeChoice() && !(state.selected.type === "chat" && (state.profileSelectionSync || commonProfileBusy())) && changed && (kind === "ai" ? state.profile_snapshot?.ai_profile.id : state.profile_snapshot?.memory_profile.id) === changed.id) { adoptProfile(kind === "ai" ? toProfileSnapshot(changed) : toProfileSnapshot(state.profile_snapshot.ai_profile, changed), { remember: true }); invalidateContextPreview("配置已保存新版本，请重新查看本轮上下文。"); }
     if (!sameProfile(previousIntent, state.profile_snapshot)) invalidateContextPreview("所选配置已更新，之前的上下文预览已清除，请重新查看。草稿和图片保留。");
+    if (homeNativeChoice()) { state.backend = homeNativeChoice().agent; state.model_id = homeNativeChoice().profile?.model_id || ""; }
     updateComposer(); profiles?.selectChanged();
   }
   function restoreProfileChoice() {
+    const native = homeNativeChoice();
+    if (native) { state.backend = native.agent; state.model_id = native.profile?.model_id || ""; state.profile_snapshot = native.profile ? toProfileSnapshot(native.profile, native.memory) : null; return; }
     if (!profilesEnabled()) return;
     if (state.selected.type === "chat" && state.profileSelectionSync) { applyObservedProfileSelection(); return; }
     const key = draftKey();
@@ -298,9 +366,32 @@
     if (row && memory) adoptProfile(toProfileSnapshot(row, memory));
     else { state.profile_snapshot = null; state.profileLegacy = false; }
   }
-  async function chooseProfile(kind, row, view, { newChat: openNew = false } = {}) {
-    if (view !== profileView().view || state.sending || state.creating || state.backendChoosing) return false;
+  async function chooseProfile(kind, row, view, { newChat: openNew = false, compatibility = false } = {}) {
+    if (state.page === "continuation") return continuations?.chooseConfiguration?.(kind, row, view) ?? false;
+    if (state.page === "native-chats") {
+      const current = nativeChats?.getComposerView?.(), target = agents.backendOfInstance(row?.agent_instance_id || "");
+      if (kind === "ai" && ["codex", "hermes"].includes(current?.native_agent) && ["codex", "hermes"].includes(target) && target !== current.native_agent) {
+        if (current.busy || current.view !== view || row?.native_available !== true) return false;
+        if (resumeNativeContinuation(nativeChats.getQuoteContext(), row)) return true;
+        return openNativeTextHandoff(await nativeChats.readTextSnapshot(), row);
+      }
+      return nativeChats?.chooseConfiguration?.(kind, row, view) ?? false;
+    }
+    if (view !== profileView().view || state.sending || state.creating || state.backendChoosing || state.nativeHomeSending) return false;
     const selected = kind === "memory" ? window.RabbitProfiles.memoryProfile(row === "none" ? { id: "none" } : row) : window.RabbitProfiles.profile(row);
+    if (kind === "ai" && state.selected.type === "new") {
+      return chooseHomeConfiguration(agents.backendOfInstance(selected.agent_instance_id), view, () => view === profileView().view, selected, compatibility);
+    }
+    if (kind === "memory" && homeNativeChoice()) {
+      const memory = window.RabbitProfiles.memoryProfile(selected, false);
+      if (memory.id !== "none") window.RabbitNativeMemory.choice({ ...memory, locked_mode: row.locked_mode === true, source_kind: row.source_kind || "owned" }, { readOnly: true });
+      const previous = state.homeNativeChoice, previousIdentity = state.homeConfiguration;
+      state.homeConfiguration = nextHomeConfiguration();
+      state.homeNativeChoice = { ...previous, memory, ...(previous.local_base ? { profile: { ...previous.profile, revision: state.homeConfiguration.revision } } : {}) }; state.backendChoiceVersion++;
+      state.profile_snapshot = state.homeNativeChoice.profile ? toProfileSnapshot(state.homeNativeChoice.profile, memory) : null;
+      if (saveDraft() !== true) { state.homeConfiguration = previousIdentity; state.homeNativeChoice = previous; state.profile_snapshot = previous.profile ? toProfileSnapshot(previous.profile, previous.memory) : null; state.profileChoices.set("__new__", state.profile_snapshot); updateComposer(); throw Error("浏览器不能保存记忆选择，原选择和草稿保留。"); }
+      invalidateContextPreview(); updateComposer(); return true;
+    }
     if (kind === "memory" && historyUsesNative()) {
       if (openNew) throw Error("原生历史请在当前会话选择只读记忆；原稿保留。");
       const memory = window.RabbitProfiles.memoryProfile(selected, false);
@@ -357,6 +448,15 @@
     return received.revision;
   }
   function profileReady() {
+    const native = homeNativeChoice();
+    if (native) {
+      const base = native.local_base || native.profile, row = base && profiles?.get(base.id), memory = native.memory.id === "none" ? { available: true } : profiles?.getMemory(native.memory.id);
+      return nativeHandoffTargets().some(item => item.agent === native.agent && item.enabled)
+        && (!base || row?.native_available === true && row.revision === base.revision && sameProfile(toProfileSnapshot(row, { id: "none" }), toProfileSnapshot(base, { id: "none" })))
+        && (!native.local_base || native.agent === "codex" && native.profile.id === state.homeConfiguration?.draft_id && native.profile.revision === state.homeConfiguration.revision
+          && homeLocalSupported({ model_id: native.profile.model_id, reasoning_effort: native.profile.reasoning_effort }))
+        && !!memory?.available && (native.memory.id === "none" || memory.revision === native.memory.revision);
+    }
     if (!profilesEnabled()) return state.profile_snapshot == null;
     if (state.selected.type === "chat" && state.profileSelectionSync) return false;
     if (!state.profile_snapshot) return state.profileLegacy;
@@ -470,13 +570,15 @@
     if (!fileMaterials || !fileInputsSupported() || quoteDraft().busy || !quoteDraft().active) return;
     if (state.task_intent.mode === "files" && state.attachment_ids.length) { toast("文件任务当前只支持文字。图片仍保留，请先关闭生成或移除图片再添加文件。"); return; }
     if (state.task_intent.artifact_ids.length >= 4) { toast("一轮最多选择四份文件输入或成果，已有选择仍保留。"); return; }
-    const captured = fileMaterialView(), token = requestId(), job = { version: state.openVersion, key: draftKey() };
+    const target = () => JSON.stringify([state.page, state.status?.workspace_id, state.selected.type, state.selected.id,
+      state.selected.agent, state.selected.sessionId, state.openVersion, draftKey(), state.contextNavigationVersion]);
+    const captured = target(), token = requestId(), job = { version: state.openVersion, key: draftKey() };
     state.fileMaterialJobs.set(token, job); state.fileMaterialError = ""; renderFileMaterialStatus(); updateComposer();
     try {
       const item = await fileMaterials.upload(chosen[0]); state.fileMaterialJobs.delete(token);
-      if (captured === fileMaterialView() && job.version === state.openVersion && job.key === draftKey()) await selectFileMaterial(item, captured);
-      else toast("文件输入已保留。你已换话题或修改草稿，可从‘已添加的文件’找回；未发送。");
-    } catch (error) { if (job.version === state.openVersion && job.key === draftKey()) state.fileMaterialError = userError(error, "上传结果尚未确认，请查询原回执。原草稿保留，未重传。"); }
+      if (captured === target()) await selectFileMaterial(item, fileMaterialView());
+      else toast("文件输入已保留。你已离开原话题，可从‘已添加的文件’找回；未发送。");
+    } catch (error) { if (captured === target()) state.fileMaterialError = userError(error, "上传结果尚未确认，请查询原回执。原草稿保留，未重传。"); }
     finally { state.fileMaterialJobs.delete(token); renderFileMaterialStatus(); updateComposer(); }
   }
   function appendFileInputs(parent, message) {
@@ -601,14 +703,15 @@
     // A cached draft exists before the empty startup composer has been filled.
     // Visibility/pagehide events must not count that placeholder as a user edit.
     const unfilled = browserRestoreSnapshot && state.openVersion === 0 && !state.browserTouchedDrafts.has(draftKey()) && ui.input.value === "" && !state.attachment_ids.length;
-    if (!unfilled) { state.drafts.set(draftKey(), ui.input.value); state.draftAttachments.set(draftKey(), [...state.attachment_ids]); state.taskIntents.set(draftKey(), taskIntent(state.task_intent)); if (profilesEnabled()) state.profileChoices.set(draftKey(), state.profile_snapshot); }
+    if (!unfilled) { state.drafts.set(draftKey(), ui.input.value); state.draftAttachments.set(draftKey(), [...state.attachment_ids]); state.taskIntents.set(draftKey(), taskIntent(state.task_intent)); if (profilesEnabled()) state.profileChoices.set(draftKey(), homeNativeChoice()?.profile ? toProfileSnapshot(state.homeNativeChoice.profile, state.homeNativeChoice.memory) : state.profile_snapshot); }
     if (!unfilled && choice && draftHasContent()) state.historyChoices.set(state.selected.id, choice);
     return checkpointBrowserState(deferred);
   }
   function browserSnapshot() {
     if (state.page === "conversations") state.conversationScrollTop = Math.min(1e9, Math.max(0, Number(ui.scroll.scrollTop) || 0));
     const snapshot = {
-      selection: { ...state.selected }, page: state.page, backend: state.backend, model_id: state.model_id,
+      selection: { ...state.selected }, page: state.page === "continuation" && !state.currentContinuation ? "conversations" : state.page, backend: state.backend, model_id: state.model_id, homeNativeChoice: state.homeNativeChoice, homeConfiguration: state.homeConfiguration, homeNativeHandoff: state.homeNativeHandoff, homeConfigurationReceipt: state.homeConfigurationReceipt, homeTextCompatibility: state.homeTextCompatibility,
+      continuations: state.continuations, currentContinuation: state.currentContinuation,
       query: state.libraryQuery, historyAgent: state.historyAgent,
       historyOffset: state.historyMessageStart, historyMatch: state.historyMatch?.titleOnly ? null : state.historyMatch,
       scrollTop: state.conversationScrollTop,
@@ -662,12 +765,26 @@
     const snapshot = browserStore.load();
     browserRestoreSnapshot = snapshot;
     if (!snapshot) return null;
+    state.continuations = snapshot.continuations || [];
+    state.currentContinuation = snapshot.currentContinuation || null;
     state.drafts = new Map([...snapshot.drafts, ...[...state.drafts].filter(([key, text]) => text.length > 0 || state.browserTouchedDrafts.has(key))]);
     state.draftAttachments = new Map([...(snapshot.draftAttachments || []), ...[...state.draftAttachments].filter(([key, ids]) => ids.length > 0 || state.browserTouchedDrafts.has(key))]);
     state.taskIntents = new Map([...(snapshot.taskIntents || []), ...[...state.taskIntents].filter(([key]) => state.browserTouchedDrafts.has(key))]);
     state.pendingSubmissions = new Map([...snapshot.pendingSubmissions.map((submission) => [submission.chatId, { ...submission, uncertain: true }]), ...state.pendingSubmissions]);
     state.sourceImagePending = new Map([...(snapshot.sourceImagePending?.entries || []).map(entry => [entry.chatId, entry]), ...state.sourceImagePending]);
     state.profileChoices = new Map([...(snapshot.profileChoices?.entries || []), ...state.profileChoices]);
+    if (!state.backendChoiceVersion) {
+      state.homeNativeChoice = snapshot.homeNativeChoice || null;
+      state.homeConfiguration = snapshot.homeConfiguration || (state.homeNativeChoice ? nextHomeConfiguration() : null);
+      // Older nonempty text drafts retain their route. Fresh defaults and new
+      // snapshots use the same native choice as an explicit selection.
+      const oldTextDraft = !Object.hasOwn(snapshot, "homeTextCompatibility") && !snapshot.homeNativeChoice
+        && (snapshot.newCreationId || snapshot.memoryChatCreation?.pending || snapshot.profileChoices?.entries.some(([key, value]) => key === "__new__" && value)
+          && draftHasContent(new Map(snapshot.drafts).get("__new__") || "", new Map(snapshot.draftAttachments).get("__new__") || [], new Map(snapshot.taskIntents).get("__new__")));
+      state.homeTextCompatibility = snapshot.homeTextCompatibility === true || !!oldTextDraft;
+    }
+    state.homeNativeHandoff = state.homeNativeHandoff || snapshot.homeNativeHandoff || null;
+    state.homeConfigurationReceipt = state.homeConfigurationReceipt || snapshot.homeConfigurationReceipt || null;
     state.memoryChatCreation = state.memoryChatCreation || snapshot.memoryChatCreation?.pending || null;
     if (state.openVersion === 0 && state.selected.type === "new" && snapshot.selection.type === "new" && !state.newCreationId) state.newCreationId = snapshot.newCreationId;
     state.historyCreationIds = new Map([...snapshot.historyCreationIds, ...state.historyCreationIds]);
@@ -690,6 +807,10 @@
   }
   async function restoreBrowserSnapshot(snapshot) {
     if (!snapshot || !canRestoreBrowserView()) return false;
+    if (snapshot.page === "continuation") {
+      state.selected = { type: "new", id: null };
+      restoreDraft(); showPage("continuation"); checkpointBrowserState(); return true;
+    }
     let selection = { ...snapshot.selection };
     const creationId = selection.type === "new" ? snapshot.newCreationId : selection.type === "history" ? state.historyCreationIds.get(selection.id) : null;
     if (creationId) {
@@ -781,14 +902,14 @@
   function validModelId(value, backend) { return agents.validModelId(value, backend); }
   function defaultModelId(backend) { const value = state.preferences.default_models?.[backend] || ""; return validModelId(value, backend) ? value : ""; }
   function modelInfo(modelId = state.model_id, backend = state.backend) { return modelId ? state.management?.models?.find(model => model.id === modelId && model.agent_id === backend) || null : backendInfo(backend); }
-  function modelReady(modelId = state.model_id, backend = state.backend) { return !!(backendInfo(backend)?.available && modelInfo(modelId, backend)?.available && (modelId !== state.model_id || backend !== state.backend || profileReady())); }
+  function modelReady(modelId = state.model_id, backend = state.backend) { if (homeNativeChoice() && modelId === state.model_id && backend === state.backend) return profileReady(); return !!(backendInfo(backend)?.available && modelInfo(modelId, backend)?.available && (modelId !== state.model_id || backend !== state.backend || profileReady())); }
   function modelCapabilityInfo(modelId = state.model_id, backend = state.backend) {
     const current = modelInfo(modelId, backend);
     return modelId ? current : state.management?.models?.find(model => model.agent_id === backend && model.model === backendInfo(backend)?.model) || state.management?.models?.find(model => model.agent_id === backend && model.is_default) || current;
   }
   function fileInputsSupported() { return !!(fileMaterials && state.status?.files?.upload_enabled === true); }
   function fileTaskSupported(backend = state.backend, modelId = state.model_id) {
-    return !!(state.status?.files?.enabled && state.status.files.backends?.includes(backend) && modelCapabilityInfo(modelId, backend)?.file_output !== "unsupported");
+    return !homeNativeChoice() && !!(state.status?.files?.enabled && state.status.files.backends?.includes(backend) && modelCapabilityInfo(modelId, backend)?.file_output !== "unsupported");
   }
   function modelUnavailableReason() {
     const snap = state.profile_snapshot, memory = snap?.memory_profile.id !== "none" && profiles?.getMemory(snap?.memory_profile.id);
@@ -806,13 +927,54 @@
     return "这位 AI 暂时不能回答，仍可以阅读已有记录。";
   }
   let composerStopTarget = null;
+  let homeReleasing = false;
+  const homeReleaseBox = el("div", "home-handoff-actions"), homeRelease = button("解除这次交接", "text-button", releaseHomeHandoff), homeReleaseNote = el("p", "muted");
+  homeRelease.setAttribute("data-control-interface", "human");
+  homeReleaseBox.append(homeRelease, homeReleaseNote); $("composer-more").append(homeReleaseBox);
+  async function readHomeCreation(record, workspace) {
+    if (state.homeNativeHandoff !== record || workspace !== state.status?.workspace_id) return null;
+    const found = await nativeChats?.readCreation?.(record.creation_id);
+    if (state.homeNativeHandoff !== record || workspace !== state.status?.workspace_id) return null;
+    if (!found || found.workspace_id !== workspace || found.agent !== "codex" || found.creation_id !== record.creation_id) throw Error("原创建结果尚未核实，交接记录保留。");
+    if (found.chat === null) return null;
+    if (!homePreparation(record, workspace).onProgress({ created_chat_id: found.chat.id })) throw Error("原对话已找到，但浏览器不能保存确认，交接记录保留。");
+    return found.chat.id;
+  }
+  async function releaseHomeHandoff() {
+    const record = state.homeNativeHandoff, choice = homeNativeChoice(), identity = state.homeConfiguration, workspace = state.status?.workspace_id;
+    if (!record || !choice || homeReleasing || state.nativeHomeSending || state.page !== "conversations" || saveDraft() !== true) return;
+    homeReleasing = true; updateComposer();
+    try {
+      if (!record.created_chat_id) {
+        if (!await readHomeCreation(record, workspace)) toast("原创建结果尚未确认，原编号和草稿保留；没有新建。");
+        return;
+      }
+      const data = await api("/api/native-chats");
+      if (state.homeNativeHandoff !== record || state.homeNativeChoice !== choice || state.homeConfiguration !== identity || state.status?.workspace_id !== workspace) return;
+      if (data?.workspace_id !== workspace || !Array.isArray(data.chats) || !data.chats.some(row => row.id === record.created_chat_id && row.agent === "codex" && row.role === "chat")) throw Error("原对话尚未核实，没有解除交接。");
+      const previousSnapshot = state.profile_snapshot;
+      state.homeConfiguration = nextHomeConfiguration(true);
+      if (choice.local_base) state.homeNativeChoice = { ...choice, profile: { ...choice.profile, id: state.homeConfiguration.draft_id, revision: state.homeConfiguration.revision } };
+      state.profile_snapshot = state.homeNativeChoice.profile ? toProfileSnapshot(state.homeNativeChoice.profile, choice.memory) : null;
+      state.profileChoices.set("__new__", state.profile_snapshot);
+      if (!checkpointHomeHandoff(record, null)) {
+        state.homeConfiguration = identity; state.homeNativeChoice = choice; state.profile_snapshot = previousSnapshot; state.profileChoices.set("__new__", previousSnapshot);
+        throw Error("浏览器不能保存解除结果，原交接与草稿保留。");
+      }
+    } catch (error) { toast(userError(error, "原对话尚未核实，没有解除交接。")); }
+    finally { homeReleasing = false; updateComposer(); }
+  }
   function updateComposer() {
+    homeReleaseBox.hidden = state.page !== "conversations" || state.selected.type !== "new" || !state.homeNativeHandoff;
+    homeRelease.disabled = homeReleasing || state.nativeHomeSending;
+    homeRelease.textContent = state.homeNativeHandoff?.created_chat_id ? "解除这次交接" : "核对原创建";
+    homeReleaseNote.textContent = state.homeNativeHandoff?.created_chat_id ? "原对话和当前草稿都会保留。" : "只核对上次创建结果，不创建或发送。";
     applyObservedProfileSelection();
     renderComposerFiles(); const fileMode = state.task_intent.mode === "files"; const fileBlocked = (fileMode || state.task_intent.artifact_ids.length > 0) && (!ui.input.value.trim() || fileInputsUnready() || !fileMode && !fileInputsSupported() || fileMode && (state.attachment_ids.length > 0 || !fileTaskSupported()));
     $("toggle-file-task").textContent = fileMode ? "取消生成文件" : "生成文件"; $("toggle-file-task").setAttribute("aria-pressed", String(fileMode)); $("toggle-file-task").disabled = !fileTasks || !fileMode && !fileTaskSupported() || state.sending || state.creating || currentUploadCount() > 0;
     $("add-text-file").disabled = $("pick-text-file").disabled = !fileInputsSupported() || state.sending || state.creating || state.backendChoosing || currentUploadCount() > 0 || fileMode && state.attachment_ids.length > 0 || state.task_intent.artifact_ids.length >= 4;
     const selectedInfo = backendInfo(state.backend);
-    const available = modelReady(), nativeHistory = historyUsesNative();
+    const available = modelReady(), nativeHistory = historyUsesNative(), nativeHome = homeNativeChoice();
     const historyLoading = state.selected.type === "history" && !state.historyReady;
     const ordinaryPending = state.selected.type === "chat" && (state.pendingSubmissions.get(state.selected.id) || state.pendingSubmission);
     const ordinaryReceiptOnly = !!(ordinaryPending?.uncertain && (!modelReady() || profilesEnabled() && ordinaryPending.text !== ui.input.value.trim() || ordinaryPending.backend !== state.backend || (ordinaryPending.model_id || "") !== state.model_id || !sameProfile(ordinaryPending.profile_snapshot, state.profile_snapshot) || !sameAttachments(ordinaryPending.attachment_ids, state.attachment_ids) || !sameTaskIntent(ordinaryPending.task_intent, state.task_intent)));
@@ -822,7 +984,7 @@
       ui.send.disabled = !draftHasContent() || !nativeAdoptionSource() || !nativeAdoption || fileMode || fileInputsUnready() || state.sending || state.creating || state.backendChoosing || currentUploadCount() > 0;
       ui.sendLabel.textContent = draftHasContent() ? "继续原对话" : "发送";
     }
-    const stopping = !nativeHistory && state.page === "conversations" && state.selected.type === "chat" && typeof state.run?.id === "string" && !!state.run.id && isRunning() && !draftHasContent() && !ordinaryPending?.uncertain;
+    const stopping = !nativeHistory && state.page === "conversations" && state.selected.type === "chat" && typeof state.run?.id === "string" && !!state.run.id && isRunning() && !ordinaryPending?.uncertain;
     composerStopTarget = stopping ? { runId: state.run.id, chatId: state.selected.id, version: state.openVersion, workspace: state.status?.workspace_id || null } : null;
     ui.send.dataset.composerAction = stopping ? "stop" : "send";
     if (stopping) {
@@ -830,14 +992,15 @@
       ui.sendLabel.textContent = stopPending ? "停止中" : "停止";
       ui.send.disabled = state.sending || state.creating || state.backendChoosing || stopPending;
     }
+    if (nativeHome && !ui.input.value.trim()) ui.send.disabled = true;
     ui.send.setAttribute("aria-label", stopping ? "停止当前回答" : ui.sendLabel.textContent);
     ui.send.setAttribute("title", stopping ? "停止当前回答；保留已收到的内容" : ui.sendLabel.textContent);
     const submitIcon = ui.send.querySelector("svg path");
     if (submitIcon) submitIcon.setAttribute("d", stopping ? "M7 7h10v10H7z" : "M12 19V5m-6 6 6-6 6 6");
     ui.input.disabled = state.sending || state.creating;
     ui.contextButton.disabled = nativeHistory || state.sending || state.creating || currentUploadCount() > 0 || historyLoading || state.contextState === "loading";
-    ui.contextButton.hidden = nativeHistory;
-    if (nativeHistory) { state.contextVisible = false; ui.contextPanel.hidden = true; ui.contextButton.setAttribute("aria-expanded", "false"); }
+    ui.contextButton.hidden = nativeHistory || !!nativeHome;
+    if (nativeHistory || nativeHome) { state.contextVisible = false; ui.contextPanel.hidden = true; ui.contextButton.setAttribute("aria-expanded", "false"); }
     if (!state.status) {
       ui.hint.textContent = "正在连接这台电脑…";
       ui.footnote.textContent = "连接完成后就可以发送。";
@@ -867,15 +1030,17 @@
       ui.hint.textContent = fileMode ? "先取消“生成文件”，再继续原对话" : currentUploadCount() ? "正在添加材料…" : "进入原生对话后发送";
       ui.footnote.textContent = "沿用原 Agent 的配置与上下文；可先写问题、添加材料，再继续原对话。";
     }
-    const imageInfo = nativeHistory ? { image_input: ["claude", "dsh"].includes(state.selected.agent) ? "unsupported" : "unknown" } : modelCapabilityInfo(), hasImages = state.attachment_ids.length || state.chatMessages.some(message => message.attachment_ids?.length);
+    if (nativeHome && available) { ui.hint.textContent = state.preferences.send_shortcut === "ctrl-enter" ? "⌘/Ctrl+Enter 发送 · Enter 换行" : "Enter 发送 · Shift+Enter 换行"; ui.footnote.textContent = ""; }
+    const imageInfo = nativeHistory || nativeHome ? { image_input: ["claude", "dsh"].includes(nativeHome?.agent || state.selected.agent) ? "unsupported" : "unknown" } : modelCapabilityInfo(), hasImages = state.attachment_ids.length || state.chatMessages.some(message => message.attachment_ids?.length);
     $("image-model-status").hidden = !hasImages;
     $("image-model-status").textContent = !hasImages ? "" : imageInfo?.image_input === "supported" ? "所选连接支持图像输入；本轮带图数量可在上下文中检查。" : imageInfo?.image_input === "unsupported" ? "所选连接暂不支持图像输入。图片和草稿保留，可选择支持图片的模型。" : "所选连接的图像能力尚未确认。图片保留，预览或发送时会检查，不会自动换模型。";
     ui.footnote.hidden = !ui.footnote.textContent;
     $("add-image").disabled = fileMode || imageInfo?.image_input === "unsupported" || !materials || !state.status?.materials?.enabled || state.sending || state.creating || currentUploadCount() > 0 || state.attachment_ids.length >= Math.min(4, state.status?.materials?.max_message_images || 4);
     const profileUnresolved = state.selected.type === "chat" && !!state.profileSelectionSync;
-    $("ai-profile-label").textContent = profileUnresolved ? "配置待核对" : nativeHistory ? `${backendLabels[state.selected.agent] || state.selected.agent} · 原会话` : state.profile_snapshot?.ai_profile.name || (profilesEnabled() ? "选择配置" : `${backendLabels[state.backend]} · 原有配置`);
+    $("ai-profile-label").textContent = profileUnresolved ? "配置待核对" : nativeHistory ? `${backendLabels[state.selected.agent] || state.selected.agent} · 原会话` : nativeHome ? nativeHome.profile?.name || `${backendLabels[nativeHome.agent]} · 原生` : state.profile_snapshot?.ai_profile.name || (profilesEnabled() ? "选择配置" : `${backendLabels[state.backend]} · 原有配置`);
+    if (state.selected.type === "new" && state.homeTextCompatibility) $("ai-profile-label").textContent += " · 文字兼容";
     const memory = draftMemoryProfile();
-    const requested = nativeHistory || profileUnresolved ? null : state.profile_snapshot?.ai_profile;
+    const requested = nativeHistory || profileUnresolved ? null : nativeHome ? nativeHome.profile : state.profile_snapshot?.ai_profile;
     const currentProfile = requested && profiles?.get(requested.id);
     const effective = currentProfile?.revision === requested?.revision ? currentProfile : null;
     window.RabbitProfiles?.renderStatus($("conversation-config-status"), {
@@ -890,6 +1055,10 @@
     $("memory-profile-label").textContent = profileUnresolved ? "配置待核对" : memory.id !== "none" && memory.name || (nativeHistory ? "不额外带入共享记忆" : "不使用长期记忆");
     $("choose-ai-profile").disabled = !profilesEnabled() || !profiles || !state.profilesInventory || state.sending || state.creating || state.backendChoosing;
     $("choose-memory-profile").disabled = !profilesEnabled() || !profiles || !state.profilesInventory || state.sending || state.creating || state.backendChoosing;
+    if (state.nativeHomeSending) {
+      ui.send.disabled = ui.input.disabled = true; ui.sendLabel.textContent = "发送中";
+      for (const id of ["choose-ai-profile", "choose-memory-profile", "add-text-file", "pick-text-file", "add-image", "toggle-file-task"]) $(id).disabled = true;
+    }
     renderComposerMaterials(); renderFileMaterialStatus();
     updateRoute();
     updateDocumentDraftAction();
@@ -910,7 +1079,12 @@
   }
   async function refreshStatus() {
     const data = await api("/api/status");
+    const previousScope = state.status?.workspace_id;
     state.status = data;
+    if (previousScope && previousScope !== data.workspace_id) {
+      historySourceSerial++; historySourcePending = false; historySourceCheckedAt = 0; historySourceState = null;
+      checkHistorySources();
+    }
     $("open-markdown-chats").hidden = !markdownChats?.enabled();
     conversationGroups?.setEnabled(markdownChats?.enabled() === true);
     const demoNotice = $("demo-mode-banner");
@@ -918,6 +1092,7 @@
     state.csrf = data.csrf_token || state.csrf;
     updateSpecialistAvailability();
     updateNativeChatsAvailability();
+    renderList();
     if (!browserStore) beginBrowserRestore();
     if (profilesEnabled() && profiles) await profiles.load();
     $("connection-state").textContent = "";
@@ -927,10 +1102,27 @@
   }
   function updateHistorySummary() {
     if (state.hiddenInternal) $("history-summary").textContent = `还有 ${state.hiddenInternal} 条内部记录`;
+    else if (historySourceState === "changed") $("history-summary").textContent = "原对话可能有更新";
+    else if (historySourceState === "unknown" && state.status?.history?.built_at) $("history-summary").textContent = "原对话变化待核对";
     else if (state.status && state.status.history && state.status.history.built_at) $("history-summary").textContent = `最近读取 ${shortDate(state.status.history.built_at)}`;
     else $("history-summary").textContent = "原来的对话，保留原文";
     const historyNotice = state.status && state.status.history && state.status.history.notice;
     $("history-summary").title = historyNotice || "已接入用户和助手文字；图片及工具记录后续加入。";
+  }
+  // Compare source metadata only when entering or returning to the app; never
+  // rebuild the index in the background or infer that an unknown is current.
+  let historySourceState = null, historySourceSerial = 0, historySourceCheckedAt = 0, historySourcePending = false;
+  async function checkHistorySources(force = false) {
+    const scope = state.status?.workspace_id;
+    if (!scope || document.hidden || !force && (historySourcePending || Date.now() - historySourceCheckedAt < 10000)) return;
+    const serial = ++historySourceSerial; historySourcePending = true; historySourceCheckedAt = Date.now();
+    try {
+      const result = await api("/api/history/source-changes", {}, false);
+      if (serial !== historySourceSerial || scope !== state.status?.workspace_id) return;
+      historySourceState = result && Object.keys(result).sort().join(",") === "state,workspace_id" && result.workspace_id === scope
+        && ["changed", "unchanged", "unknown"].includes(result.state) ? result.state : "unknown";
+    } catch (_) { if (serial === historySourceSerial && scope === state.status?.workspace_id) historySourceState = "unknown"; }
+    finally { if (serial === historySourceSerial) { historySourcePending = false; updateHistorySummary(); } }
   }
   async function refreshChats(shouldApply = null, options = {}) {
     return loadLibrary(true, shouldApply, options, true);
@@ -960,7 +1152,7 @@
       : isHistory || nativeMatch ? state.page === "conversations" && state.selected.type === "history" && state.selected.id === `${nativeMatch ? match.agent : item.agent}:${nativeMatch ? match.session_id : item.session_id}` : state.page === "conversations" && state.selected.type === "chat" && state.selected.id === item.id;
     node.classList.toggle("active", active);
     if (active) node.setAttribute("aria-current", "true");
-    if (isNative) node.disabled = item.available !== true;
+    if (isNative) node.disabled = item.available !== true || !state.status?.workspace_id;
     node.append(el("div", "session-title", item.title || "未命名的对话"));
     const meta = el("div", "session-meta");
     (item.source_agents || (item.agent ? [item.agent] : [])).forEach((agent) => meta.append(el("span", `source-tag ${agent}`, backendLabels[agent] || agent)));
@@ -1061,18 +1253,52 @@
     catch (error) { toast(userError(error, "对话暂时没有读出来，请稍后再试。")); }
   }
   let specialistGuideTarget = null;
-  let specialistLocationRevision = 0, specialistCommandTarget = null;
+  let specialistLocationRevision = 0, specialistBinding = null;
   let specialistGuideGeneration = 0, specialistGuideRead = 0, specialistGuideSelection = null, specialistGuideVerification = "";
-  let statusChecks = null;
+  let statusChecks = null, specialistGuideHistory = null, specialistHistoryRead = 0, specialistDshGuide = null, specialistDshRead = 0;
+  async function readSpecialistGuideHistory(scope, isCurrent = () => true) {
+    const serial = ++specialistHistoryRead;
+    try {
+      const value = await api("/api/management/model-guide-history", {}, false);
+      if (scope !== state.status?.workspace_id || serial !== specialistHistoryRead || !isCurrent()) return;
+      if (!value || Object.keys(value).sort().join(",") !== "catalogues,workspace_id" || value.workspace_id !== scope) throw Error();
+      if (!value.catalogues || typeof value.catalogues !== "object" || Array.isArray(value.catalogues)) throw Error();
+      const { dsh, ...native } = value.catalogues;
+      const catalogues = window.RabbitProfiles.nativeCapabilities(native);
+      if (!catalogues) throw Error();
+      if (dsh !== undefined) try { catalogues.dsh = window.RabbitSpecialist.dshCatalogue(dsh); } catch (_) { /* Ignore malformed DSH history without hiding other agents. */ }
+      specialistGuideHistory = { workspace_id: scope, catalogues };
+      specialist?.updateGuideContext?.();
+      return specialistGuideHistory;
+    } catch (_) {
+      if (scope === state.status?.workspace_id && serial === specialistHistoryRead && isCurrent()) specialist?.updateGuideContext?.();
+    }
+  }
+  async function readSpecialistDshGuide(scope, isCurrent = () => true) {
+    const serial = ++specialistDshRead;
+    try {
+      const value = await api("/api/management/dsh-model-guide", {}, false);
+      if (scope !== state.status?.workspace_id || serial !== specialistDshRead || !isCurrent()) return;
+      if (!value || Object.keys(value).sort().join(",") !== "catalogue,workspace_id" || value.workspace_id !== scope) throw Error();
+      const catalogue = value.catalogue === null ? null : window.RabbitSpecialist.dshCatalogue(value.catalogue);
+      specialistDshGuide = { workspace_id: scope, catalogue };
+      specialist?.updateGuideContext?.(); return specialistDshGuide;
+    } catch (_) {
+      if (scope === state.status?.workspace_id && serial === specialistDshRead && isCurrent()) specialist?.updateGuideContext?.();
+    }
+  }
   const specialist = window.RabbitSpecialist ? window.RabbitSpecialist.create({
     root: $("specialist-panel"),
     composerRoot: $("specialist-composer-mount"), composerLabel: $("specialist-composer-label"), settingsRoot: settingsMounts.specialist,
     guideRoot: $("specialist-guide-panel"),
     guideText: readBundledHelp()?.guide || "", onOpenManual: openManual,
-    getGuideContext: () => ({ catalog: profiles?.catalog(), target: specialistGuideTarget?.workspace_id === state.status?.workspace_id ? specialistGuideTarget : null, verification: specialistGuideVerification }),
+    getGuideContext: () => ({ catalog: profiles?.catalog(), history: specialistGuideHistory?.workspace_id === state.status?.workspace_id ? specialistGuideHistory : null, dsh: specialistDshGuide?.workspace_id === state.status?.workspace_id ? specialistDshGuide : null, target: specialistGuideTarget?.workspace_id === state.status?.workspace_id ? specialistGuideTarget : null, verification: specialistGuideVerification }),
     getCommandContext: captureSpecialistCommandContext,
+    onDraftBindingChange: acceptSpecialistBinding, onCommandSettled: readSpecialistCommandResult,
+    onPrepareCommand: prepareHomeCommand, onCommandObserved: event => homeCommandTarget(event) ? readHomeCommandResult(event) : true,
     onTurnSettled: refreshSpecialistGuide, onGuideCheckContext: specialistCheckContext,
     onStatusCheck: window.RabbitStatusChecks ? () => statusChecks?.start() : null,
+    onModelCheck: checkSpecialistModels,
     // Native submissions and answers are never replayed by the common 403
     // retry path. Only an explicit check can reconcile an unknown receipt.
     api: (path, options = {}) => api(path, options, false),
@@ -1095,35 +1321,436 @@
     },
     onError: error => toast(userError(error, "状态报告尚未完整读回。")),
   });
+  // An explicit guide action refreshes only existing native connections. Each
+  // result is tied to the workspace and the connection identity just observed.
+  async function checkSpecialistModels({ workspace_id: scope, isCurrent }) {
+    const names = ["codex", "pi", "hermes", "claude", "dsh"], expected = new Map();
+    const current = () => !!scope && scope === state.status?.workspace_id && typeof isCurrent === "function" && isCurrent();
+    if (!current() || !profiles) return null;
+    try {
+      const result = await api("/api/management/specialist-model-catalog", {}, false);
+      if (!current()) return null;
+      if (result && typeof result === "object" && !Array.isArray(result)
+          && Object.keys(result).sort().join(",") === "agent,native_catalog_ready,source,workspace_id"
+          && result.workspace_id === scope && result.agent === "codex" && result.source === "specialist" && result.native_catalog_ready === true)
+        expected.set("codex", null);
+    } catch (_) { if (!current()) return null; }
+    let rows = [];
+    try {
+      const list = await api("/api/management/native-model-connections", {}, false);
+      if (!current()) return null;
+      const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+      const counts = { codex: 0, pi: 0, hermes: 0, claude: 0, dsh: 0 }, seen = new Set();
+      if (!list || typeof list !== "object" || Object.keys(list).sort().join(",") !== "agents,connections,workspace_id"
+          || list.workspace_id !== scope || !Array.isArray(list.connections) || list.connections.length > 6
+          || !list.agents || typeof list.agents !== "object" || Array.isArray(list.agents)
+          || Object.keys(list.agents).sort().join(",") !== [...names].sort().join(",")
+          || names.some(agent => !["observed", "unverified", "disabled"].includes(list.agents[agent]))
+          || list.connections.some(row => {
+            if (!row || typeof row !== "object" || Array.isArray(row) || Object.keys(row).sort().join(",") !== "agent,chat_id,epoch,title"
+                || !names.includes(row.agent) || list.agents[row.agent] !== "observed" || typeof row.chat_id !== "string" || !uuid.test(row.chat_id)
+                || typeof row.epoch !== "string" || !/^[0-9a-f]{32}$/.test(row.epoch)
+                || typeof row.title !== "string" || !row.title.trim() || row.title.length > 160
+                || /[\x00-\x1f\x7f\ud800-\udfff]/u.test(row.title)
+                || seen.has(row.agent + ":" + row.chat_id) || ++counts[row.agent] > (row.agent === "codex" ? 2 : 1)) return true;
+            seen.add(row.agent + ":" + row.chat_id); return false;
+          })) throw Error("invalid connections");
+      rows = list.connections;
+    } catch (_) { if (!current()) return null; }
+    for (const agent of names) {
+      if (!current()) return null;
+      const row = rows.find(item => item.agent === agent);
+      if (!row) continue;
+      try {
+        const query = new URLSearchParams({ agent, chat_id: row.chat_id, epoch: row.epoch });
+        const result = await api("/api/management/native-model-catalog?" + query, {}, false);
+        if (!current()) return null;
+        if (result && typeof result === "object" && !Array.isArray(result)
+            && Object.keys(result).sort().join(",") === "agent,chat_id,epoch,native_catalog_ready,workspace_id"
+            && result.workspace_id === scope && result.agent === agent && result.chat_id === row.chat_id
+            && result.epoch === row.epoch && result.native_catalog_ready === true) expected.set(agent, row.chat_id);
+      } catch (_) { if (!current()) return null; }
+    }
+    let catalog;
+    try { catalog = await profiles.loadFresh(); } catch (_) { /* No readback means no verified update. */ }
+    if (!current()) return null;
+    const dshRead = expected.has("dsh") ? await readSpecialistDshGuide(scope, current) : null;
+    if (!current()) return null;
+    const updated = names.filter(agent => {
+      const item = agent === "dsh" ? dshRead?.catalogue : catalog?.workspace_id === scope && catalog.native_profile_capabilities?.[agent];
+      return expected.has(agent) && (agent === "dsh" ? !!item : item?.catalogue_available === true) && item.source_chat_id === expected.get(agent);
+    });
+    let saveFailed = false;
+    if (updated.length) {
+      const observations = updated.map(agent => { const item = agent === "dsh" ? dshRead.catalogue : catalog.native_profile_capabilities[agent]; return { agent, observed_at: item.observed_at, source_chat_id: item.source_chat_id }; });
+      try {
+        const saved = await api("/api/management/model-guide-history", { method: "POST", body: JSON.stringify({ workspace_id: scope, observations }) }, false);
+        if (!current()) return null;
+        const results = [...(Array.isArray(saved?.saved) ? saved.saved : []), ...(Array.isArray(saved?.unchanged) ? saved.unchanged : [])];
+        if (!saved || Object.keys(saved).sort().join(",") !== "saved,unchanged,workspace_id" || saved.workspace_id !== scope
+            || !Array.isArray(saved.saved) || !Array.isArray(saved.unchanged) || results.length !== updated.length
+            || new Set(results).size !== results.length || results.some(agent => !updated.includes(agent))) throw Error();
+        const history = await readSpecialistGuideHistory(scope, current);
+        if (!current()) return null;
+        saveFailed = observations.some(item => {
+          const previous = history?.catalogues?.[item.agent], savedTime = Date.parse(previous?.observed_at), readTime = Date.parse(item.observed_at);
+          return !Number.isFinite(savedTime) || !Number.isFinite(readTime) || savedTime < readTime
+            || savedTime === readTime && (previous.source_chat_id !== item.source_chat_id
+              || JSON.stringify(previous.models) !== JSON.stringify((item.agent === "dsh" ? dshRead.catalogue : catalog.native_profile_capabilities[item.agent]).models)
+              || item.agent === "dsh" && previous.partial !== dshRead.catalogue.partial);
+        });
+      } catch (_) { if (!current()) return null; saveFailed = true; }
+    }
+    if (!current()) return null;
+    specialist?.updateGuideContext?.();
+    return { updated, unavailable: names.filter(agent => !updated.includes(agent)), unsupported: [], ...(dshRead?.catalogue?.partial && updated.includes("dsh") ? { partial: ["dsh"] } : {}), ...(saveFailed ? { saveFailed: true } : {}) };
+  }
   // The current work identity is separate from the guide's descriptive snapshot.
   // It never reads conversation contents, resolves a name or opens an Agent.
+  function specialistObserved(ai, memory, aiRevision = null, memoryRevision = null) {
+    const pair = row => row?.id && row.id !== "none" && Number.isSafeInteger(row.revision) && row.revision > 0 ? [row.id, row.revision] : [null, null];
+    const [aiId, aiVersion] = pair(ai), [memoryId, memoryVersion] = pair(memory);
+    const revision = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+    return { ai_profile_id: aiId, ai_profile_revision: aiVersion, ai_selection_revision: revision(aiRevision),
+      memory_profile_id: memoryId, memory_profile_revision: memoryVersion, memory_selection_revision: revision(memoryRevision) };
+  }
   function currentSpecialistWorkContext() {
     const scope = state.status?.workspace_id;
     if (!scope) return null;
     const codec = window.RabbitSpecialistContext;
     if (!codec?.normalize) throw Error("当前操作对象组件尚未就绪；原指令保留。");
-    if (state.page === "specialist") return specialistCommandTarget?.workspace_id === scope ? codec.normalize(specialistCommandTarget) : null;
-    let target = { kind: "page", page: state.page, section: ["management", "settings"].includes(state.page) ? state.workspaceSections[state.page] || null : null };
+    if (state.page === "specialist") return specialistBinding?.workspace_id === scope ? specialistBinding.context : null;
+    let target = { kind: "page", page: state.page === "continuation" ? "conversations" : state.page, section: ["management", "settings"].includes(state.page) ? state.workspaceSections[state.page] || null : null }, observed = null;
     if (state.page === "native-chats") {
       const native = nativeChats?.getConfigurationContext();
-      if (native?.workspace_id === scope && agents.has(native.agent) && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(native.chat_id || ""))
+      if (native?.workspace_id === scope && agents.has(native.agent) && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(native.chat_id || "")) {
         target = { kind: "native", agent: native.agent, chat_id: native.chat_id };
+        observed = specialistObserved({ id: native.profile_id, revision: native.profile_revision }, { id: native.memory_profile_id, revision: native.memory_profile_revision }, native.ai_selection_revision, native.memory_selection_revision);
+      }
     } else if (state.page === "conversations") {
-      if (state.selected.type === "new") target = { kind: "new_chat" };
-      else if (state.selected.type === "chat" && state.chat?.id === state.selected.id && !state.chatLoading)
-        target = { kind: "chat", chat_id: state.chat.id };
+      if (state.selected.type === "new") target = state.homeConfiguration ? { kind: "new_chat", draft_id: state.homeConfiguration.draft_id, configuration_revision: state.homeConfiguration.revision } : { kind: "new_chat" };
+      else if (state.selected.type === "chat" && state.chat?.id === state.selected.id && !state.chatLoading) target = { kind: "chat", chat_id: state.chat.id };
       else if (state.selected.type === "history" && state.historyReady && agents.has(state.selected.agent) && state.historySession?.session_id)
         target = { kind: "history", agent: state.selected.agent, session_id: state.historySession.session_id };
+      if (target.kind !== "page") {
+        const row = historyUsesNative() ? null : homeNativeChoice()?.profile || state.profile_snapshot?.ai_profile;
+        const memory = historyUsesNative() ? null : draftMemoryProfile();
+        const revision = target.kind === "chat" ? state.profileSelection?.revision : null;
+        observed = specialistObserved(row, memory, revision, revision);
+      }
     }
-    return codec.normalize({ schema_version: 1, workspace_id: scope, target });
+    return codec.normalize({ schema_version: target.kind === "new_chat" && target.draft_id ? 3 : 2, workspace_id: scope, target, observed });
+  }
+  function workTargetEqual(a, b) {
+    return !!a && !!b && a.workspace_id === b.workspace_id && JSON.stringify(a.target) === JSON.stringify(b.target);
+  }
+  function workBinding(context, guide = "model", label, returnTo = context) {
+    const codec = window.RabbitSpecialistContext, source = context?.target;
+    const title = source?.kind === "chat" ? state.chat?.title : source?.kind === "history" ? state.historySession?.title
+      : source?.kind === "native" ? nativeChats?.getConfigurationContext()?.title : null;
+    const name = Array.from(String(label || title || codec.label(context)).replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]/gu, " ").trim()).slice(0, 160).join("") || "未指定对象";
+    return codec.normalizeBinding({ workspace_id: state.status.workspace_id, context, label: name, guide, return_to: returnTo });
   }
   function captureSpecialistCommandContext() {
-    const context = currentSpecialistWorkContext(), location = specialistLocationRevision, opening = state.openVersion;
-    const frozen = JSON.stringify(context), scope = state.status?.workspace_id;
-    return { context, isCurrent: () => {
-      if (scope !== state.status?.workspace_id || location !== specialistLocationRevision || opening !== state.openVersion) return false;
-      try { return frozen === JSON.stringify(currentSpecialistWorkContext()); } catch (_) { return false; }
-    } };
+    const context = currentSpecialistWorkContext(), scope = state.status?.workspace_id;
+    const target = state.page === "specialist" && specialistBinding?.workspace_id === scope ? specialistBinding
+      : scope ? workBinding(context, state.page === "management" && state.workspaceSections.management !== "models" ? "agent" : "model") : null;
+    return { context, target, isCurrent: () => !!scope && scope === state.status?.workspace_id };
+  }
+  function acceptSpecialistBinding(value, command = null) {
+    if (value === null) value = specialist?.getGuideBinding?.() || null;
+    if (value === null) return; // Keep the last explicit target for the guide and return link.
+    const binding = value === null ? null : window.RabbitSpecialistContext.normalizeBinding(value);
+    if (binding && binding.workspace_id !== state.status?.workspace_id) return;
+    if (command) void restoreHomeCommandDisplay(command).catch(() => {});
+    if (JSON.stringify(binding) === JSON.stringify(specialistBinding)) return;
+    specialistBinding = binding; specialistGuideGeneration++; specialistGuideRead++; specialistGuideSelection = null; specialistGuideVerification = "";
+    const context = binding?.context, target = context?.target, observed = context?.observed;
+    const home = target?.kind === "new_chat" && state.homeConfiguration?.draft_id === target.draft_id && state.homeConfiguration.revision === target.configuration_revision ? state.homeNativeChoice?.profile : null;
+    const exactHome = home?.id === observed?.ai_profile_id && home?.revision === observed?.ai_profile_revision ? home : null;
+    const row = target?.kind === "ai_profile" ? profiles?.get(target.profile_id) : profiles?.get(observed?.ai_profile_id) || exactHome;
+    const exactRow = row?.revision === (target?.kind === "ai_profile" ? target.profile_revision : observed?.ai_profile_revision) ? row : null;
+    const native = target?.kind === "native" && state.page === "native-chats" ? nativeChats?.getConfigurationContext() : null;
+    const exactNative = native?.workspace_id === binding?.workspace_id && native?.agent === target?.agent && native?.chat_id === target?.chat_id
+      && observed?.ai_profile_id && native?.profile_id === observed.ai_profile_id && native?.profile_revision === observed.ai_profile_revision ? native : null;
+    specialistGuideTarget = binding ? { workspace_id: binding.workspace_id, title: binding.label,
+      ...(target?.kind === "native" ? { agent: target.agent, chat_id: target.chat_id, agent_instance_id: "local/" + target.agent } : {}),
+      ...(target?.kind === "chat" ? { chat_id: target.chat_id } : {}),
+      ...(exactRow ? { agent_instance_id: exactRow.agent_instance_id, profile_id: exactRow.id, profile_name: exactRow.name, profile_revision: exactRow.revision, model_id: exactRow.model_id, reasoning_effort: exactRow.reasoning_effort }
+        : exactNative ? Object.fromEntries(["agent_instance_id", "profile_id", "profile_name", "profile_revision", "model_id", "reasoning_effort"].map(key => [key, exactNative[key]])) : {}),
+      memory_profile_id: target?.kind === "memory_profile" ? target.profile_id : observed?.memory_profile_id || null,
+      memory_profile_revision: target?.kind === "memory_profile" ? target.profile_revision : observed?.memory_profile_revision || null } : null;
+    specialist?.updateGuideContext?.();
+    if (state.page === "specialist") { if (binding) specialist?.openGuide?.(binding.guide); workspaceHeader(); }
+  }
+  function openSpecialistGuide(binding) {
+    if (!specialistEnabled()) { toast("专员尚未配置，可以在管理里手动调整命名配置。"); return false; }
+    const value = window.RabbitSpecialistContext.normalizeBinding(binding);
+    if (value.workspace_id !== state.status?.workspace_id) return false;
+    const accepted = specialist.bindTarget?.(value) === true;
+    const actual = specialist.getDraftBinding?.();
+    if (actual !== undefined) acceptSpecialistBinding(actual);
+    showPage("specialist", actual?.guide || specialistBinding?.guide || value.guide);
+    return accepted;
+  }
+  function askSpecialistForConfiguration({ kind, profile: named } = {}) {
+    try {
+      const returnTo = currentSpecialistWorkContext();
+      if (!named) return openSpecialistGuide(workBinding(returnTo, kind === "memory" ? "agent" : "model"));
+      const row = kind === "memory" ? profiles?.getMemory(named.id) : profiles?.get(named.id);
+      if (!row || row.id === "none" || row.revision !== named.revision) throw Error("配置已变化，请刷新后重新选择。");
+      const context = window.RabbitSpecialistContext.normalize({ schema_version: 2, workspace_id: state.status.workspace_id,
+        target: { kind: kind === "memory" ? "memory_profile" : "ai_profile", profile_id: row.id, profile_revision: row.revision },
+        observed: specialistObserved(kind === "memory" ? null : row, kind === "memory" ? row : null) });
+      return openSpecialistGuide(workBinding(context, kind === "memory" ? "agent" : "model", (kind === "memory" ? "记忆配置 · " : "AI 配置 · ") + row.name, returnTo));
+    } catch (error) { toast(userError(error, "调整对象尚未确认，原草稿保留。")); return false; }
+  }
+  async function returnFromSpecialist() {
+    const context = specialistBinding?.return_to;
+    if (!context || context.workspace_id !== state.status?.workspace_id) return;
+    const target = context.target;
+    try {
+      if (target.kind === "page") showPage(target.page, target.section);
+      else if (target.kind === "native") await nativeChats?.selectExisting({ workspaceId: context.workspace_id, agent: target.agent, chatId: target.chat_id });
+      else if (target.kind === "chat") { if (state.selected.type === "chat" && state.selected.id === target.chat_id) showPage("conversations"); else await openChat(target.chat_id); }
+      else if (target.kind === "history") { if (state.selected.type === "history" && state.selected.agent === target.agent && state.historySession?.session_id === target.session_id) showPage("conversations"); else await openHistory(target.agent, target.session_id); }
+      else if (target.kind === "new_chat") { if (state.selected.type === "new") showPage("conversations"); else newChat(); }
+      if (target.kind === "chat") await readSpecialistConfiguration({ ...specialistBinding, context }, () => context.workspace_id === state.status?.workspace_id && state.page === "conversations" && workTargetEqual(context, currentSpecialistWorkContext()));
+    } catch (error) { toast(userError(error, "原页面暂时无法打开，专员草稿保留。")); }
+  }
+  const homeCommandOwners = new Map();
+  function homeCommandTarget(event) {
+    const context = event?.target?.context;
+    return context?.schema_version === 3 && context.target?.kind === "new_chat" ? context.target : null;
+  }
+  function homeCommandIdentity(event) {
+    const target = homeCommandTarget(event);
+    if (!target || event.workspace_id !== state.status?.workspace_id || event.target.workspace_id !== event.workspace_id
+        || !/^specialist\/ui\/[A-Za-z0-9_.-]{1,100}$/.test(event.client_id || "")) throw Error("首页设置请求对象已变化。");
+    return { client_id: event.client_id, draft_id: target.draft_id, configuration_revision: target.configuration_revision };
+  }
+  function homeCommandOwner(event, create = false) {
+    const identity = homeCommandIdentity(event), key = "rabbit.home-configuration-owner.v1." + event.workspace_id;
+    if (!homeCommandOwners.has(key)) {
+      let value = null;
+      try {
+        const navigation = window.performance?.getEntriesByType?.("navigation")?.[0]?.type;
+        if (!window.opener && ["reload", "back_forward"].includes(navigation)) value = JSON.parse(window.sessionStorage.getItem(key) || "null");
+        else window.sessionStorage.removeItem(key);
+      } catch (_) { /* Unknown ownership remains pending, never taken from local recovery. */ }
+      homeCommandOwners.set(key, value);
+    }
+    const stored = homeCommandOwners.get(key);
+    if (!create) return stored && Object.keys(stored).length === 4 && Object.entries(identity).every(([key, value]) => stored[key] === value)
+      && /^[a-f0-9]{64}$/.test(stored.owner_secret || "") ? stored.owner_secret : null;
+    const bytes = new Uint8Array(32); crypto.getRandomValues(bytes);
+    const value = { ...identity, owner_secret: Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("") };
+    const encoded = JSON.stringify(value); window.sessionStorage.setItem(key, encoded);
+    if (window.sessionStorage.getItem(key) !== encoded) throw Error("浏览器不能保存这次设置请求，尚未发送。");
+    homeCommandOwners.set(key, value); return value.owner_secret;
+  }
+  async function homeProposalRequest(event, operation, extra = {}) {
+    const identity = homeCommandIdentity(event);
+    const value = await api("/api/management/draft-configuration", { method: "POST", body: JSON.stringify({ operation, ...identity, ...extra }) }, false);
+    const exact = (item, keys) => item && typeof item === "object" && !Array.isArray(item) && Object.keys(item).length === keys.length && keys.every(key => Object.hasOwn(item, key));
+    const parameters = row => exact(row, ["model_id", "reasoning_effort"]) && agents.validModelId(row.model_id, "codex")
+      && (row.reasoning_effort === null || ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(row.reasoning_effort));
+    if (!exact(value, ["workspace_id", "scope", "client_id", "draft_id", "configuration_revision", "base_profile", "parameters", "proposal", "state", "application", "native_turn"])
+        || value.workspace_id !== event.workspace_id || value.scope !== "home_configuration_proposal" || Object.entries(identity).some(([key, item]) => value[key] !== item)
+        || !parameters(value.parameters) || !["registered", "pending", "applied", "rejected"].includes(value.state)) throw Error("首页设置回执无法核对。");
+    const base = window.RabbitProfiles.profile(value.base_profile, false);
+    if (!exact(value.base_profile, ["id", "revision", "name", "agent_instance_id", "device_id", "model_id", "reasoning_effort"]) || base.agent_instance_id !== "local/codex" || base.id === identity.draft_id) throw Error("首页设置基值无法核对。");
+    if (value.proposal !== null && (!exact(value.proposal, ["parameters", "sha256"]) || !parameters(value.proposal.parameters)
+        || !/^[a-f0-9]{64}$/.test(value.proposal.sha256))) throw Error("首页设置建议无法核对。");
+    if (value.native_turn !== null && (!exact(value.native_turn, ["thread_id", "turn_id"]) || ![value.native_turn.thread_id, value.native_turn.turn_id].every(item => typeof item === "string" && !!item && item.length <= 256))) throw Error("原生请求关联无法核对。");
+    if (value.state === "registered" ? value.proposal !== null || value.application !== null || value.native_turn !== null
+        : value.proposal === null || value.native_turn === null || value.state === "pending" && value.application !== null) throw Error("首页设置回执状态不完整。");
+    if (["applied", "rejected"].includes(value.state)) {
+      if (!exact(value.application, ["result", "applied_revision", "reason"]) || value.application.result !== value.state) throw Error("首页设置结果不完整。");
+      window.RabbitBrowserState.homeConfigurationReceipt({ ...identity, proposal_sha256: value.proposal.sha256, ...value.application });
+    }
+    if (value.native_turn && (event.thread_id && event.thread_id !== value.native_turn.thread_id || event.turn_id && event.turn_id !== value.native_turn.turn_id)) throw Error("设置建议不属于原来的专员请求。");
+    value.base_profile = base; value.parameters = { model_id: value.parameters.model_id, reasoning_effort: value.parameters.reasoning_effort };
+    if (value.application) value.application = { result: value.application.result, applied_revision: value.application.applied_revision, reason: value.application.reason };
+    if (value.proposal) {
+      value.proposal = { parameters: { model_id: value.proposal.parameters.model_id, reasoning_effort: value.proposal.parameters.reasoning_effort }, sha256: value.proposal.sha256 };
+      const json = JSON.stringify({ model_id: value.proposal.parameters.model_id, reasoning_effort: value.proposal.parameters.reasoning_effort });
+      const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json))), byte => byte.toString(16).padStart(2, "0")).join("");
+      if (digest !== value.proposal.sha256) throw Error("首页设置建议指纹不一致。");
+    }
+    return value;
+  }
+  function homeProposalCurrent(event) { return event.workspace_id === state.status?.workspace_id && (typeof event.isCurrent !== "function" || event.isCurrent()); }
+  async function prepareHomeCommand(event) {
+    if (!homeCommandTarget(event)) return true;
+    const identity = homeCommandIdentity(event), choice = state.homeNativeChoice, base = choice?.local_base || choice?.profile;
+    if (choice?.agent !== "codex" || !base || base.id === state.homeConfiguration?.draft_id || !profiles?.get(base.id)) return true;
+    if (state.homeConfiguration?.draft_id !== identity.draft_id || state.homeConfiguration.revision !== identity.configuration_revision || state.homeNativeHandoff || state.nativeHomeSending)
+      throw Error("首页配置或发送状态已变化，请把这条指令改为当前对象后再发送。");
+    const latest = window.RabbitProfiles.profile(profiles.get(base.id), false);
+    if (JSON.stringify(latest) !== JSON.stringify(base)) throw Error("命名配置已变化，请重新选择后发送这条指令。");
+    const owner = homeCommandOwner(event) || homeCommandOwner(event, true), parameters = { model_id: choice.profile.model_id, reasoning_effort: choice.profile.reasoning_effort };
+    const value = await homeProposalRequest(event, "register", { owner_secret: owner, base_profile_id: base.id, base_profile_revision: base.revision, parameters });
+    if (!homeProposalCurrent(event) || JSON.stringify(value.base_profile) !== JSON.stringify(base) || JSON.stringify(value.parameters) !== JSON.stringify(parameters)) throw Error("首页设置登记未核实，原指令保留。");
+    return true;
+  }
+  function writeHomeConfiguration(parameters, receipt = null) {
+    // Only Home's independent choice changes. Another page keeps its own composer.
+    const previous = { identity: state.homeConfiguration, choice: state.homeNativeChoice, receipt: state.homeConfigurationReceipt,
+      snapshot: state.profile_snapshot, model: state.model_id, backend: state.backend, remembered: state.profileChoices.get("__new__"), hasRemembered: state.profileChoices.has("__new__") };
+    const identity = nextHomeConfiguration(), choice = state.homeNativeChoice, base = choice.local_base || choice.profile;
+    const profile = window.RabbitProfiles.profile({ ...base, id: identity.draft_id, revision: identity.revision, name: "本草稿设置", ...parameters }, false);
+    state.homeConfiguration = identity; state.homeNativeChoice = { ...choice, profile, local_base: base };
+    if (receipt) state.homeConfigurationReceipt = window.RabbitBrowserState.homeConfigurationReceipt(receipt);
+    const snapshot = toProfileSnapshot(profile, choice.memory); state.profileChoices.set("__new__", snapshot);
+    const visibleHome = state.page === "conversations" && state.selected.type === "new";
+    if (visibleHome) { state.profile_snapshot = snapshot; state.model_id = profile.model_id; state.backend = choice.agent; }
+    if (checkpointBrowserState() !== true) {
+      state.homeConfiguration = previous.identity; state.homeNativeChoice = previous.choice; state.homeConfigurationReceipt = previous.receipt;
+      state.profile_snapshot = previous.snapshot; state.model_id = previous.model; state.backend = previous.backend;
+      if (previous.hasRemembered) state.profileChoices.set("__new__", previous.remembered); else state.profileChoices.delete("__new__");
+      return false;
+    }
+    if (visibleHome) { state.backendChoiceVersion++; invalidateContextPreview(); updateComposer(); }
+    return true;
+  }
+  async function restoreHomeCommandDisplay(event) {
+    const target = homeCommandTarget(event), receipt = state.homeConfigurationReceipt, identity = state.homeConfiguration, choice = state.homeNativeChoice;
+    if (!target || receipt?.result !== "applied" || receipt.client_id !== event.client_id || receipt.draft_id !== target.draft_id
+        || receipt.configuration_revision !== target.configuration_revision || identity?.draft_id !== receipt.draft_id || identity.revision !== receipt.applied_revision
+        || !choice?.profile || specialist?.getDraftBinding?.()) return;
+    const json = JSON.stringify({ model_id: choice.profile.model_id, reasoning_effort: choice.profile.reasoning_effort });
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json))), byte => byte.toString(16).padStart(2, "0")).join("");
+    if (state.homeConfigurationReceipt !== receipt || state.homeConfiguration !== identity || state.homeNativeChoice !== choice
+        || digest !== receipt.proposal_sha256 || event.workspace_id !== state.status?.workspace_id) return;
+    updateHomeCommandDisplay(event, { state: "applied", application: receipt });
+  }
+  function updateHomeCommandDisplay(event, value) {
+    const target = homeCommandTarget(event), identity = state.homeConfiguration, choice = state.homeNativeChoice;
+    if (value.state !== "applied" || !target || identity?.draft_id !== target.draft_id || identity.revision !== value.application?.applied_revision
+        || !choice?.profile || specialist?.getDraftBinding?.() || !workTargetEqual(event.target.context, specialistBinding?.context)) return;
+    const context = { ...event.target.context, target: { ...target, configuration_revision: identity.revision }, observed: specialistObserved(choice.profile, choice.memory) };
+    const returnTo = workTargetEqual(specialistBinding.return_to, event.target.context) ? context : specialistBinding.return_to;
+    acceptSpecialistBinding({ ...specialistBinding, context, return_to: returnTo });
+  }
+  async function readHomeCommandResult(event) {
+    const identity = homeCommandIdentity(event);
+    if (!homeProposalCurrent(event)) return false;
+    let owner = homeCommandOwner(event), value;
+    try { value = await homeProposalRequest(event, owner ? "read" : "inspect", owner ? { owner_secret: owner } : {}); }
+    catch (error) {
+      if (error.status === 404 && error.code === "draft_configuration_not_found") return true;
+      if (event.manual !== true || error.code !== "draft_configuration_owner_mismatch") throw error;
+      owner = null; value = await homeProposalRequest(event, "inspect");
+    }
+    if (!homeProposalCurrent(event)) return false;
+    if (value.state === "registered" || ["applied", "rejected"].includes(value.state)) { updateHomeCommandDisplay(event, value); return true; }
+    if (!owner) {
+      if (event.manual !== true) return false;
+      owner = homeCommandOwner(event, true);
+      value = await homeProposalRequest(event, "resume", { owner_secret: owner, proposal_sha256: value.proposal.sha256 });
+      if (!homeProposalCurrent(event)) return false;
+    }
+    if (value.state !== "pending") return ["applied", "rejected"].includes(value.state);
+    let receipt = state.homeConfigurationReceipt;
+    const original = item => item && Object.entries(identity).every(([key, value]) => item[key] === value) && item.proposal_sha256 === value.proposal.sha256;
+    if (!original(receipt)) {
+      profileCatalogReadback++;
+      try { await profiles.loadFresh(); } finally { profileCatalogReadback--; }
+      if (!homeProposalCurrent(event)) return false;
+      const choice = state.homeNativeChoice, base = choice?.local_base || choice?.profile;
+      let reason = state.homeConfiguration?.draft_id !== identity.draft_id ? "target_changed"
+        : state.homeConfiguration.revision !== identity.configuration_revision ? "configuration_changed"
+        : state.homeNativeHandoff || state.nativeHomeSending ? "handoff_started"
+        : ["failed", "interrupted", "rejected"].includes(event.status) ? "cancelled"
+        : choice?.agent !== "codex" || JSON.stringify(base) !== JSON.stringify(value.base_profile)
+          || !profiles.get(base?.id) || JSON.stringify(window.RabbitProfiles.profile(profiles.get(base.id), false)) !== JSON.stringify(base)
+          || !homeLocalSupported(value.proposal.parameters) ? "unsupported" : null;
+      receipt = { ...identity, proposal_sha256: value.proposal.sha256, result: reason ? "rejected" : "applied", applied_revision: reason ? null : identity.configuration_revision + 1, reason };
+      if (!reason && !writeHomeConfiguration(value.proposal.parameters, receipt)) { reason = "storage_unavailable"; receipt = { ...receipt, result: "rejected", applied_revision: null, reason }; }
+      if (reason) {
+        const previous = state.homeConfigurationReceipt; state.homeConfigurationReceipt = window.RabbitBrowserState.homeConfigurationReceipt(receipt);
+        if (checkpointBrowserState() !== true) { state.homeConfigurationReceipt = previous; return false; }
+      }
+    }
+    if (!homeProposalCurrent(event)) return false;
+    const settled = await homeProposalRequest(event, "settle", { owner_secret: owner, proposal_sha256: receipt.proposal_sha256,
+      result: receipt.result, applied_revision: receipt.applied_revision, reason: receipt.reason });
+    updateHomeCommandDisplay(event, settled);
+    return settled.state === receipt.result && JSON.stringify(settled.application) === JSON.stringify({ result: receipt.result, applied_revision: receipt.applied_revision, reason: receipt.reason });
+  }
+
+  async function readSpecialistCommandResult(event) {
+    if (homeCommandTarget(event)) return readHomeCommandResult(event);
+    let binding;
+    try { binding = window.RabbitSpecialistContext.normalizeBinding(event?.target); } catch (_) { return false; }
+    const scope = binding.workspace_id;
+    return readSpecialistConfiguration(binding, () => event.workspace_id === scope && scope === state.status?.workspace_id && (typeof event.isCurrent !== "function" || event.isCurrent()));
+  }
+  async function readSpecialistConfiguration(binding, current) {
+    const context = binding.context, scope = binding.workspace_id, target = context?.target;
+    if (!current()) return;
+    if (context === null) return true;
+    if (!target || !profiles) return false;
+    const requests = [];
+    if (target.kind === "chat") requests.push(api(`/api/chats/${encodeURIComponent(target.chat_id)}/profile-selection`, {}, false));
+    if (target.kind === "native") {
+      const query = new URLSearchParams({ agent: target.agent, chat_id: target.chat_id });
+      requests.push(["codex", "pi", "hermes", "claude"].includes(target.agent) ? api("/api/management/native-chat-configuration?" + query, {}, false) : Promise.resolve(null));
+      requests.push(api("/api/management/native-chat-memory-configuration?" + query, {}, false));
+    }
+    // This catalogue read must not adopt a different page's selection.
+    profileCatalogReadback++;
+    let results;
+    try { results = await Promise.allSettled([profiles.loadFresh(), ...requests]); }
+    finally { profileCatalogReadback--; }
+    if (!current()) return;
+    if (results.some(item => item.status !== "fulfilled") || results[0].value?.workspace_id !== scope) return false;
+    try {
+      let observed = context.observed, refreshedTarget = target, verified = true;
+      if (target.kind === "chat") {
+        const selection = window.RabbitProfiles.selection(results[1].value.profile_selection);
+        const expectedRevision = context.observed?.ai_selection_revision;
+        if (expectedRevision != null && selection.revision < expectedRevision) throw Error();
+        const ai = profiles.get(selection.ai_profile_id), memory = profiles.getMemory(selection.memory_profile_id);
+        observed = specialistObserved(ai, memory, selection.revision, selection.revision);
+        verified = (!selection.ai_profile_id || !!ai) && (selection.memory_profile_id === "none" || !!memory);
+        if (workTargetEqual(context, currentSpecialistWorkContext()) && state.page === "conversations") {
+          if (observeProfileSelection(selection)) { if (!state.profileSelectionSync && selection.ai_profile_id) state.profileSelectionSync = "pending"; applyObservedProfileSelection(); updateComposer(); }
+          else verified = false;
+        }
+      } else if (target.kind === "native") {
+        const readbacks = {};
+        for (const [index, field, expectedScope, factory] of [[1, "configuration_selection", "native_next_turn_selection", () => window.RabbitProfiles.createNativeSelection({ agent: target.agent, parseProfile: row => window.RabbitProfiles.profile(row, false) })], [2, "memory_selection", "native_next_turn_memory_selection", () => window.RabbitProfiles.createNativeMemorySelection({ agent: target.agent })]]) {
+          const value = results[index].value; if (value === null) continue;
+          if (value?.scope !== expectedScope || value.inference_performed !== false || value.connection_checked !== false) throw Error();
+          const dto = Object.fromEntries(["workspace_id", "agent", "chat_id", "selection", "profile", "profile_current"].map(key => [key, value[key]]));
+          const expectedRevision = context.observed?.[field === "memory_selection" ? "memory_selection_revision" : "ai_selection_revision"];
+          if (expectedRevision != null && dto.selection?.revision < expectedRevision) throw Error();
+          const machine = factory();
+          if (dto.selection?.revision === 0) { machine.reset(undefined, { workspace: scope, chatId: target.chat_id }); machine.observe({ [field]: dto }); if (!machine.ready()) throw Error(); }
+          else machine.reset(dto, { workspace: scope, chatId: target.chat_id });
+          readbacks[field] = dto;
+        }
+        const ai = readbacks.configuration_selection, memory = readbacks.memory_selection;
+        observed = specialistObserved(ai?.profile, memory?.profile, ai?.selection.revision, memory?.selection.revision);
+        verified = Object.values(readbacks).every(dto => dto.profile_current);
+        if (state.page === "native-chats" && workTargetEqual(context, currentSpecialistWorkContext()) && nativeChats?.applyConfigurationReadback?.(context, readbacks) !== true) return false;
+      } else if (["ai_profile", "memory_profile"].includes(target.kind)) {
+        const row = target.kind === "ai_profile" ? profiles.get(target.profile_id) : profiles.getMemory(target.profile_id);
+        if (!row || row.revision < target.profile_revision) return false;
+        refreshedTarget = { ...target, profile_revision: row.revision };
+        observed = specialistObserved(target.kind === "ai_profile" ? row : null, target.kind === "memory_profile" ? row : null);
+      }
+      // A completed command refreshes its display target only. A newer draft's
+      // identity and expected versions remain owned by the composer.
+      if (workTargetEqual(context, specialistBinding?.context)) {
+        if (!specialist?.getDraftBinding?.() && context.schema_version === 2)
+          acceptSpecialistBinding({ ...specialistBinding, context: { ...context, target: refreshedTarget, observed } });
+        else specialist?.updateGuideContext?.();
+      }
+      return verified;
+    } catch (_) { return false; }
   }
   async function specialistCheckContext(event) {
     const scope = state.status?.workspace_id, target = specialistGuideTarget, stamp = specialistGuideGeneration;
@@ -1183,22 +1810,6 @@
     } catch (_) { specialistGuideVerification = "failed"; }
     specialist?.updateGuideContext?.();
   }
-  function captureSpecialistGuideTarget() {
-    specialistGuideGeneration++; specialistGuideRead++; specialistGuideSelection = null; specialistGuideVerification = "";
-    if (state.page === "native-chats") {
-      specialistGuideTarget = nativeChats?.getConfigurationContext() || null;
-      return;
-    }
-    if (state.page !== "conversations") { specialistGuideTarget = null; return; }
-    const row = historyUsesNative() ? null : state.profile_snapshot?.ai_profile;
-    const memory = historyUsesNative() ? null : state.profile_snapshot?.memory_profile;
-    specialistGuideTarget = { workspace_id: state.status?.workspace_id, title: state.chat?.title || state.historySession?.title || "新对话",
-      chat_id: state.selected.id, agent_instance_id: row?.agent_instance_id || agents.instanceId(historyUsesNative() ? state.selected.agent : state.backend),
-      profile_id: row?.id || null, profile_name: row?.name || null, profile_revision: row?.revision || null,
-      model_id: row?.model_id || null, reasoning_effort: row?.reasoning_effort ?? null,
-      memory_profile_id: memory?.id && memory.id !== "none" ? memory.id : null,
-      memory_profile_revision: memory?.id && memory.id !== "none" ? memory.revision : null };
-  }
   function specialistEnabled() { return !!specialist && state.status?.specialist?.enabled === true; }
   function updateSpecialistAvailability() {
     const enabled = specialistEnabled();
@@ -1215,18 +1826,41 @@
     settingsMounts.native.append(choiceLabel, ...Object.values(settingsPanes));
     root.append(...Object.values(panes));
     const options = { api: (path, settings = {}) => api(path, settings, false), getWorkspace: () => state.status?.workspace_id || "", openDocument, materialFiles: fileMaterials,
+      getModelLabel: value => {
+        const source = profiles?.catalog()?.native_profile_capabilities?.[agents.backendOfInstance(value?.agent_instance_id)];
+        return source?.enabled && source.catalogue_available ? source.models.find(row => row.id === value?.model_id)?.model || null : null;
+      },
       onTextHandoff: value => openNativeTextHandoff(value),
+      onResumeHandoff: value => resumeNativeContinuation(value),
+      onQuoteHistory: async () => {
+        const captured = quoteDraft();
+        if (!historyQuotes || !captured.active || captured.busy) return;
+        // Load existing file provenance before the picker deduplicates copies.
+        // An unavailable old file stays in the draft; only new file selection is disabled.
+        if (fileInputsSupported()) await Promise.allSettled(captured.native_quote.material_refs.filter(ref => ref.kind === "text").map(async ref => {
+          fileMaterials.known.delete(ref.id);
+          return fileMaterials.inspect(ref.id);
+        }));
+        const current = quoteDraft();
+        if (current.active && !current.busy && current.stamp === captured.stamp && current.text === captured.text) historyQuotes.open();
+      },
       onOrganize: value => markdownChats?.open(value), canOrganize: () => markdownChats?.enabled() === true,
       onError: error => toast(userError(error, "原生对话操作尚未确认，草稿与原请求保留。")) };
     const controllers = { codex: window.RabbitNativeChats.create({ ...options, root: panes.codex, settingsRoot: settingsPanes.codex,
       materialImages: materials,
+      getSendShortcut: () => state.preferences.send_shortcut,
+      onChooseConfiguration: kind => profiles?.open(kind),
       onManageProfiles: () => { state.browserPageTouched = true; showPage("management", "ai-profiles"); } }) };
     if (window.RabbitPiNative) controllers.pi = window.RabbitNativeChats.create({ ...options, root: panes.pi, settingsRoot: settingsPanes.pi,
       materialImages: materials,
+      getSendShortcut: () => state.preferences.send_shortcut,
+      onChooseConfiguration: kind => profiles?.open(kind),
       onManageProfiles: () => { state.browserPageTouched = true; showPage("management", "ai-profiles"); },
       descriptor: { agent: "pi", apiRoot: "/api/pi-chats", storageNamespace: "rabbit.pi-native-chats.page.v1.", createRenderer: window.RabbitPiNative.create } });
     if (window.RabbitHermesNative) controllers.hermes = window.RabbitNativeChats.create({ ...options, root: panes.hermes, settingsRoot: settingsPanes.hermes,
       materialImages: materials,
+      getSendShortcut: () => state.preferences.send_shortcut,
+      onChooseConfiguration: kind => profiles?.open(kind),
       onManageProfiles: () => { state.browserPageTouched = true; showPage("management", "ai-profiles"); },
       descriptor: { agent: "hermes", apiRoot: "/api/hermes-chats", storageNamespace: "rabbit.hermes-native-chats.page.v1.", createRenderer: window.RabbitHermesNative.create } });
     if (window.RabbitClaudeNative) controllers.claude = window.RabbitNativeChats.create({ ...options, root: panes.claude, settingsRoot: settingsPanes.claude,
@@ -1234,7 +1868,7 @@
     if (window.RabbitDshNative) controllers.dsh = window.RabbitNativeChats.create({ ...options, root: panes.dsh, settingsRoot: settingsPanes.dsh,
       materialImages: materials,
       descriptor: { agent: "dsh", apiRoot: "/api/dsh-chats", storageNamespace: "rabbit.dsh-native-chats.page.v1.", createRenderer: window.RabbitDshNative.create } });
-    let selected = "codex", available = {}, visible = false, settingsVisible = false, enabled = false, scope = "", language = "zh-CN", navigationVersion = 0, showExistingSelection = false;
+    let selected = "codex", available = {}, visible = false, settingsVisible = false, enabled = false, scope = "", language = "zh-CN", navigationVersion = 0, showExistingSelection = false, showing = Promise.resolve();
     function remember() { try { if (scope) window.sessionStorage.setItem("rabbit.native-agent.v1." + encodeURIComponent(scope), selected); } catch (_) { /* Selection is optional; submission journals remain in the renderer. */ } }
     function renderChoice() {
       for (const [id, pane] of Object.entries(settingsPanes)) pane.hidden = id !== selected;
@@ -1252,7 +1886,20 @@
       if (settingsVisible) controllers[selected].showSettings(); else if (visible) controllers[selected].show();
     });
     return {
+      getComposerView: () => {
+        const view = visible && !settingsVisible && ["codex", "hermes", "pi"].includes(selected) && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.getComposerView?.() : null;
+        return view && ["codex", "hermes"].includes(selected) ? { ...view, native_agents: ["codex", "hermes"] } : view;
+      },
+      saveLocalConfiguration: (parameters, view, retry) => visible && !settingsVisible && selected === "codex" && scope === String(state.status?.workspace_id || "") ? controllers.codex?.saveLocalConfiguration?.(parameters, view, retry) ?? false : false,
+      chooseConfiguration: (kind, row, view) => visible && !settingsVisible && ["codex", "hermes", "pi"].includes(selected) && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.chooseConfiguration?.(kind, row, view) ?? false : false,
+      applyConfigurationReadback(context, value) {
+        const current = this.getConfigurationContext();
+        if (!visible || settingsVisible || context?.workspace_id !== scope || context?.target?.kind !== "native" || context.target.agent !== selected || current?.chat_id !== context.target.chat_id) return false;
+        return controllers[selected]?.applyConfigurationReadback?.(value) === true;
+      },
       getConfigurationContext: () => visible && !settingsVisible && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.getConfigurationContext?.() || null : null,
+      captureQuoteDraft: () => enabled && visible && !settingsVisible && ["codex", "pi", "hermes", "claude", "dsh"].includes(selected) && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.captureQuoteDraft?.() || null : null,
+      applyQuoteDraft: (expected, value, refs, preview) => enabled && visible && !settingsVisible && ["codex", "pi", "hermes", "claude", "dsh"].includes(selected) && expected?.agent === selected && scope === String(state.status?.workspace_id || "") && controllers[selected]?.applyQuoteDraft?.(expected, value, refs, preview) === true,
       setAvailability(status) {
         const next = String(status?.workspace_id || "");
         if (next !== scope) { navigationVersion++; scope = next; try { const value = window.sessionStorage.getItem("rabbit.native-agent.v1." + encodeURIComponent(scope)); if (Object.hasOwn(controllers, value)) selected = value; } catch (_) {} }
@@ -1265,19 +1912,54 @@
       },
       setEnabled(value) { const next = value === true; if (enabled !== next) navigationVersion++; enabled = next; for (const [id, controller] of Object.entries(controllers)) controller.setEnabled(enabled && available[id]); renderChoice(); if (!enabled) this.hide(); },
       setLanguage(value) { language = value === "en" ? "en" : "zh-CN"; for (const controller of Object.values(controllers)) controller.setLanguage(language); renderChoice(); },
-      show() { visible = true; settingsVisible = false; root.hidden = false; const existingSelection = showExistingSelection; showExistingSelection = false; for (const [id, controller] of Object.entries(controllers)) if (id !== selected) controller.hide(); return Promise.resolve(controllers[selected]?.show({ existingSelection })).then(() => { const source = controllers[selected]?.getQuoteContext(); if (visible && state.page === "native-chats" && source) { ui.title.textContent = source.title; ui.meta.textContent = (backendLabels[source.agent] || source.agent) + " · 原生对话"; } }); },
+      show() { visible = true; settingsVisible = false; root.hidden = false; const existingSelection = showExistingSelection; showExistingSelection = false; for (const [id, controller] of Object.entries(controllers)) if (id !== selected) controller.hide(); return showing = Promise.resolve(controllers[selected]?.show({ existingSelection })).then(async () => { const source = controllers[selected]?.getQuoteContext(); if (visible && state.page === "native-chats" && source) { ui.title.textContent = source.title; ui.meta.textContent = (backendLabels[source.agent] || source.agent) + " · 原生对话"; await renderNativeOrigin(source, () => visible && state.page === "native-chats" && scope === source.workspace_id && selected === source.agent && controllers[selected]?.getQuoteContext()?.chat_id === source.chat_id); } }); },
       showSettings() { visible = false; settingsVisible = true; root.hidden = true; for (const [id, controller] of Object.entries(controllers)) if (id !== selected) controller.hide(); return controllers[selected]?.showSettings(); },
       hide() { navigationVersion++; showExistingSelection = false; visible = settingsVisible = false; root.hidden = true; for (const controller of Object.values(controllers)) controller.hide(); },
-      async createNew(agent, isCurrent = () => true, savedProfile = null, initialDraft = null) {
+      readCreation(creationId, agent = "codex") {
+        if (!["codex", "hermes"].includes(agent) || !enabled || !available[agent] || scope !== String(state.status?.workspace_id || "")) throw Error("原创建入口暂不可用，原记录保留。");
+        return controllers[agent].readCreation(creationId);
+      },
+      async createNew(agent, isCurrent = () => true, savedProfile = null, initialDraft = null, send = false, preparation = null) {
         specialistLocationRevision++;
         const request = ++navigationVersion, originalWorkspace = scope;
         if (!isCurrent() || !enabled || !available[agent] || !controllers[agent]) throw Error("这个 Agent 的原生入口暂不可用。");
         const current = () => isCurrent() && request === navigationVersion && scope === originalWorkspace && enabled && available[agent];
-        const id = await controllers[agent].createNew(savedProfile, current, initialDraft);
+        const id = await controllers[agent].createNew(savedProfile, current, initialDraft, preparation);
         if (!id || !isCurrent() || request !== navigationVersion || scope !== originalWorkspace) return false;
-        selected = agent; remember(); renderChoice(); state.browserPageTouched = true; showPage("native-chats"); refreshChats().catch(() => {}); return true;
+        selected = agent; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true; showPage("native-chats"); refreshChats().catch(() => {});
+        if (send) {
+          await showing;
+          if (state.page === "native-chats" && selected === agent && scope === originalWorkspace) await controllers[agent].sendDraft(id);
+        }
+        return true;
+      },
+      async createContinuation(record, draft, origin, isCurrent, onProgress) {
+        const agent = record.target.agent, originalWorkspace = scope, request = ++navigationVersion;
+        const current = () => isCurrent() && request === navigationVersion && enabled && scope === originalWorkspace && scope === String(state.status?.workspace_id || "") && available[agent];
+        if (!["codex", "hermes"].includes(agent) || !controllers[agent] || !current()) throw Error("接续目标暂不可用，原准备保留。");
+        const id = await controllers[agent].createNew(record.target.ai_profile, current, draft, null, {
+          creation_id: record.creation.creation_id, created_chat_id: record.creation.created_chat_id,
+          onProgress,
+          beforePlace: async id => {
+            await saveContinuationOrigin({ ...origin, target_chat_id: id });
+            return current() && onProgress({ handoff_started: true }) === true;
+          },
+        });
+        if (!id || !current()) return { accepted: false };
+        selected = agent; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true;
+        showPage("native-chats"); const location = state.contextNavigationVersion;
+        refreshChats().catch(() => {}); await showing;
+        // This explicit navigation replaces the preparation view. From here the
+        // existing native renderer owns the draft and original submission journal.
+        if (request !== navigationVersion || location !== state.contextNavigationVersion || state.page !== "native-chats" || selected !== agent
+            || scope !== originalWorkspace || controllers[agent]?.getQuoteContext()?.chat_id !== id) return { accepted: false };
+        const value = await controllers[agent].sendDraft(id), receipt = value?.receipt || value?.operation;
+        return { accepted: !!receipt && ["accepted", "completed", "failed", "interrupted"].includes(receipt.status)
+          && (agent === "hermes" ? receipt.chat_id === id : receipt.session_key === "chat/codex/" + id) };
       },
       getQuoteContext() { return enabled && visible && available[selected] ? controllers[selected]?.getQuoteContext() : null; },
+      getTextSnapshot() { return enabled && visible && available[selected] ? controllers[selected]?.getTextSnapshot() : null; },
+      async readTextSnapshot() { return enabled && visible && available[selected] ? controllers[selected]?.readTextSnapshot() : null; },
       async selectExisting(value, isCurrent = () => true) {
         specialistLocationRevision++;
         const request = ++navigationVersion, sourceWorkspace = scope, target = value?.agent;
@@ -1293,10 +1975,18 @@
         const { agent, chatId, workspaceId, text, material_refs, material_preview } = value;
         if (typeof isCurrent !== "function" || !isCurrent() || !enabled || scope !== workspaceId || scope !== String(state.status?.workspace_id || "") || !available[agent] || !controllers[agent]) throw Error("目标原生 Agent、来源或工作区已变化，请重新选择。");
         if (material_refs !== undefined && (!Array.isArray(material_refs) || material_refs.length && (!["codex", "pi", "hermes", "claude", "dsh"].includes(agent) || ["claude", "dsh"].includes(agent) && material_refs.some(ref => ref?.kind !== "text")))) throw Error("此 Agent 尚未接入所选材料，原草稿保留。");
-        const placed = await controllers[agent].putDraft({ workspace_id: workspaceId, chat_id: chatId, text, ...(material_refs?.length ? { material_refs, ...(material_preview === undefined ? {} : { material_preview }) } : {}), ...(Object.hasOwn(value, "memory_profile") ? { memory_profile: value.memory_profile } : {}) }, isCurrent);
+        const request = ++navigationVersion, page = state.page, opening = state.openVersion, location = state.contextNavigationVersion;
+        const replacesVisibleSource = page === "native-chats" && selected === agent;
+        const positionCurrent = () => request === navigationVersion && page === state.page && opening === state.openVersion
+          && location === state.contextNavigationVersion && enabled && scope === workspaceId && scope === String(state.status?.workspace_id || "");
+        // Selecting another chat in this controller replaces its source renderer.
+        // After that explicit selection, protect the host position and controller
+        // generations rather than asking the replaced renderer to stay current.
+        const afterSelection = () => positionCurrent() && (replacesVisibleSource || isCurrent());
+        const placed = await controllers[agent].putDraft({ workspace_id: workspaceId, chat_id: chatId, text, ...(material_refs?.length ? { material_refs, ...(material_preview === undefined ? {} : { material_preview }) } : {}), ...(Object.hasOwn(value, "memory_profile") ? { memory_profile: value.memory_profile } : {}) }, () => positionCurrent() && isCurrent(), afterSelection);
         if (placed !== true) throw Error("未能放入原生草稿；来源页的文字和材料仍保留。");
         if (scope !== workspaceId || scope !== String(state.status?.workspace_id || "")) throw Error("工作区已变化，请在原工作区核对刚才的草稿。");
-        if (!isCurrent()) return true; // The synchronous draft commit already succeeded; do not redirect a later view.
+        if (!afterSelection()) return true; // The synchronous draft commit already succeeded; do not redirect a later view.
         for (const controller of Object.values(controllers)) controller.hide();
         selected = agent; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true; showPage("native-chats");
         return true;
@@ -1316,16 +2006,96 @@
       { agent: "claude", label: "Claude Code", apiRoot: "/api/claude-chats", enabled: state.status?.claude_native_chats?.enabled },
       { agent: "dsh", label: "DSH", apiRoot: "/api/dsh-chats", enabled: !!window.RabbitDshNative && state.status?.dsh_native_chats?.enabled },
     ].filter(row => row.enabled === true); }
+  const continuationJSON = value => JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+  async function continuationDigest(value) {
+    if (!window.crypto?.subtle) throw Error("浏览器不能核对接续版本，原准备保留。");
+    return [...new Uint8Array(await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(continuationJSON(value))))].map(v => v.toString(16).padStart(2, "0")).join("");
+  }
+  async function saveContinuationOrigin(origin) {
+    const query = new URLSearchParams({ agent: origin.target_agent, chat_id: origin.target_chat_id });
+    const scope = state.status?.workspace_id;
+    const valid = value => value?.workspace_id === scope && value.scope === "native_continuation_source"
+      && Object.keys(value).sort().join(",") === "origin,scope,workspace_id";
+    const observed = await api("/api/management/native-chat-origin?" + query, {}, false);
+    if (!valid(observed)) throw Error("接续来源的读取身份待核对。");
+    if (observed.origin !== null) {
+      if (continuationJSON(observed.origin) !== continuationJSON(origin)) throw Error("原目标已有不同来源，没有覆盖。");
+      return;
+    }
+    const saved = await api("/api/management/native-chat-origin", { method: "POST", body: JSON.stringify(origin) }, false);
+    if (!valid(saved) || continuationJSON(saved.origin) !== continuationJSON(origin)) throw Error("来源保存结果待核对；原目标和创建编号保留。");
+  }
+  let nativeOriginView = null;
+  function appendNativeOrigin() {
+    const current = nativeChats?.getQuoteContext(), cached = nativeOriginView, previous = cached?.origin?.source_view;
+    if (!cached || !previous || current?.workspace_id !== cached.workspace_id || current.agent !== cached.origin.target_agent || current.chat_id !== cached.origin.target_chat_id) return;
+    ui.actions.querySelector('[data-continuation-source]')?.remove();
+    const back = el("button", "text-button", "返回原对话"); back.type = "button"; back.setAttribute("data-continuation-source", "");
+    back.title = previous.title; back.addEventListener("click", () => {
+      const view = nativeChats?.getQuoteContext();
+      if (view?.workspace_id === current.workspace_id && view.agent === current.agent && view.chat_id === current.chat_id) void openContinuationSource(previous);
+    }); ui.actions.append(back);
+  }
+  async function renderNativeOrigin(source, isCurrent) {
+    if (!continuations || !["codex", "hermes"].includes(source.agent)) return;
+    try {
+      const value = await api("/api/management/native-chat-origin?" + new URLSearchParams({ agent: source.agent, chat_id: source.chat_id }), {}, false);
+      if (!isCurrent() || value?.workspace_id !== source.workspace_id || value.scope !== "native_continuation_source" || !value.origin) return;
+      const origin = value.origin, previous = origin.source_view;
+      if (origin.target_agent !== source.agent || origin.target_chat_id !== source.chat_id || previous?.workspace_id !== source.workspace_id
+          || !["codex", "hermes"].includes(previous.agent) || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(previous.chat_id)) return;
+      nativeOriginView = { workspace_id: source.workspace_id, origin }; appendNativeOrigin();
+    } catch (_) { /* An unavailable relation never changes or replaces a native chat. */ }
+  }
+  function openContinuationSource(source) {
+    return nativeChats.selectExisting({ workspaceId: source.workspace_id, agent: source.agent, chatId: source.chat_id })
+      .catch(error => toast(userError(error, "原对话暂不可用，接续准备仍保留。")));
+  }
+  const continuations = window.RabbitContinuations ? window.RabbitContinuations.create({
+    root: $("continuation-panel"), getWorkspace: () => state.status?.workspace_id || "",
+    getState: () => ({ continuations: state.continuations, currentContinuation: state.currentContinuation }),
+    saveState: next => {
+      const previous = { continuations: state.continuations, currentContinuation: state.currentContinuation };
+      state.continuations = next.continuations; state.currentContinuation = next.currentContinuation;
+      if (checkpointBrowserState()) return true;
+      Object.assign(state, previous); return false;
+    },
+    getProfiles: () => profiles?.catalog(), onChooseConfiguration: kind => profiles?.open(kind),
+    getSendShortcut: () => state.preferences.send_shortcut, onOpenSource: openContinuationSource,
+    onOpenTarget: openContinuationSource,
+    onReadCreation: async (record, onProgress) => {
+      const found = await nativeChats.readCreation(record.creation.creation_id, record.target.agent);
+      return !!found.chat && onProgress({ created_chat_id: found.chat.id }) === true;
+    },
+    onSubmit: async (record, isCurrent, onProgress) => {
+      record = window.RabbitBrowserState.continuation(record, state.status?.workspace_id);
+      const preview = record.material_refs.length ? await api("/api/native-materials/preview", { method: "POST", body: JSON.stringify({ material_refs: record.material_refs }) }, false) : undefined;
+      if (!isCurrent()) return { accepted: false };
+      const body = { source_revision: record.snapshot.source.revision, message_ids: record.snapshot.records.map(row => row.message_id), task: record.task,
+        ...(record.material_refs.length ? { registered_material_refs: record.material_refs } : {}) };
+      const prepared = await window.RabbitNativeTextQuote.prepare(record.snapshot, body, record.target.agent, preview);
+      const snapshotSha = await continuationDigest({ source_view: record.source_view, snapshot: record.snapshot, material_refs: record.material_refs });
+      if (!isCurrent()) return { accepted: false };
+      const origin = { target_agent: record.target.agent, target_chat_id: record.creation.created_chat_id,
+        creation_id: record.creation.creation_id, source_view: record.source_view, source_revision: record.snapshot.source.revision,
+        selected_message_ids: body.message_ids, material_refs: record.material_refs, snapshot_sha256: snapshotSha };
+      return nativeChats.createContinuation(record, { text: prepared.prompt, material_refs: record.material_refs,
+        ...(prepared.material_preview ? { material_preview: prepared.material_preview } : {}), memory_profile: record.target.memory_profile }, origin, isCurrent, onProgress);
+    },
+    onError: error => toast(userError(error, "接续尚未完成，原文与创建编号保留。")),
+  }) : null;
   const nativeHandoff = window.RabbitNativeHandoff ? window.RabbitNativeHandoff.create({
     root: $("native-handoff-modal"), api, materialImages: materials,
     getSource: () => state.page === "conversations" && state.selected.type === "chat" && state.chat?.id === state.selected.id
-      ? { chat_id: state.selected.id, workspace_id: state.status?.workspace_id || "", task: ui.input.value } : null,
+      ? { chat_id: state.selected.id, workspace_id: state.status?.workspace_id || "", task: ui.input.value,
+        source_key: JSON.stringify([state.openVersion, state.contextNavigationVersion]) } : null,
     getTargets: nativeHandoffTargets,
-    placeDraft: value => nativeChats.putDraft(value),
+    placeDraft: (value, isCurrent) => nativeChats.putDraft(value, isCurrent),
     onError: error => toast(userError(error, "交接尚未完成，原草稿仍保留。")),
   }) : null;
   $("native-handoff")?.addEventListener("click", () => state.selected.type === "history" ? openHistoryTextHandoff() : nativeHandoff?.open());
-  let nativeQuoteInput = null;
+  let nativeQuoteInput = null, nativeQuoteProfile = null;
   let historyTextReadVersion = 0;
   function historyTextSource() {
     const selected = state.selected, indexed = state.historySession, workspaceId = state.status?.workspace_id;
@@ -1477,21 +2247,47 @@
     getSource: () => nativeQuoteInput?.origin_kind === "history_index" ? historyTextSource() : nativeChats?.getQuoteContext(),
     getTargets: nativeHandoffTargets,
     sourceAdapter: {
-      release: () => { nativeQuoteInput = null; },
-      read: captured => {
+      release: () => { nativeQuoteInput = nativeQuoteProfile = null; },
+      read: async captured => {
         if (!nativeQuoteInput || captured.source_key !== nativeQuoteInput.source_key || captured.workspace_id !== nativeQuoteInput.workspace_id) throw Error("原生文字来源已切换，请重新打开。");
-        return nativeQuoteInput.origin_kind === "history_index" ? window.RabbitNativeTextQuote.readIndexed(nativeQuoteInput) : window.RabbitNativeTextQuote.read(nativeQuoteInput);
+        const input = nativeQuoteInput;
+        if (input.origin_kind === "history_index") return window.RabbitNativeTextQuote.readIndexed(input);
+        let inventory;
+        try { inventory = await api("/api/management/chat-materials?" + new URLSearchParams({ kind: "native", agent: input.agent, chat_id: input.chat_id }), {}, false); }
+        catch (_) { toast("登记资料暂时未读到；这里只显示已读文字。"); }
+        return window.RabbitNativeTextQuote.read(input, inventory);
       },
-      prepare: ({ captured, source, records, body, targetAgent }) => window.RabbitNativeTextQuote.prepare({
-        snapshot_kind: "native_text", workspace_id: captured.workspace_id, source, records }, body, targetAgent),
+      prepare: async ({ captured, source, records, snapshot, body, targetAgent }) => {
+        const preview = body.registered_material_refs?.length ? await api("/api/native-materials/preview", { method: "POST", body: JSON.stringify({ material_refs: body.registered_material_refs }) }, false) : undefined;
+        return window.RabbitNativeTextQuote.prepare(snapshot || { snapshot_kind: "native_text", workspace_id: captured.workspace_id, source, records }, body, targetAgent, preview);
+      },
+    },
+    onPrepareContinuation: async (value, isCurrent) => {
+      const profile = nativeQuoteProfile?.agent_instance_id === "local/" + value.target_agent ? nativeQuoteProfile : null;
+      if (!continuations || !isCurrent() || await continuations.prepare(value, profile) !== true) return false;
+      if (!isCurrent()) return false;
+      state.browserPageTouched = true; showPage("continuation"); return true;
     },
     placeDraft: (value, isCurrent) => nativeChats.putDraft(value, isCurrent),
     onError: error => toast(userError(error, "原生文字接力尚未完成，原草稿保留。")),
   }) : null;
-  function openNativeTextHandoff(value) {
+  function resumeNativeContinuation(value, chosenProfile = null) {
+    if (continuations && ["codex", "hermes"].includes(value?.agent)) {
+      const saved = continuations.findBySource({ workspace_id: value.workspace_id, agent: value.agent, chat_id: value.chat_id });
+      if (saved) {
+        if (continuations.show(saved.id) !== true) return false;
+        state.browserPageTouched = true; showPage("continuation");
+        if (chosenProfile) continuations.chooseConfiguration("ai", chosenProfile, continuations.getComposerView()?.view);
+        return true;
+      }
+    }
+    return false;
+  }
+  function openNativeTextHandoff(value, chosenProfile = null) {
     if (!nativeTextHandoff) throw Error("原生文字接力组件尚未加载。");
-    nativeHandoff?.close(); nativeTextHandoff.close(); nativeQuoteInput = value;
-    return nativeTextHandoff.open();
+    if (resumeNativeContinuation(value, chosenProfile)) return true;
+    nativeHandoff?.close(); nativeTextHandoff.close(); nativeQuoteInput = value; nativeQuoteProfile = chosenProfile;
+    return nativeTextHandoff.open(chosenProfile ? agents.backendOfInstance(chosenProfile.agent_instance_id) : null);
   }
   let nativeFileInput = null;
   const nativeFileHandoff = window.RabbitNativeHandoff && window.RabbitNativeFileQuote ? window.RabbitNativeHandoff.create({
@@ -1658,18 +2454,24 @@
     finally { state.backendChoosing = false; updateComposer(); }
   }
   function workspaceHeader() {
+    if (state.page === "continuation") {
+      ui.title.textContent = "接着《" + (continuations?.current()?.source_view.title || "原对话") + "》";
+      ui.eyebrow.textContent = ui.meta.textContent = ""; ui.actions.replaceChildren(); ui.composer.hidden = true; return;
+    }
     if (state.page === "native-chats") {
       ui.title.textContent = window.RabbitWorkspace?.language?.() === "en" ? "Native chats" : "原生对话";
       ui.eyebrow.textContent = "小白兔";
       ui.meta.textContent = window.RabbitWorkspace?.language?.() === "en" ? "Native sessions · explicit connections" : "原生会话 · 独立连接";
-      ui.actions.replaceChildren(button(window.RabbitWorkspace?.language?.() === "en" ? "Session settings" : "会话设置", "text-button", () => showPage("settings", "native-chats"))); ui.composer.hidden = true;
+      ui.actions.replaceChildren(button(window.RabbitWorkspace?.language?.() === "en" ? "Session settings" : "会话设置", "text-button", () => showPage("settings", "native-chats"))); appendNativeOrigin(); ui.composer.hidden = true;
       return;
     }
     if (state.page === "specialist") {
       ui.title.textContent = window.RabbitWorkspace?.language?.() === "en" ? "Rabbit specialist conversation" : "小白兔专员对话框";
       ui.eyebrow.textContent = "";
       ui.meta.textContent = "";
-      ui.actions.replaceChildren(); ui.composer.hidden = true;
+      ui.actions.replaceChildren();
+      if (specialistBinding?.return_to && specialistBinding.workspace_id === state.status?.workspace_id) ui.actions.append(button("返回原页面", "text-button", returnFromSpecialist));
+      ui.composer.hidden = true;
       return;
     }
     const section = state.workspaceSections[state.page];
@@ -1729,18 +2531,14 @@
   }
   function showPage(page, tab, { keepSidebar = false } = {}) {
     fileTasks?.close(); fileMaterials?.close(); projectPublish?.close();
-    if (!['conversations', 'management', 'settings', 'specialist', 'native-chats'].includes(page)) return;
+    if (!['conversations', 'management', 'settings', 'specialist', 'native-chats', 'continuation'].includes(page)) return;
     if (page === "specialist" && !specialistEnabled()) return;
     if (page === "native-chats" && !nativeChatsEnabled()) return;
-    if (page === "specialist" && state.page !== "specialist") {
-      try { specialistCommandTarget = currentSpecialistWorkContext(); }
-      catch (_) { specialistCommandTarget = null; /* Viewing history cannot depend on an optional work target. */ }
-      captureSpecialistGuideTarget();
-    }
     specialistLocationRevision++;
     saveDraft();
     profiles?.close(false);
     const previousPage = state.page;
+    const guide = tab || specialistBinding?.guide || "model";
     if (previousPage !== page) { closeSourceUpdate(false); closeSourceImages(false); }
     if (previousPage !== page) ++state.contextNavigationVersion;
     if (previousPage === "conversations" && page !== "conversations") invalidateContextPreview("已离开对话页，请返回后重新查看本轮上下文。");
@@ -1750,21 +2548,27 @@
     if (page !== "specialist") specialist?.hide();
     if (page !== "specialist") statusChecks?.hide();
     if (page !== "native-chats") nativeChats?.hide();
+    if (page !== "continuation") continuations?.hide();
     document.querySelectorAll(".page-nav").forEach((node) => {
-      const active = node.dataset.page === (page === "specialist" || page === "native-chats" ? "conversations" : page);
+      const active = node.dataset.page === (["specialist", "native-chats", "continuation"].includes(page) ? "conversations" : page);
       node.classList.toggle("active", active);
       if (active) node.setAttribute("aria-current", "page"); else node.removeAttribute("aria-current");
     });
     ui.scroll.hidden = page !== "conversations";
     if (page === "conversations") {
       if (previousPage !== "conversations") ui.scroll.scrollTop = state.conversationScrollTop;
+      if (state.selected.type === "new" && state.homeNativeChoice?.profile) { state.profile_snapshot = toProfileSnapshot(state.homeNativeChoice.profile, state.homeNativeChoice.memory); state.backend = state.homeNativeChoice.agent; state.model_id = state.homeNativeChoice.profile.model_id; }
       if (workspace) workspace.hide();
       if (state.selected.type === "history") historyHeader(); else headerForChat(state.chat);
     } else if (page === "native-chats") {
       workspaceHeader(); workspace?.hide(); nativeChats.show();
+    } else if (page === "continuation") {
+      workspace?.hide(); workspaceHeader();
+      continuations?.show();
     } else if (page === "specialist") {
       workspaceHeader(); workspace?.hide(); statusChecks?.hide();
       const location = specialistLocationRevision, scope = state.status?.workspace_id;
+      if (scope) { const current = () => state.page === "specialist" && location === specialistLocationRevision; void readSpecialistGuideHistory(scope, current); void readSpecialistDshGuide(scope, current); }
       // Initial native-history restoration uses the same holder as tool facts.
       // Read the report after it releases that holder, and only for this visit.
       Promise.resolve(specialist.show({ restoreHistory: true })).then(() => {
@@ -1779,7 +2583,10 @@
     }
     updateComposer();
     renderSidebar();
-    if (!keepSidebar) toggleSidebar(false);
+    if (page === "specialist") {
+      if (previousPage !== "specialist" || tab) specialist.openGuide?.(guide);
+      toggleSidebar(true, false); specialist.focusComposer?.();
+    } else if (!keepSidebar) toggleSidebar(false);
     checkpointBrowserState();
   }
   function stopPolling() { clearTimeout(state.pollTimer); state.pollTimer = null; }
@@ -2201,7 +3008,6 @@
     closeSourceImages(false);
     invalidateContextPreview("已开始新的聊天，请重新查看本轮上下文。");
     saveDraft(); stopPolling(); ++state.openVersion;
-    if (!state.browserRestoring && !draftHasContent(state.drafts.get("__new__") || "", state.draftAttachments.get("__new__") || [], state.taskIntents.get("__new__"))) state.profileChoices.delete("__new__");
     state.selected = { type: "new", id: null };
     state.profile_snapshot = null; state.profileSelection = null; state.profileSelectionSync = null; state.profileSelectionIntent = false; state.profileLegacy = false; state.profileNotice = ""; profiles?.close(false);
     state.memoryRecallError = false;
@@ -2262,6 +3068,14 @@
   const draftCharacterLimit = 30000;
   function characterCount(value) { return Array.from(value).length; }
   function quoteDraft() {
+    if (state.page === "native-chats") {
+      const native = nativeChats?.captureQuoteDraft?.();
+      if (!native) return { stamp: "native-unavailable", text: "", title: "原生对话", active: false, attachment_ids: [], task_intent: { mode: "chat", artifact_ids: [] }, file_inputs: [], allow_quote_files: false, allow_quote_images: false, busy: true };
+      const refs = native.material_refs, images = refs.filter(item => item.kind === "image").map(item => item.id), fileRefs = refs.filter(item => item.kind === "text"), files = fileRefs.map(item => item.id);
+      const fileInputs = fileRefs.map(ref => { const item = sourceFile(ref.id); return item && item.sha256 === ref.sha256 ? item : { id: ref.id, available: false, content_verified: false }; });
+      return { stamp: JSON.stringify([state.page, state.contextNavigationVersion, native.workspace_id, native.agent, native.chat_id, native.stamp]), text: native.text, title: native.title || "原生对话", active: true,
+        attachment_ids: images, task_intent: { mode: "chat", artifact_ids: files }, file_inputs: fileInputs, allow_quote_files: fileInputsSupported() && fileInputs.every(item => item.available && item.content_verified), allow_quote_images: !["claude", "dsh"].includes(native.agent), busy: false, native_quote: native };
+    }
     const generated = availableFileArtifacts(), fileInputs = state.task_intent.artifact_ids.map(id => sourceFile(id) || generated.get(id) || { id, available: false, content_verified: false });
     return { stamp: `${state.page}:${state.openVersion}:${state.contextNavigationVersion}:${draftKey()}:${state.sourceUpdateInputVersion}:${state.backendChoiceVersion}:${state.backend}:${state.model_id}:${JSON.stringify(state.profile_snapshot)}:${JSON.stringify(state.task_intent)}:${JSON.stringify(fileInputs)}`,
       text: ui.input.value, title: ui.title.textContent || "新对话", active: state.page === "conversations",
@@ -2332,7 +3146,7 @@
     // browser's Home state fails; these two journals are not one transaction.
     if (state.selected.type !== source.type || source.key !== draftKey() || source.openVersion !== state.openVersion || source.editVersion !== state.sourceUpdateInputVersion
         || source.workspaceId !== state.status?.workspace_id || ui.input.value !== source.text
-        || JSON.stringify(state.attachment_ids) !== JSON.stringify(source.attachment_ids) || !sameTaskIntent(state.task_intent, source.task_intent)) return;
+        || JSON.stringify(state.attachment_ids) !== JSON.stringify(source.attachment_ids) || !sameTaskIntent(state.task_intent, source.task_intent)) return false;
     const previous = { text: ui.input.value, images: state.attachment_ids, task: state.task_intent };
     const empty = { mode: "chat", artifact_ids: [] };
     ui.input.value = ""; state.attachment_ids = []; state.task_intent = empty;
@@ -2340,10 +3154,13 @@
     if (!checkpointBrowserState()) {
       ui.input.value = previous.text; state.attachment_ids = previous.images; state.task_intent = previous.task;
       state.drafts.set(source.key, previous.text); state.draftAttachments.set(source.key, previous.images); state.taskIntents.set(source.key, previous.task);
-      toast("已带入原生草稿；来源页的副本仍保留，没有发送。");
+      toast("已带入原生草稿；来源页的副本仍保留，请在目标对话核对发送结果。");
+      return false;
     }
+    return true;
   }
-  function putQuoteDraft(text, captured, imageIds = captured.attachment_ids || [], fileIds = captured.task_intent?.artifact_ids || []) {
+  function putQuoteDraft(text, captured, imageIds = captured.attachment_ids || [], fileIds = captured.task_intent?.artifact_ids || [], isCurrent = () => true, fileVersions = []) {
+    if (captured.native_quote) return putNativeQuoteDraft(text, captured, imageIds, fileIds, isCurrent, fileVersions);
     const current = quoteDraft();
     let checked, checkedIntent;
     try { checked = attachmentIds(imageIds); checkedIntent = taskIntent({ mode: current.task_intent.mode, artifact_ids: fileIds }); } catch (_) { return false; }
@@ -2364,6 +3181,46 @@
     ui.input.dispatchEvent(new Event("input", { bubbles: true }));
     checkpointBrowserState();
     return true;
+  }
+  async function putNativeQuoteDraft(text, captured, imageIds, fileIds, isCurrent, fileVersions) {
+    const current = () => typeof isCurrent === "function" && isCurrent() && state.page === "native-chats" && quoteDraft().active && quoteDraft().stamp === captured.stamp;
+    const expected = captured.native_quote, images = attachmentIds(imageIds), oldImages = expected.material_refs.filter(item => item.kind === "image").map(item => item.id), oldFiles = expected.material_refs.filter(item => item.kind === "text").map(item => item.id);
+    let files; try { files = taskIntent({ mode: "chat", artifact_ids: fileIds }).artifact_ids; } catch (_) { return false; }
+    if (!current() || typeof text !== "string" || characterCount(text) > draftCharacterLimit || !sameAttachments(images.slice(0, oldImages.length), oldImages)
+        || JSON.stringify(files.slice(0, oldFiles.length)) !== JSON.stringify(oldFiles)) return false;
+    const additions = images.slice(oldImages.length);
+    const fileAdditions = files.slice(oldFiles.length);
+    if (additions.length && ["claude", "dsh"].includes(expected.agent)) return false;
+    if (fileAdditions.length && (!fileInputsSupported() || !Array.isArray(fileVersions))) return false;
+    const versions = new Map();
+    for (const item of fileVersions) {
+      if (!item || typeof item.id !== "string" || !/^[a-f0-9]{64}$/.test(item.sha256) || versions.has(item.id)) return false;
+      versions.set(item.id, item.sha256);
+    }
+    if (fileAdditions.some(id => !versions.has(id))) return false;
+    if (!additions.length && !fileAdditions.length) return current() && nativeChats.applyQuoteDraft(expected, text, expected.material_refs);
+    if (!window.crypto?.subtle || !window.RabbitNativeMaterials || additions.length && !materials || fileAdditions.length && !fileMaterials) throw Error("材料核对组件尚未就绪；原草稿保留。");
+    const newImages = await Promise.all(additions.map(async id => {
+      const original = await materials.image(id, true), prefix = `data:${original.material.mime};base64,`;
+      if (!current() || !original.data_url.startsWith(prefix)) throw Error("原图或草稿已变化；原草稿保留。");
+      const bytes = Uint8Array.from(atob(original.data_url.slice(prefix.length)), char => char.charCodeAt(0));
+      if (bytes.length !== original.material.size_bytes) throw Error("原图没有读完整；原草稿保留。");
+      const digest = [...new Uint8Array(await window.crypto.subtle.digest("SHA-256", bytes))].map(byte => byte.toString(16).padStart(2, "0")).join("");
+      return { kind: "image", id, sha256: digest };
+    }));
+    const newFiles = await Promise.all(fileAdditions.map(async id => {
+      const item = await fileMaterials.inspect(id);
+      if (!current() || item.id !== id || item.sha256 !== versions.get(id) || !item.available || !item.content_verified) throw Error("文件版本或草稿已变化；原草稿保留。");
+      return { kind: "text", id, sha256: item.sha256 };
+    }));
+    if (!current()) return false;
+    const refs = window.RabbitNativeMaterials.refs([...expected.material_refs, ...newImages, ...newFiles]);
+    const reader = window.RabbitNativeMaterials.create({ api, getWorkspace: () => state.status?.workspace_id || "" }); reader.setScope(captured.stamp);
+    const values = await Promise.all(refs.map(ref => reader.read(ref, { refresh: true })));
+    if (!current()) return false;
+    const preview = window.RabbitNativeMaterials.preview(refs, { material_refs: refs,
+      images: values.filter((_value, index) => refs[index].kind === "image"), files: values.filter((_value, index) => refs[index].kind === "text") });
+    return current() && nativeChats.applyQuoteDraft(expected, text, refs, preview);
   }
   function captureDocumentDraft(version) {
     return { version, openVersion: state.openVersion, navigationVersion: state.contextNavigationVersion, key: draftKey(), text: ui.input.value, inputVersion: state.sourceUpdateInputVersion, fileView: fileMaterialView() };
@@ -3294,11 +4151,99 @@
   }
   function submitComposer(event) {
     event?.preventDefault();
-    if (!draftHasContent() && composerStopTarget) return cancelRun(composerStopTarget);
+    if (composerStopTarget) return cancelRun(composerStopTarget);
     return sendMessage();
+  }
+  async function homeSourceHash(draft, base, parameters) {
+    const value = { text: draft.text, material_refs: draft.material_refs || [], memory: draft.memory_profile ?? null, base_profile: base, parameters };
+    const canonical = JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+    return [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical)))].map(value => value.toString(16).padStart(2, "0")).join("");
+  }
+  function checkpointHomeHandoff(previous, next) {
+    if (state.homeNativeHandoff !== previous) return false;
+    state.homeNativeHandoff = next;
+    if (checkpointBrowserState()) return true;
+    state.homeNativeHandoff = previous; return false;
+  }
+  function homePreparation(record, workspace) {
+    let active = record;
+    return { creation_id: record.creation_id, created_chat_id: record.created_chat_id, base_profile: record.base_profile, parameters: record.parameters,
+      base_selection: record.base_selection, local_request: record.local_request, local_result: record.local_result,
+      onProgress(patch) {
+        if (workspace !== state.status?.workspace_id || state.homeNativeHandoff !== active || !patch || typeof patch !== "object" || Array.isArray(patch)
+            || Object.keys(patch).some(key => !["created_chat_id", "base_selection", "local_request", "local_result"].includes(key))) return false;
+        try {
+          const next = window.RabbitBrowserState.homeHandoff({ ...active, ...patch });
+          if (next.base_selection && next.base_selection.workspace_id !== workspace || next.local_result && next.local_result.workspace_id !== workspace
+              || active.created_chat_id && next.created_chat_id !== active.created_chat_id || active.base_selection && (!next.base_selection || next.base_selection.selection.revision < active.base_selection.selection.revision)
+              || active.local_request && JSON.stringify(next.local_request) !== JSON.stringify(active.local_request)
+              || active.local_result && JSON.stringify(next.local_result) !== JSON.stringify(active.local_result)) return false;
+          if (!checkpointHomeHandoff(active, next)) return false;
+          active = next; return true;
+        } catch (_) { return false; }
+      } };
+  }
+  function finishHomeHandoff(record, choice) {
+    const active = state.homeNativeHandoff;
+    if (!active || active.creation_id !== record.creation_id || state.homeNativeChoice !== choice || state.homeConfiguration?.draft_id !== record.draft_id
+        || state.homeConfiguration.revision !== record.configuration_revision) return false;
+    const previousIdentity = state.homeConfiguration, previousSnapshot = state.profile_snapshot, previousModel = state.model_id;
+    state.homeConfiguration = nextHomeConfiguration(true);
+    state.homeNativeChoice = homeChoice(record.base_profile, choice.memory, "codex");
+    state.profile_snapshot = toProfileSnapshot(record.base_profile, choice.memory); state.model_id = record.base_profile.model_id;
+    state.profileChoices.set("__new__", state.profile_snapshot);
+    if (checkpointHomeHandoff(active, null)) return true;
+    state.homeConfiguration = previousIdentity; state.homeNativeChoice = choice; state.profile_snapshot = previousSnapshot; state.model_id = previousModel;
+    state.profileChoices.set("__new__", previousSnapshot); return false;
+  }
+  async function sendHomeNative() {
+    const choice = homeNativeChoice();
+    if (!choice || state.nativeHomeSending || !ui.input.value.trim() || !draftHasContent() || !profileReady()) return;
+    let source;
+    state.nativeHomeSending = true; updateComposer();
+    const current = () => state.homeNativeChoice === choice && sameNativeDraft(source);
+    try {
+      source = captureNativeDraft("new");
+      const draft = await prepareNativeDraft(choice.agent, source, current);
+      if (!current()) return;
+      if (saveDraft() !== true) throw Error("浏览器不能保存当前草稿，文字和材料保留。");
+      let preparation = null, record = state.homeNativeHandoff;
+      if (choice.local_base || record) {
+        const identity = state.homeConfiguration, base = choice.local_base, parameters = { model_id: choice.profile?.model_id, reasoning_effort: choice.profile?.reasoning_effort };
+        const hash = base ? await homeSourceHash(draft, base, parameters) : null;
+        if (!current()) return;
+        if (record && (!base || record.draft_id !== identity?.draft_id || record.configuration_revision !== identity.revision || record.source_hash !== hash)) {
+          const target = record.created_chat_id || await readHomeCreation(record, source.workspaceId);
+          if (target && current()) await nativeChats?.selectExisting({ agent: "codex", chatId: target, workspaceId: source.workspaceId }, current);
+          toast("这份新草稿与上次交接不同。原目标保留，请先核对上次交接；新稿没有发送。"); return;
+        }
+        if (!record) {
+          record = window.RabbitBrowserState.homeHandoff({ draft_id: identity.draft_id, configuration_revision: identity.revision, creation_id: crypto.randomUUID(), created_chat_id: null,
+            base_profile: base, parameters, base_selection: null, local_request: null, local_result: null, source_hash: hash });
+          if (!checkpointHomeHandoff(null, record)) throw Error("浏览器不能保存创建编号，原稿保留，尚未创建。");
+        }
+        preparation = homePreparation(record, source.workspaceId);
+      }
+      // Creation and send keep their existing request journals; this submission
+      // only hands the saved draft to that renderer's ordinary Send action.
+      if (await nativeChats?.createNew(choice.agent, current, choice.local_base || choice.profile, draft, true, preparation)) {
+        const consumed = clearNativeDraft(source);
+        if (record && consumed && !finishHomeHandoff(record, choice)) toast("原目标已保存草稿；首页交接记录仍需核对。");
+      }
+      else if (current()) toast("创建结果尚未确认，请在设置中的 Agent 会话核对；原稿保留，没有自动重发。");
+    } catch (error) {
+      // A known created target is the recovery destination; do not offer a
+      // fresh Home creation as if the original attempt had never happened.
+      if (error.createdChatId && current()) {
+        try { await nativeChats?.selectExisting({ agent: choice.agent, chatId: error.createdChatId, workspaceId: source.workspaceId }, current); } catch (_) { /* The exact target remains in the original creation journal. */ }
+      }
+      toast(userError(error, "发送尚未完成，请核对原生对话；原草稿保留，没有自动重发。"));
+    }
+    finally { state.nativeHomeSending = false; updateComposer(); }
   }
   async function sendMessage(event) {
     if (event) event.preventDefault();
+    if (homeNativeChoice()) return sendHomeNative();
     if (historyUsesNative()) {
       if (!draftHasContent() || !nativeAdoptionSource() || currentUploadCount() || fileInputsUnready() || state.task_intent.mode !== "chat") return;
       return continueNativeHistory();
@@ -3426,7 +4371,7 @@
     if (!target || state.page !== "conversations" || state.selected.type !== "chat" || target.chatId !== state.selected.id
         || target.version !== state.openVersion || target.runId !== state.run?.id || typeof target.runId !== "string" || !target.runId
         || target.workspace !== (state.status?.workspace_id || null)
-        || !isRunning() || state.cancelling || state.run.cancel_requested || state.run.status === "cancelling" || draftHasContent()) return;
+        || !isRunning() || state.cancelling || state.run.cancel_requested || state.run.status === "cancelling") return;
     const runId = target.runId, version = target.version, chatId = target.chatId;
     const current = () => state.page === "conversations" && state.selected.type === "chat"
       && version === state.openVersion && state.selected.id === chatId && state.run?.id === runId
@@ -3447,11 +4392,33 @@
   }
   async function updateHistory() {
     const node = $("refresh-history"); node.disabled = true; node.textContent = "更新中…";
+    historySourceSerial++; historySourcePending = false;
+    const scope = state.status?.workspace_id || null;
+    const current = () => !scope || state.status?.workspace_id === scope;
     try {
-      await api("/api/history/refresh", { method: "POST", body: "{}" });
-      await refreshStatus(); if (state.listView === "history") await loadHistoryList(true);
-      toast("历史记录已更新。");
-    } catch (error) { toast(userError(error, "历史暂时没有更新成功，请稍后再试。")); }
+      const result = await api("/api/history/refresh", { method: "POST", body: "{}" }, false);
+      if (!result || result.ok !== true || !result.stats || typeof result.stats !== "object" || Array.isArray(result.stats)
+          || Object.hasOwn(result.stats, "source_pending") && typeof result.stats.source_pending !== "boolean") throw Error("历史更新结果尚未确认。");
+      if (!current()) return;
+      checkHistorySources(true);
+      let statusRead = true;
+      try { await refreshStatus(); } catch (_) { statusRead = false; }
+      if (!current()) return;
+      try {
+        // Keep the current filter, loaded rows, scroll position and draft while
+        // the unified list is re-read. A newer view discards this response.
+        const refreshed = await refreshChats(current);
+        if (!current() || refreshed === null) return;
+        toast(result?.stats?.source_pending === true ? "已更新读取时的记录；写入中的内容稍后可再更新。" : statusRead ? "历史记录已更新。" : "历史已更新；读取时间暂时没有刷新。");
+      } catch (_) {
+        if (current()) toast("历史已更新，但列表暂时没有读回来，请稍后重试。");
+      }
+    } catch (error) {
+      if (current()) {
+        const rejected = [400, 403, 409, 413].includes(error?.status);
+        toast(rejected ? `历史更新未完成。${userError(error, "请稍后再试。")}` : "历史更新结果尚未确认；请稍后查看对话列表，未自动重发。");
+      }
+    }
     finally { node.disabled = false; node.textContent = "更新"; }
   }
 
@@ -3491,14 +4458,6 @@
     checkpointBrowserState(true);
   });
   $("specialist-composer-label").addEventListener("click", () => showPage("specialist"));
-  // Every Agent uses the same nameplate; navigation needs no Agent-specific
-  // settings UI and never changes a configuration by itself.
-  document.addEventListener("click", event => {
-    if (event.defaultPrevented || !event.target?.closest?.("button.profile-nameplate")) return;
-    if (!specialistEnabled()) return;
-    showPage("specialist");
-    specialist.openGuide?.("model");
-  });
   $("choose-ai-profile").addEventListener("click", () => profiles?.open("ai"));
   $("choose-memory-profile").addEventListener("click", () => profiles?.open("memory"));
   ui.input.addEventListener("input", () => {
@@ -3537,8 +4496,9 @@
   ui.contextButton.addEventListener("click", previewContext);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) { saveDraft(); stopPolling(); state.syncRequested = false; if (state.syncAbort) state.syncAbort.abort(); }
-    else schedulePoll(true);
+    else { schedulePoll(true); checkHistorySources(); }
   });
+  window.addEventListener("focus", () => checkHistorySources());
   window.addEventListener("pagehide", () => saveDraft());
   ui.scroll.addEventListener("scroll", () => checkpointBrowserState(true), { passive: true });
   window.addEventListener("resize", () => toggleSidebar(window.innerWidth <= 720 && ui.sidebar.classList.contains("is-open"), false));
@@ -3551,6 +4511,7 @@
       $("connection-state").textContent = "连接暂时断开";
       state.transientError = "暂时连不上这台电脑。确认助手仍在运行后，刷新页面再试。"; renderRunNotice();
     }
+    if (results[0].status === "fulfilled") checkHistorySources();
     if (results[2].status === "rejected") toast("设置暂时没读出来，使用默认设置。可到设置页重试。");
     const snapshot = beginBrowserRestore();
     const freshEntry = window.performance?.getEntriesByType?.("navigation")?.[0]?.type === "navigate";

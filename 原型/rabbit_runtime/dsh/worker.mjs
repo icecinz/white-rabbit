@@ -270,6 +270,10 @@ export function createBridge(ctx, config, { toFetchHandler, resolveSessionPreset
       return { rpcId, result: { ok: true, value: { ...value, through_seq: value.durable_through_seq, persisted: true } } }
     }
     const before = live()
+    // Unlike strict resume above, a guide read must never attach a cold
+    // session or query a running Agent. The original provider may still do
+    // its own network work while listing model metadata.
+    if (method === 'session.models' && before.agent.status !== 'idle') throw new Error('session_not_live')
     if (method === 'session.info') {
       let disk = null
       const rows = await ctx.sessionPersistence.listSnapshots(signal)
@@ -294,6 +298,7 @@ export function createBridge(ctx, config, { toFetchHandler, resolveSessionPreset
     }
     const response = await native(method, p, rpcId, signal)
     const after = live(); if (before.agent !== after.agent || before.session !== after.session) throw new Error('native_owner_changed')
+    if (method === 'session.models' && after.agent.status !== 'idle') throw new Error('native_owner_changed')
     return response
   }
   function lifecycle(type, payload) {

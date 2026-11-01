@@ -78,7 +78,7 @@
     root.hidden = true;
     function current() {
       const draft = getDraft();
-      try { return !root.hidden && captured && draft.stamp === captured.stamp && draft.text === captured.text && JSON.stringify(attachmentIds(draft.attachment_ids)) === JSON.stringify(captured.attachment_ids) && JSON.stringify(fileIntent(draft.task_intent)) === JSON.stringify(fileIntent(captured.task_intent)) && JSON.stringify(draft.file_inputs || []) === JSON.stringify(captured.file_inputs || []) && draft.active; }
+      try { return !root.hidden && captured && draft.stamp === captured.stamp && draft.text === captured.text && JSON.stringify(attachmentIds(draft.attachment_ids)) === JSON.stringify(captured.attachment_ids) && JSON.stringify(fileIntent(draft.task_intent)) === JSON.stringify(fileIntent(captured.task_intent)) && JSON.stringify(draft.file_inputs || []) === JSON.stringify(captured.file_inputs || []) && (draft.allow_quote_files !== false) === (captured.allow_quote_files !== false) && (draft.allow_quote_images !== false) === (captured.allow_quote_images !== false) && draft.active; }
       catch (_) { return false; }
     }
     function close() {
@@ -144,10 +144,36 @@
       refresh();
       if (!current() || insertButton.disabled) return false;
       const plan = combined(), draftSnapshot = { ...captured, attachment_ids: [...captured.attachment_ids], task_intent: fileIntent(captured.task_intent) };
-      if (!plan.selected_ids.length && !plan.selected_files.length) { if (!putDraft(plan.text, draftSnapshot, [...plan.attachment_ids], [...plan.artifact_ids])) { refresh(); return false; } close(); return true; }
       const job = { epoch: panelEpoch, selectionVersion }, frozen = { text: plan.text, attachment_ids: [...plan.attachment_ids], selected_ids: [...plan.selected_ids], artifact_ids: [...draftSnapshot.task_intent.artifact_ids], selected_files: [...plan.selected_files], resolved_files: new Map(plan.resolved_files) };
-      const liveJob = () => inserting === job && job.epoch === panelEpoch && job.selectionVersion === selectionVersion && current() && !getDraft().busy;
+      const sameJob = () => inserting === job && job.epoch === panelEpoch && job.selectionVersion === selectionVersion && !root.hidden;
+      // An asynchronous host must call this after each await and immediately
+      // before changing its own draft. Once written, current() is expected to
+      // change, so sameJob() rather than current() guards the modal close.
+      const liveJob = () => sameJob() && current() && !getDraft().busy;
       inserting = job; insertError = ""; refresh();
+      const rejected = () => {
+        if (liveJob()) insertError = "暂时不能放入草稿；原文字和材料保留，请重新核对后再试。";
+        return false;
+      };
+      const finish = accepted => {
+        if (accepted !== true) return rejected();
+        if (!sameJob()) return false;
+        const draft = getDraft();
+        try {
+          if (!draft.active || draft.text !== frozen.text || JSON.stringify(attachmentIds(draft.attachment_ids)) !== JSON.stringify(frozen.attachment_ids)
+              || JSON.stringify(fileIntent(draft.task_intent).artifact_ids) !== JSON.stringify(frozen.artifact_ids)) return false;
+        } catch (_) { return false; }
+        close(); return true;
+      };
+      const clear = () => { if (inserting === job) { inserting = null; refresh(); } };
+      if (!plan.selected_ids.length && !plan.selected_files.length) {
+        frozen.artifact_ids = [...plan.artifact_ids];
+        try {
+          const result = putDraft(frozen.text, draftSnapshot, frozen.attachment_ids, frozen.artifact_ids, liveJob);
+          if (result && typeof result.then === "function") return Promise.resolve(result).then(finish, rejected).finally(clear);
+          const accepted = finish(result); clear(); return accepted;
+        } catch (_) { const accepted = rejected(); clear(); return accepted; }
+      }
       return (async () => {
         try {
           await Promise.all([
@@ -155,8 +181,9 @@
             ...frozen.selected_files.map(async file => { if (typeof getFile !== "function") throw Error(); checkedFile(await getFile(file), file); }),
           ]);
           if (!liveJob()) return false;
+          const fileVersions = new Map();
           for (const file of frozen.selected_files) {
-            if (!file.origin) { if (!frozen.artifact_ids.includes(file.item.id)) frozen.artifact_ids.push(file.item.id); continue; }
+            if (!file.origin) { if (!frozen.artifact_ids.includes(file.item.id)) frozen.artifact_ids.push(file.item.id); fileVersions.set(file.item.id, file.item.sha256); continue; }
             let copy = frozen.resolved_files.get(file.identity) || fileCopies.get(file.identity);
             if (copy) { checkedFile(await getFile({ item: copy, origin: null }), { item: copy, origin: null }); }
             else {
@@ -169,14 +196,16 @@
             }
             if (!liveJob()) return false;
             if (!frozen.artifact_ids.includes(copy.id)) frozen.artifact_ids.push(copy.id);
+            fileVersions.set(copy.id, copy.sha256);
           }
           if (!liveJob() || frozen.artifact_ids.length > maxFiles) return false;
-          if (!putDraft(frozen.text, draftSnapshot, frozen.attachment_ids, frozen.artifact_ids)) return false;
-          close(); return true;
+          const accepted = await putDraft(frozen.text, draftSnapshot, frozen.attachment_ids, frozen.artifact_ids, liveJob,
+            [...fileVersions].map(([id, sha256]) => ({ id, sha256 })));
+          return finish(accepted);
         } catch (_) {
           if (inserting === job && job.epoch === panelEpoch && job.selectionVersion === selectionVersion && current()) insertError = "所选材料暂时无法完整核验；文字、图片和文件整份未放入。已保存的成果副本可从‘已添加的文件’找回。请重新查看材料或取消该项后再试。";
           return false;
-        } finally { if (inserting === job) { inserting = null; refresh(); } }
+        } finally { clear(); }
       })();
     }
     function snapshot(item, message, index) {
@@ -260,7 +289,7 @@
       if (inside) [...collection.querySelectorAll(".quote-select")].find(control => control.dataset.recordKey === record.key)?.focus();
     }
     function toggleImage(record, image) {
-      if (root.hidden || !current() || !records.includes(record)) { refresh(); return; }
+      if (root.hidden || !current() || captured?.allow_quote_images === false || !records.includes(record)) { refresh(); return; }
       const existing = picked.get(record.key), seen = existing || record;
       const frozen = seen.images.find(candidate => candidate.key === image.key);
       if (!frozen?.ready || !frozen.id) return;
@@ -273,7 +302,7 @@
       if (inside) [...collection.querySelectorAll(".quote-image-select")].find(control => control.dataset.imageKey === frozen.key)?.focus();
     }
     function toggleFile(record, file) {
-      if (root.hidden || !current() || !records.includes(record)) { refresh(); return; }
+      if (root.hidden || !current() || captured?.allow_quote_files === false || !records.includes(record)) { refresh(); return; }
       const seen = picked.get(record.key) || record, frozen = seen.files.find(candidate => candidate.key === file.key);
       if (!frozen?.ready) return;
       const chosen = chosenCopy(seen); if (!chosen) return;
@@ -299,7 +328,10 @@
           if (root.hidden || capturedEpoch !== panelEpoch || fileViews.get(key)?.token !== token) return;
           fileViews.set(key, { shown: true, data, token }); renderRecords();
         } catch (_) { if (!root.hidden && capturedEpoch === panelEpoch && fileViews.get(key)?.token === token) { fileViews.set(key, { shown: true, token, error: "文件原文暂时无法读取。放入前会再次核验，未保存副本或改变草稿。" }); renderRecords(); } }
-      }, "quote-action quote-file-view"); view.dataset.fileKey = file.key; row.append(select, view);
+      }, "quote-action quote-file-view"); view.dataset.fileKey = file.key;
+      if (captured?.allow_quote_files === false) row.append(node("p", "quote-note", "当前原生对话暂不能引用文件。"));
+      else row.append(select);
+      row.append(view);
       if (state?.shown) {
         if (state.pending) row.append(node("p", "quote-note", "正在读取完整原文…"));
         else if (state.error) row.append(node("p", "quote-note", state.error));
@@ -331,7 +363,9 @@
         } catch (_) { if (!root.hidden && capturedEpoch === panelEpoch && imageViews.get(key)?.token === viewToken) { imageViews.set(key, { shown: true, pending: false, id: image.id, token: viewToken, error: "原图暂时无法显示。可以重试；放入前会独立核验，不会把缺图悄悄跳过。" }); const live = records.find(candidate => candidate.key === record.key), shown = picked.get(record.key) || live; if (live && shown?.images.some(candidate => candidate.key === key && candidate.id === image.id)) renderRecords(); } }
       }, "quote-image-view");
       view.dataset.imageKey = image.key;
-      row.append(choose, view);
+      if (captured?.allow_quote_images === false) row.append(node("p", "quote-note", "当前原生对话暂不能引用原图。"));
+      else row.append(choose);
+      row.append(view);
       if (state?.shown && state.id === image.id) {
         if (state.pending) row.append(node("p", "quote-note", "正在读取所选原图…"));
         else if (state.error) row.append(node("p", "quote-note", state.error));
@@ -382,6 +416,30 @@
       }
       return { ...item };
     }
+    function indexedNativeSources(item) {
+      // A native row can replace one or more indexed history rows in the
+      // unified list. Only explicit published bindings may recover those rows;
+      // never infer a session identity from its title or native chat ID.
+      if (!item || item.kind !== "native" || !window.RabbitAgents.has(item.agent)) return [];
+      const sources = item.index_sources === undefined ? (item.index_source ? [item.index_source] : []) : item.index_sources;
+      if (!Array.isArray(sources) || sources.length > 128) return [];
+      const seen = new Set();
+      for (const source of sources) {
+        if (!source || typeof source !== "object" || Array.isArray(source)
+            || source.agent !== item.agent || typeof source.session_id !== "string" || !source.session_id.trim() || source.session_id.length > 256
+            || /[\x00-\x1f\x7f\ud800-\udfff]/u.test(source.session_id) || seen.has(source.session_id)) return [];
+        seen.add(source.session_id);
+      }
+      if (item.index_source && (!sources.length || item.index_source.agent !== sources[0].agent || item.index_source.session_id !== sources[0].session_id)) return [];
+      return sources.map((source, index) => {
+        const hit = item.indexed_match;
+        const match = hit && hit.agent === source.agent && hit.session_id === source.session_id
+          && Number.isSafeInteger(hit.index) && hit.index >= 0 && typeof hit.message_id === "string" && hit.message_id ? hit : null;
+        return { kind: "history", agent: source.agent, session_id: source.session_id, title: item.title,
+          message_count: item.indexed_message_count, match, indexed_binding: true,
+          source_label: sources.length > 1 ? `原有历史 ${index + 1}/${sources.length}` : "原有历史" };
+      });
+    }
     async function readSource(raw, start = null) {
       if (root.hidden) return;
       const item = sourceItem(raw), request = ++version;
@@ -399,6 +457,7 @@
         else throw Error("来源标识不完整，请重新搜索。");
         if (request !== version || root.hidden) return;
         if (!Array.isArray(data.messages)) throw Error("消息原文没有读完整，请重试。");
+        if (item.indexed_binding && (data.session?.agent !== item.agent || data.session?.session_id !== item.session_id)) throw Error("原有历史的身份未核对，请重新搜索。");
         if (item.kind === "chat" && start === 0 && item.match?.message_id) {
           const index = data.messages.findIndex(message => message.id === item.match.message_id);
           if (index >= 0) start = Math.floor(index / 100) * 100;
@@ -429,12 +488,16 @@
         if (request !== version || root.hidden) return;
         if (!Array.isArray(data.items)) throw Error("对话列表没有读完整。");
         collection.replaceChildren();
-        const nativeRows = data.items.some(item => item?.kind === "native"), items = data.items.filter(item => item?.kind === "chat" || item?.kind === "history");
-        if (nativeRows) collection.append(node("p", "quote-note", window.RabbitWorkspace?.language?.() === "en" ? "For native chat text, open that chat and choose Continue with another AI." : "原生对话文字请打开该对话，使用“交给其他 AI”接力。"));
-        if (!items.length && !nativeRows) collection.append(node("p", "quote-note", "没有找到这些文字，可以换个词。"));
+        const items = [], unindexed = data.items.some(item => item?.kind === "native" && indexedNativeSources(item).length === 0);
+        for (const item of data.items) {
+          if (item?.kind === "native") items.push(...indexedNativeSources(item));
+          else if (item?.kind === "chat" || item?.kind === "history") items.push(item);
+        }
+        if (unindexed) collection.append(node("p", "quote-note", window.RabbitWorkspace?.language?.() === "en" ? "For native chats without indexed history, open the chat and choose Continue with another AI." : "没有历史索引的原生对话，请打开该对话，使用“交给其他 AI”接力。"));
+        if (!items.length && !unindexed) collection.append(node("p", "quote-note", "没有找到这些文字，可以换个词。"));
         for (const item of items) {
           const open = action("", () => readSource(item), "quote-source");
-          open.append(node("strong", "", item.title || "未命名对话"), node("span", "quote-note", `${item.kind === "history" ? (agents[item.agent] || item.agent) + " 原有历史" : "共同聊天"} · ${Number(item.message_count) || 0}条`));
+          open.append(node("strong", "", item.title || "未命名对话"), node("span", "quote-note", `${item.kind === "history" ? (agents[item.agent] || item.agent) + " " + (item.source_label || "原有历史") : "共同聊天"}${item.indexed_binding ? "" : ` · ${Number(item.message_count) || 0}条`}`));
           if (item.match?.excerpt) open.append(node("span", "quote-note", item.match.excerpt));
           collection.append(open);
         }

@@ -1,7 +1,7 @@
 """Bounded results from original receipts and verified native results.
 
 No owner creation, open/resume, prompt, approval answer, filesystem discovery or
-new ledger. Claude may read its original ledger's frozen successful SDK result.
+new ledger. Claude and Hermes may read their ledgers' frozen verified results.
 Native messages are untrusted Agent data, never executable output.
 An existing owner's normal view may refresh/flush native state; this is marked.
 """
@@ -174,6 +174,48 @@ def _hermes(holder, operation):
         return _result('current_result_unavailable', references=refs)
     refs['session_id'] = source['runtime_sid']
     return _complete([{'id': 'hermes-cache:' + operation['client_id'], 'text': answer['text'], 'phase': None}], refs)
+
+
+def _saved_hermes(manager, operation, chat, client):
+    """A prior verified read, not evidence of a live Hermes connection."""
+    reader = getattr(getattr(manager, 'store', None), 'completed_result', None)
+    if not callable(reader) or operation['status'] != 'completed':
+        return None
+    saved = reader(chat, client)
+    if saved is None:
+        return None
+    if type(saved) is not dict or set(saved) != {'receipt', 'result'} or saved['receipt'] != operation:
+        raise _error('scope', 409)
+    value = saved['result']
+    if (type(value) is not dict or set(value) != {'state', 'reason', 'answer', 'source'}
+            or value['state'] != 'available' or value['reason'] != 'current_connection_result'
+            or type(value['source']) is not dict or value['source'].get('submission_id') != client
+            or value['source'].get('request_sha256') != operation['request_sha256']
+            or type(value['answer']) is not dict or type(value['answer'].get('text')) is not str):
+        raise _error('scope', 409)
+    return _complete([{'id': 'hermes-cache:' + client, 'text': value['answer']['text'], 'phase': None}],
+        {'agent': 'hermes', 'session_id': value['source']['runtime_sid'], 'evidence_kind': 'stored_gateway_result'})
+
+
+def _saved_pi(manager, operation, chat, client):
+    """A prior verified read, not evidence of a live Pi connection."""
+    reader = getattr(getattr(manager, 'store', None), 'completed_result', None)
+    if not callable(reader) or operation['status'] != 'completed':
+        return None
+    saved = reader(chat, client)
+    if saved is None:
+        return None
+    if type(saved) is not dict or set(saved) != {'receipt', 'result'} or saved['receipt'] != operation:
+        raise _error('scope', 409)
+    value = saved['result']
+    if (type(value) is not dict or set(value) != {'state', 'reason', 'answer', 'source'}
+            or value['state'] != 'available' or value['reason'] != 'current_connection_result'
+            or type(value['source']) is not dict or value['source'].get('submission_id') != client
+            or value['source'].get('request_sha256') != operation['request_sha256']
+            or type(value['answer']) is not dict or type(value['answer'].get('text')) is not str):
+        raise _error('scope', 409)
+    return _complete([{'id': 'pi-cache:' + client, 'text': value['answer']['text'], 'phase': None}],
+        {'agent': 'pi', 'session_id': value['source']['runtime_sid'], 'evidence_kind': 'stored_prompt_result'})
 
 
 def _pi(holder, operation):
@@ -354,9 +396,9 @@ def read(service, agent, chat_id, client_id, *, refresh_native=False):
     if not refresh_native:
         value['result'] = _result('native_refresh_not_requested')
         return value
-    if agent == 'claude':
+    if agent in ('claude', 'hermes', 'pi'):
         try:
-            saved = _saved_claude(manager, operation, chat, client)
+            saved = {'claude': _saved_claude, 'hermes': _saved_hermes, 'pi': _saved_pi}[agent](manager, operation, chat, client)
         except SpecialistHTTPError:
             raise
         except Exception:

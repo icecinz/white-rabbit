@@ -6,6 +6,7 @@ original bodies are bounded in-memory views obtained from the native API.
 """
 from collections import OrderedDict
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -20,7 +21,7 @@ from native_http_common import SpecialistHTTPError, validate_fields
 from rabbit_runtime.native_session_store import request_sha256
 from rabbit_runtime.dsh.session_store import DSHNativeStore
 from dsh_native_interactions import answerable, response_for
-from native_maintenance import maintenance_state as observe_maintenance
+from native_maintenance import maintenance_state as observe_maintenance, try_locks
 from service_admission import admitted_native
 from native_memory_intents import NativeMemoryIntents, NativeMemoryIntentError, validate_selection
 from native_memory_selection import NativeMemorySelections
@@ -641,11 +642,132 @@ class DshNativeChats:
         self.connection, self.workspace_id = connection, workspace_id
         self.admission = admission
         self._lock, self._owners = threading.RLock(), {}
+        self._model_catalogue_lock, self._model_catalogue = threading.Lock(), None
         self._closing = self._closed = False
         self.adopted_open_checker = None
 
     def _available(self):
         if self._closing or self._closed: raise _error('closing', 'DSH原生入口正在收尾。', status=503)
+
+    def catalogue_snapshot(self):
+        """A guide-only observation; never used for native configuration."""
+        with self._model_catalogue_lock:
+            return deepcopy(self._model_catalogue)
+
+    def _model_owner_state(self, identity, owner):
+        """Observe only an existing idle owner. Caller holds its action lock."""
+        with try_locks(self._lock, owner._cache) as acquired:
+            if not acquired or self._closing or self._closed or self._owners.get(identity) is not owner:
+                raise _error('model_connection_changed', 'DSH连接状态尚未核实。')
+            rpc, reader = owner._rpc, owner._reader
+            if (owner._state != 'ready' or owner._stop.is_set() or rpc is None or rpc.running is not True
+                    or reader is None or not reader.is_alive() or owner._active is not None
+                    or any(row['state'] in ('pending', 'unknown') for row in owner._requests.values())):
+                raise _error('model_connection_busy', 'DSH连接忙碌或尚未就绪。')
+            identity_state = (owner._epoch, rpc, reader)
+        if owner.store.active_for_chat(identity):
+            raise _error('model_connection_busy', 'DSH连接忙碌或尚未就绪。')
+        return identity_state
+
+    def _model_owner_is_cold(self, identity, owner):
+        """Verify an existing placeholder without opening a native process.
+
+        The action lock is held by the caller, so this owner cannot start or
+        close while its registry identity and outstanding receipts are checked.
+        """
+        def check():
+            with try_locks(self._lock, owner._cache) as acquired:
+                if not acquired or self._closing or self._closed or self._owners.get(identity) is not owner:
+                    raise _error('model_connection_changed', 'DSH连接状态尚未核实。')
+                if owner._state != 'not_open':
+                    return False
+                if (owner._rpc is not None or owner._reader is not None or owner._slot_reserved
+                        or owner._stop.is_set() or owner._active is not None
+                        or any(row['state'] in ('pending', 'unknown') for row in owner._requests.values())):
+                    raise _error('model_connection_busy', 'DSH连接状态尚未核实。')
+                return True
+        if not check():
+            return False
+        if owner.store.active_for_chat(identity) or not check():
+            raise _error('model_connection_busy', 'DSH连接状态尚未核实。')
+        return True
+
+    def model_connections(self, *, require_complete=False):
+        """Find existing idle connections without creating owners or RPCs."""
+        with try_locks(self._lock) as acquired:
+            if not acquired or self._closing or self._closed:
+                raise _error('model_connection_busy', 'DSH连接状态暂不可读。')
+            owners = list(self._owners.items())
+        result = []
+        for identity, owner in owners:
+            with try_locks(owner._action) as acquired:
+                if not acquired:
+                    if require_complete:
+                        raise _error('model_connection_busy', 'DSH连接状态暂不可读。')
+                    continue
+                try:
+                    if require_complete and self._model_owner_is_cold(identity, owner):
+                        continue
+                    observed = self._model_owner_state(identity, owner)
+                    epoch = observed[0]
+                    title = self.catalogue.get(identity)['title']
+                    if self._model_owner_state(identity, owner) != observed:
+                        if require_complete:
+                            raise _error('model_connection_changed', 'DSH连接状态尚未核实。')
+                        continue
+                    result.append({'agent': 'dsh', 'chat_id': identity, 'title': title, 'epoch': epoch})
+                except (SpecialistHTTPError, ValueError, KeyError, OSError, sqlite3.Error):
+                    if require_complete:
+                        raise _error('model_connection_busy', 'DSH连接状态尚未核实。') from None
+                    continue
+        return result
+
+    def read_model_catalogue(self, identity, epoch):
+        """Read one already-open original session; never open or select a model."""
+        from rabbit_runtime.dsh.model_catalog import project
+        identity = chat_id(identity)
+        if type(epoch) is not str or len(epoch) != 32 or any(ch not in '0123456789abcdef' for ch in epoch):
+            raise _error('model_invalid', 'DSH目录需要准确的连接编号。', status=400)
+        with try_locks(self._lock) as acquired:
+            if not acquired or self._closing or self._closed:
+                raise _error('model_connection_busy', 'DSH连接状态暂不可读。')
+            owner = self._owners.get(identity)
+        if owner is None:
+            raise _error('model_connection_changed', 'DSH连接尚未打开。')
+        with try_locks(owner._action) as acquired:
+            if not acquired:
+                raise _error('model_connection_busy', 'DSH连接忙碌，请稍后再试。')
+            try:
+                owner._barrier()
+                before = self._model_owner_state(identity, owner)
+                if before[0] != epoch or owner._consumed < owner._rpc.stats.get('events_received', 0):
+                    raise ValueError('The original connection changed or event state is incomplete.')
+                info = owner._native('session.info', owner._params(), timeout=15)
+                owner._proof(info)
+                if info.get('live') is not True or info.get('running') is not False:
+                    raise ValueError('The original session is not idle.')
+                value = project(owner._native('session.models', {'sessionId': owner._binding()['session_id']}, timeout=30))
+                info = owner._native('session.info', owner._params(), timeout=15)
+                owner._proof(info)
+                owner._barrier()
+                if (info.get('live') is not True or info.get('running') is not False
+                        or self._model_owner_state(identity, owner) != before
+                        or owner._consumed < owner._rpc.stats.get('events_received', 0)):
+                    raise ValueError('The original connection changed while reading.')
+                snapshot = {'workspace_id': self.workspace_id, 'source': 'dsh/session.models',
+                    'observed_at': datetime.now(timezone.utc).isoformat(), 'source_chat_id': identity, **value}
+                # Closing or replacing a registered owner must not publish a
+                # directory after the identity check. No RPC runs under these locks.
+                with try_locks(self._lock, owner._cache) as acquired:
+                    if (not acquired or self._closing or self._closed or self._owners.get(identity) is not owner
+                            or owner._state != 'ready' or owner._epoch != epoch or owner._rpc is not before[1]
+                            or owner._reader is not before[2] or owner._active is not None):
+                        raise ValueError('The original owner changed before publishing.')
+                    with self._model_catalogue_lock:
+                        self._model_catalogue = deepcopy(snapshot)
+                return snapshot
+            except Exception:
+                raise _error('model_unverified', 'DSH原生模型目录暂未核实，原设置不变。', status=503) from None
 
     def _prepare(self, identity):
         # Existing external bindings retain their original cwd. Merely showing

@@ -344,6 +344,16 @@ class NativeMaterialIntents:
         with self._db() as db:
             return self._match(self._read_in(db, client_id), chat_id)
 
+    def list_for_chat(self, chat_id):
+        """Bounded saved refs only; an intent is still not a delivery receipt."""
+        chat_id = self._uuid(chat_id)
+        with self._db() as db:
+            ids = db.execute(f'SELECT client_id FROM {self._table} WHERE workspace_id=? AND chat_id=? '
+                'ORDER BY client_id LIMIT 513', (self.workspace_id, chat_id)).fetchall()
+            if len(ids) > 512:
+                self._fail('invalid_record')
+            return [self._match(self._read_in(db, row[0]), chat_id) for row in ids]
+
     def lookup_body(self, chat_id, body):
         """Verify the original small HTTP request even if its sources vanished."""
         chat_id = self._uuid(chat_id)

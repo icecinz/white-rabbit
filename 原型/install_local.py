@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 from datetime import datetime, timezone
+import errno
 import fcntl
 import hashlib
 import http.client
@@ -49,10 +50,10 @@ RUNTIME_FILES = (
     "rabbit_runtime/__init__.py", "rabbit_runtime/pi/__init__.py", "rabbit_runtime/dsh/__init__.py", "rabbit_runtime/claude/__init__.py", "rabbit_runtime/hermes/__init__.py", "rabbit_runtime/_version.py", "rabbit_runtime/maintenance.py", "rabbit_runtime/model_observation.py",
     "rabbit_specialist/__init__.py", "rabbit_preparation/material_references.py",
     "rabbit_content/attachments.py", "rabbit_preparation/text_snapshots.py",
-    "server.py", "chat_store.py", "rabbit_specialist/status_checks.py", "rabbit_specialist/status_analysis.py", "status_check_service.py", "native_chat_selection.py", "native_memory_selection.py", "rabbit_preparation/context.py", "rabbit_preparation/text_file_context.py", "history_view.py", "library.py", "preferences.py", "app_management.py", "app_settings.py",
+    "server.py", "chat_store.py", "rabbit_specialist/status_checks.py", "rabbit_specialist/status_analysis.py", "rabbit_specialist/model_guide_history.py", "status_check_service.py", "native_chat_selection.py", "native_memory_selection.py", "rabbit_preparation/context.py", "rabbit_preparation/text_file_context.py", "history_view.py", "library.py", "preferences.py", "app_management.py", "app_settings.py",
     "native_startup.py", "codex_history_adoption.py", "codex_history_metadata.py", "codex_history_service.py", "native_history_service.py", "hermes_history_adoption.py", "hermes_history_guard.py",
     "admission_gate.py", "service_admission.py", "service_maintenance.py", "native_maintenance.py",
-    'rabbit_specialist/interface_tasks.py', 'rabbit_specialist/interface_task_coordinator.py', "native_model_management.py", "native_chat_management.py", "native_work_status.py", "external_work.py", "rabbit_runtime/hapi_work.py",
+    'rabbit_specialist/interface_tasks.py', 'rabbit_specialist/interface_task_coordinator.py', 'rabbit_specialist/draft_configuration.py', "native_model_management.py", "native_chat_management.py", "native_work_status.py", "external_work.py", "rabbit_runtime/hapi_work.py",
     "native_task_input.py", "native_task_result.py",
     'rabbit_runtime/codex_rpc.py', 'rabbit_runtime/native_rpc_transport.py', 'rabbit_runtime/native_json.py', 'rabbit_runtime/native_session_store.py', 'rabbit_runtime/native_session_lease.py', 'rabbit_runtime/codex_native_session.py',
     'rabbit_runtime/specialist_service.py', 'rabbit_runtime/specialist_tool_status.py', "specialist_http.py", "specialist_memory.py", 'rabbit_specialist/specialist_workspace.py', 'rabbit_specialist/specialist_connection.py', 'rabbit_runtime/codex_connection.py', "native_chats.py", "native_catalogue.py", "native_http_common.py", "rabbit_preparation/handoff.py", "native_profile_intents.py", "native_profile_catalog.py",
@@ -65,7 +66,7 @@ RUNTIME_FILES = (
     "hermes_material_cache.py", "hermes_attachment_transactions.py", "hermes_attachment_view.py",
     "rabbit_runtime/claude/rpc.py", "rabbit_runtime/claude/connection.py", "rabbit_runtime/claude/native_worker.py", "claude_native.py", "rabbit_runtime/claude/session_store.py", "rabbit_runtime/claude/session_file.py",
     "rabbit_runtime/claude/material_protocol.py", "claude_material_inputs.py", "claude_material_intents.py", "native_material_intents.py", "rabbit_runtime/claude/message_view.py", "rabbit_runtime/claude/history_source.py",
-    "rabbit_runtime/dsh/rpc.py", "rabbit_runtime/dsh/connection.py", "rabbit_runtime/dsh/worker.mjs", "dsh_native.py", "rabbit_runtime/dsh/session_store.py", "dsh_native_interactions.py",
+    "rabbit_runtime/dsh/rpc.py", "rabbit_runtime/dsh/connection.py", "rabbit_runtime/dsh/worker.mjs", "rabbit_runtime/dsh/model_catalog.py", "dsh_native.py", "rabbit_runtime/dsh/session_store.py", "dsh_native_interactions.py",
     "dsh_material_protocol.py", "dsh_material_inputs.py", "dsh_material_intents.py",
     "rabbit_runtime/hermes/rpc.py", "rabbit_runtime/hermes/connection.py", "rabbit_runtime/hermes/worker.mjs", "hermes_native.py", "rabbit_runtime/hermes/session_store.py",
     "rabbit_runtime/hermes/vendor/hermes_gateway/json-rpc-gateway.mjs",
@@ -75,7 +76,7 @@ RUNTIME_FILES = (
     "agent_registry.py", "history_sources.py", "claude_history.py", "claude_history_adoption.py", "pi_history.py", "rabbit_content/history_records.py",
     "dsh_history.py", "dsh_history_worker.mjs", "dsh_history_adoption.py",
     "model_catalog.py", "rabbit_content/materials.py", "image_inputs.py",
-    "native_history_materials.py", "native_materials.py",
+    "native_history_materials.py", "native_materials.py", "native_material_inventory.py", "native_origins.py",
     "profiles.py", "profile_capabilities.py", "rabbit_memory/memory_profiles.py", "rabbit_memory/memory_management.py", "rabbit_memory/memory_connection_check.py", "rabbit_memory/hindsight_memory.py", "rabbit_memory/write_jobs.py", "memory_context.py", "rabbit_memory/write_runner.py",
     "rabbit_memory/native_memory_bindings.py", "rabbit_memory/native_hindsight_memory.py", "native_memory_intents.py",
     "rabbit_memory/hermes_files_memory.py", "hermes_file_memory.py", "memory_program_setup.py",
@@ -86,8 +87,10 @@ RUNTIME_FILES = (
     "rabbit_content/markdown_chat_document.py", "rabbit_content/markdown_chat_directory.py", "rabbit_content/markdown_chat_registry.py", "native_markdown_source.py", "rabbit_content/history_markdown_reference.py",
     "rabbit_content/markdown_chat_sync.py", "rabbit_content/markdown_sync_files.py",
     "rabbit_ui/assets/index.html", "rabbit_ui/assets/app.js", "rabbit_ui/assets/style.css", "agent_definitions.json", "rabbit_ui/assets/agents.js",
-    "rabbit_ui/assets/workspace.js", "rabbit_ui/assets/workspace.css", "rabbit_ui/assets/browser_state.js", "rabbit_ui/assets/history_quotes.js",
+    "rabbit_ui/assets/workspace.js", "rabbit_ui/assets/workspace.css", "rabbit_ui/assets/browser_state.js", "rabbit_ui/assets/history_quotes.js", "rabbit_ui/assets/continuations.js",
     "rabbit_ui/assets/work_status.js", "rabbit_ui/assets/work_status.css",
+    "rabbit_ui/assets/composer_shell.js", "rabbit_ui/assets/composer_shell.css",
+    "rabbit_ui/assets/soft_paper.css", "rabbit_ui/assets/soft-paper.jpg",
     "rabbit_ui/assets/manual.md", "rabbit_ui/assets/specialist-guide.md", "rabbit_ui/assets/status_checks.js",
     "rabbit_ui/assets/specialist_context.js", "rabbit_ui/assets/specialist_tools.js", "rabbit_ui/assets/specialist.js", "rabbit_ui/assets/specialist.css", "rabbit_ui/assets/native_chats.js", "rabbit_ui/assets/native_handoff.js", "rabbit_ui/assets/native_adoption.js", "rabbit_ui/assets/native_text_quote.js", "rabbit_ui/assets/native_file_quote.js", "rabbit_ui/assets/handoff_view.js", "rabbit_ui/assets/native_materials.js",
     "rabbit_ui/assets/pi_native_history.js", "rabbit_ui/assets/pi_native.js",
@@ -104,6 +107,12 @@ TOOL_FILES = ("local_history_mcp.py", "rabbit_management_client.py", "rabbit_man
 
 class InstallError(RuntimeError):
     pass
+
+
+def workspace_identity(layout):
+    """Identity of this installation's chat database, shared by local probes."""
+    path = (layout.data / 'chat.sqlite').expanduser().resolve()
+    return hashlib.sha256(str(path).encode('utf-8')).hexdigest()
 
 
 class MaintenanceClient:
@@ -214,24 +223,33 @@ class MaintenanceClient:
         return value
 
     @classmethod
-    def probe(cls, layout):
-        result = cls._wire('GET', cls.ROOT, allow_absent=True)
-        if result is None:
-            return None
+    def _decode_probe(cls, result):
+        """Validate one existing maintenance response without exposing its token."""
         status, value = result
-        workspace = hashlib.sha256(str(layout.data / 'chat.sqlite').encode('utf-8')).hexdigest()
-        if (status != 200 or value.keys() != {'maintenance', 'workspace_id', 'csrf_token'}
-                or value.get('workspace_id') != workspace
+        if (status != 200 or type(value) is not dict
+                or value.keys() != {'maintenance', 'workspace_id', 'csrf_token'}
+                or type(value.get('workspace_id')) is not str
+                or re.fullmatch(r'[0-9a-f]{64}', value['workspace_id']) is None
                 or type(value.get('csrf_token')) is not str
                 or not 16 <= len(value['csrf_token']) <= 256
                 or any(not 33 <= ord(c) <= 126 for c in value['csrf_token'])):
             raise InstallError('端口上的服务身份无法确认；没有停止服务或部署。')
         state = cls._snapshot(value['maintenance'])
+        return value['workspace_id'], state, value['csrf_token']
+
+    @classmethod
+    def probe(cls, layout):
+        result = cls._wire('GET', cls.ROOT, allow_absent=True)
+        if result is None:
+            return None
+        workspace, state, csrf = cls._decode_probe(result)
+        if workspace != workspace_identity(layout):
+            raise InstallError('端口上的服务身份无法确认；没有停止服务或部署。')
         if state['state'] != 'running':
             raise InstallError('入口已由另一维护操作关门；没有接管或重置。需单独核对维护状态。')
         if state['generation'] == 2 ** 53 - 1:
             raise InstallError('维护编号已到上限；没有继续操作。')
-        return cls(state, value['csrf_token'])
+        return cls(state, csrf)
 
     def _post(self, action):
         self.confirmed = None  # A previous response cannot prove a later POST's outcome.
@@ -563,8 +581,35 @@ def python_executable():
     candidates = (sys.executable, shutil.which("python3"), "/usr/bin/python3")
     for candidate in candidates:
         if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
-            return str(Path(candidate).resolve())
+            # Python selects a virtual environment from the invoked path. A
+            # venv's python is commonly a symlink to the base interpreter;
+            # resolving it here silently drops the environment and packages.
+            return os.path.abspath(os.path.expanduser(candidate))
     raise InstallError("没有找到可以运行本机服务的 Python 3。")
+
+
+def _python_path_available(value):
+    return Path(value).is_file() and os.access(value, os.X_OK)
+
+
+def service_python(layout, explicit=None):
+    """Keep the installed interpreter unless a new one is explicitly chosen."""
+    if explicit is not None:
+        value, origin = str(explicit), 'explicit'
+    else:
+        saved = _saved_state(layout)
+        if 'python' in saved:
+            value, origin = saved['python'], 'saved'
+        elif regular_bytes(layout.state) is not None or layout.app.exists() or layout.plist.exists():
+            raise InstallError('已安装服务的 Python 路径无法确认；请用 --python 指定可用的绝对路径。')
+        else:
+            value, origin = python_executable(), 'current'
+    if (type(value) is not str or not value or len(value) > MAX_CONTROL_BYTES
+            or not Path(value).is_absolute() or '..' in Path(value).parts
+            or any(ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in value)
+            or not _python_path_available(value)):
+        raise InstallError('服务 Python 路径不可用；请用 --python 指定可用的绝对路径。')
+    return value, origin
 
 
 def installed_plist_bytes(layout):
@@ -1002,7 +1047,7 @@ def activate(layout):
         launchctl("bootstrap", "gui/" + str(os.getuid()), str(layout.plist))
 
 
-def install(layout, source=None, activate_service=True, *, native_config=None):
+def install(layout, source=None, activate_service=True, *, native_config=None, python_override=None):
     # source/defaults and native settings must describe the same saved generation.
     # Capture absence too; another installer may finish before this one takes its lock.
     initial_state = regular_bytes(layout.state)
@@ -1010,7 +1055,7 @@ def install(layout, source=None, activate_service=True, *, native_config=None):
     source_files(source)  # Validate all inputs before stopping a managed job.
     native_startup = native_configuration(layout, native_config)
     controllers = controller_payloads()
-    python = python_executable()
+    python, _python_origin = service_python(layout, python_override)
     prepare_directories(layout)
     with exclusive_file(layout.data / "install.lock", "另一个安装操作正在进行。"):
         if regular_bytes(layout.state) != initial_state:
@@ -1027,7 +1072,7 @@ def install(layout, source=None, activate_service=True, *, native_config=None):
     return result
 
 
-def check_installation(layout, source=None, *, native_config=None):
+def check_installation(layout, source=None, *, native_config=None, python_override=None):
     """Read installation inputs only; never launch a service or inspect credentials."""
     try:
         ensure_macos()
@@ -1049,8 +1094,24 @@ def check_installation(layout, source=None, *, native_config=None):
         'url': 'http://127.0.0.1:' + str(PORT) + '/',
         'visible_commands': {name: shutil.which(name) for name in
                              ('python3', 'node', 'codex', 'hermes', 'pi', 'claude', 'dsh')},
-        'authentication': 'not_checked', 'real_chat': 'not_checked', 'service': 'not_checked',
+        'authentication': 'not_checked', 'real_chat': 'not_checked', 'service': 'unknown',
+        'service_python': {'valid': False, 'images': 'not_checked'},
     }
+    try:
+        observation = MaintenanceClient._wire('GET', MaintenanceClient.ROOT, allow_absent=True)
+        if observation is None:
+            report['service'] = 'free'
+        else:
+            workspace, state, _csrf = MaintenanceClient._decode_probe(observation)
+            if workspace != workspace_identity(layout):
+                report['service'] = 'other'
+            else:
+                report['service'] = 'current_installation'
+                report['service_maintenance'] = state['state']
+                if state['generation'] == 2 ** 53 - 1:
+                    report['service_maintenance'] = 'generation_limit'
+    except (InstallError, OSError, ValueError, RuntimeError):
+        pass  # Unknown is never evidence of a free port or a usable service.
     try:
         chosen_source = source
         if chosen_source is None:
@@ -1071,12 +1132,24 @@ def check_installation(layout, source=None, *, native_config=None):
             specialist_enabled='specialist' in connections)
     except (InstallError, OSError, ValueError) as error:
         report['native_configuration']['error'] = str(error)
+    try:
+        selected, origin = service_python(layout, python_override)
+        report['service_python'].update(valid=True, path=selected, source=origin)
+    except (InstallError, OSError, ValueError) as error:
+        report['service_python']['error'] = str(error)
     if not macos or not python_supported:
         report['status'] = 'unsupported_environment'
     elif not report['source']['valid']:
         report['status'] = 'invalid_source'
     elif not report['native_configuration']['valid']:
         report['status'] = 'invalid_configuration'
+    elif not report['service_python']['valid']:
+        report['status'] = 'invalid_service_python'
+    elif report['service'] == 'other':
+        report['status'] = 'service_conflict'
+    elif report['service'] == 'unknown' or (report['service'] == 'current_installation'
+                                              and report['service_maintenance'] != 'running'):
+        report['status'] = 'service_unconfirmed'
     elif not report['native_configuration']['agents']:
         report['status'] = 'needs_configuration'
     else:
@@ -1090,34 +1163,50 @@ def local_status():
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     request = Request("http://127.0.0.1:" + str(PORT) + "/api/status")
     try:
-        with opener.open(request, timeout=1) as response:
+        with opener.open(request, timeout=10) as response:
             value = json.loads(response.read(1024 * 1024))
         if isinstance(value, dict) and value.get("local_only") is True and value.get("version"):
             return value
         raise InstallError("本机入口端口已被其他服务占用。")
     except (HTTPError, ValueError):
         raise InstallError("本机入口端口已被其他服务占用或返回了无效页面。") from None
-    except (URLError, OSError):
-        return None
+    except URLError as error:
+        if isinstance(error.reason, OSError) and error.reason.errno == errno.ECONNREFUSED:
+            return None
+        raise InstallError("本机入口连接状态未确认；没有启动或打开，请稍后核对。") from None
+    except OSError as error:
+        if error.errno == errno.ECONNREFUSED:
+            return None
+        raise InstallError("本机入口连接状态未确认；没有启动或打开，请稍后核对。") from None
+
+
+def installation_status(layout):
+    """Return only the expected installation's listener, or a proven absence."""
+    value = local_status()
+    if value is not None and value.get('workspace_id') != workspace_identity(layout):
+        raise InstallError("本机入口端口上的工作区与此安装不符或身份无法确认；没有启动或打开。")
+    return value
 
 
 def open_entry(layout):
     ensure_macos()
+    if installation_status(layout) is None:
+        if not (layout.app / "原型" / "server.py").is_file() or not layout.plist.is_file():
+            install(layout, activate_service=False)
+        activate(layout)
+        deadline = time.monotonic() + 90
+        while installation_status(layout) is None:
+            if time.monotonic() >= deadline:
+                raise InstallError("本机入口尚未就绪；请稍后再次点开。聊天数据已保留。")
+            time.sleep(0.3)
     try:
         refresh_document_cache(layout, default_source(layout))
     except (InstallError, OSError):
         # Opening an existing chat stays usable if its original project has
         # moved or the foreground entry cannot refresh the bounded mirror.
         print("项目文字副本未更新；已有副本保留，聊天入口仍可打开。", file=sys.stderr)
-    if local_status() is None:
-        if not (layout.app / "原型" / "server.py").is_file() or not layout.plist.is_file():
-            install(layout, activate_service=False)
-        activate(layout)
-        deadline = time.monotonic() + 90
-        while local_status() is None:
-            if time.monotonic() >= deadline:
-                raise InstallError("本机入口尚未就绪；请稍后再次点开。聊天数据已保留。")
-            time.sleep(0.3)
+    if installation_status(layout) is None:
+        raise InstallError("本机入口在打开前已离线；没有打开，请重新操作。")
     subprocess.run(["/usr/bin/open", "http://127.0.0.1:" + str(PORT)], check=True)
 
 
@@ -1175,11 +1264,13 @@ def main():
     check_parser = commands.add_parser('check', help='只读检查环境、源码及原生启动配置；不启动Agent')
     check_parser.add_argument('--source-dir', type=Path, help='原型源代码目录')
     check_parser.add_argument('--native-config', type=Path, help='仅核对路径的有限原生启动JSON')
+    check_parser.add_argument('--python', type=Path, help='明确选择服务 Python 的绝对路径；省略时沿用已保存路径')
     install_parser = commands.add_parser("install", help="安装私有运行副本与登录启动入口")
     install_parser.add_argument("--no-activate", action="store_true", help="只部署，不启动")
     install_parser.add_argument("--source-dir", type=Path, help="原型源代码目录")
     install_parser.add_argument('--native-config', type=Path,
                                 help='显式有限原生启动JSON；省略时保留已保存配置，空connections关闭全部入口')
+    install_parser.add_argument('--python', type=Path, help='明确更换服务 Python 的绝对路径；省略时沿用已保存路径')
     commands.add_parser("open", help="启动已安装入口并打开本机页面")
     uninstall_parser = commands.add_parser("uninstall", help="停用入口；保留数据和恢复副本")
     uninstall_parser.add_argument("--keep-data", action="store_true", help="保留数据（默认一直保留）")
@@ -1188,7 +1279,7 @@ def main():
     args = parser.parse_args()
     if args.command == 'check':
         try:
-            result = check_installation(Layout(), args.source_dir, native_config=args.native_config)
+            result = check_installation(Layout(), args.source_dir, native_config=args.native_config, python_override=args.python)
         except (InstallError, OSError, ValueError) as error:
             result = {'schema_version': 1, 'status': 'check_failed', 'error': str(error),
                       'authentication': 'not_checked', 'real_chat': 'not_checked'}
@@ -1201,7 +1292,7 @@ def main():
     layout = Layout()
     try:
         if args.command == "install":
-            result = install(layout, args.source_dir, not args.no_activate, native_config=args.native_config)
+            result = install(layout, args.source_dir, not args.no_activate, native_config=args.native_config, python_override=args.python)
             print("本机入口已部署：" + result["entry"])
             print("现有聊天和历史数据已保留。")
             agents = result.get('native_agents')

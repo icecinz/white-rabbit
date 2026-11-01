@@ -390,11 +390,11 @@ class LibraryView:
                         # not erase the only navigable history row after a crash.
                         owned_native = frozenset(pair for pair in excluded_sources if pair[0] not in ('codex', 'hermes', 'pi', 'claude')) | frozenset(
                             (row['agent'], session) for row in published_bindings.values() for session in row['session_ids'])
-                    indexed_bindings, indexed_sources = {}, set()
+                    indexed_bindings, indexed_sources, indexed_titles = {}, set(), {}
                     if has_history:
                         for identity, binding in published_bindings.items():
                             for session in binding['session_ids']:
-                                source = connection.execute('SELECT kind FROM sessions WHERE agent=? AND session_id=?',
+                                source = connection.execute('SELECT kind,title FROM sessions WHERE agent=? AND session_id=?',
                                     (binding['agent'], session)).fetchone()
                                 if source is not None:
                                     count = connection.execute('SELECT COUNT(*) FROM app_history_messages WHERE agent=? AND session_id=?',
@@ -402,8 +402,12 @@ class LibraryView:
                                     indexed_bindings.setdefault(identity, []).append(dict(agent=binding['agent'],
                                         session_id=session, kind=source['kind'], message_count=count))
                                     indexed_sources.add((*identity, session))
+                                    indexed_titles.setdefault(identity, []).append(str(source['title'] or '').casefold())
                     connection.create_function('is_native_index_source', 3,
                         lambda agent, identity, session: int((agent, identity, session) in indexed_sources))
+                    connection.create_function('native_index_title_contains', 3,
+                        lambda agent, identity, word: int(any(str(word).casefold() in title
+                            for title in indexed_titles.get((agent, identity), ()))))
                     if owned_native:
                         connection.create_function('is_owned_native_source', 2,
                             lambda agent, session: int((agent, session) in owned_native))
@@ -481,6 +485,12 @@ class LibraryView:
                         condition = '(contains_fold(n.title,?)'
                         native_filter_params.append(word)
                         if has_history and indexed_bindings:
+                            # The published native entry may have a different name
+                            # from its original history (for example after a rename).
+                            # Use already-read, explicitly bound titles rather than
+                            # rescanning all history sessions for each candidate.
+                            condition += ' OR native_index_title_contains(n.agent,n.id,?)'
+                            native_filter_params.append(word)
                             condition += (' OR EXISTS (SELECT 1 FROM app_history_messages m WHERE m.agent=n.agent'
                                           ' AND is_native_index_source(n.agent,n.id,m.session_id) AND contains_fold(m.content,?))')
                             native_filter_params.append(word)

@@ -45,6 +45,7 @@ PROFILE_FIELDS = ('name', 'agent_instance_id', 'device_id', 'model_id', 'reasoni
 PROFILE_COLUMNS = ('id', 'revision') + PROFILE_FIELDS + ('created_at', 'updated_at')
 MAX_REVISION = 2 ** 53 - 1
 MAX_PROFILES = 128
+LOCAL_CONFIGURATION_TABLE = 'native_chat_local_configurations'
 UNSET = object()
 SNAPSHOT_PROFILE_FIELDS = ('id', 'revision') + PROFILE_FIELDS
 
@@ -85,6 +86,23 @@ def validate_profile_revision(revision):
     if type(revision) is not int or not 1 <= revision <= MAX_REVISION:
         raise ValueError('AI 配置版本需要有效的整数。')
     return revision
+
+
+def allocate_profile_id_in(db):
+    """Reserve an identity against both parameter stores in the caller's transaction."""
+    local = db.execute('SELECT type FROM sqlite_master WHERE name=?',
+                       (LOCAL_CONFIGURATION_TABLE,)).fetchone()
+    if local is not None and local[0] != 'table':
+        raise ValueError('本对话配置表无法核验。')
+    for _ in range(16):
+        identity = str(uuid.uuid4())
+        if db.execute('SELECT 1 FROM ai_profiles WHERE id=?', (identity,)).fetchone():
+            continue
+        if local is not None and db.execute(
+                'SELECT 1 FROM native_chat_local_configurations WHERE id=?', (identity,)).fetchone():
+            continue
+        return identity
+    raise ValueError('暂时不能分配唯一配置编号；原配置保留。')
 
 
 def validate_profile_fields(name, agent_instance_id, device_id='local', model_id='', reasoning_effort=None):
@@ -390,7 +408,7 @@ class AIProfiles:
     def _insert_in(db, fields):
         if db.execute('SELECT COUNT(*) FROM ai_profiles').fetchone()[0] >= MAX_PROFILES:
             raise ValueError('AI 配置已达到 128 份上限；原配置和旧数据仍保留。')
-        profile_id, stamp = str(uuid.uuid4()), _now()
+        profile_id, stamp = allocate_profile_id_in(db), _now()
         db.execute('''INSERT INTO ai_profiles(id,revision,name,agent_instance_id,device_id,model_id,
             reasoning_effort,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)''',
             (profile_id, 1) + tuple(fields[key] for key in PROFILE_FIELDS) + (stamp, stamp))

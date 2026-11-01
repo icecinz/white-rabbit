@@ -76,9 +76,10 @@ class StatusChecks:
         """Explicit metadata refresh; the existing APIs never open an owner."""
         outcomes = {}
         try:
-            rows = self.service.native_model_connections()['connections']
+            connections = self.service.native_model_connections()
+            rows, states = connections['connections'], connections['agents']
         except Exception:
-            rows = []
+            rows, states = [], {}
         for agent, source in sources.items():
             if not source['enabled'] or backend is not None and agent != backend:
                 continue
@@ -91,7 +92,7 @@ class StatusChecks:
                 elif agent == 'codex':
                     self.service.refresh_specialist_model_catalog()
                 else:
-                    outcomes[agent] = 'no_ready_connection'
+                    outcomes[agent] = 'no_ready_connection' if states.get(agent) == 'observed' else 'unverified'
                     continue
                 outcomes[agent] = 'observed'
             except Exception:

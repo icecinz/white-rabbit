@@ -6,8 +6,8 @@
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#f5f3ee",
-  "theme_color": "#f5f3ee",
+  "background_color": "#f4f0e7",
+  "theme_color": "#f4f0e7",
   "icons": [
     {
       "src": "/rabbit-app-1024.png",

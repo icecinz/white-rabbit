@@ -70,12 +70,16 @@
       if (row.role === "specialist") { if (row.agent !== "codex" || row.chat_id !== null) fail(); }
       else if (!uuid(row.chat_id) || (counts[row.agent] = (counts[row.agent] || 0) + 1) > (row.agent === "codex" ? 2 : 1)) fail();
       const key = `${row.agent}/${row.role}/${row.chat_id}`;
-      if (seen.has(key) || !row.complete && (row.status !== "unknown" || byAgent.get(row.agent).complete)
+      if (seen.has(key) || !byAgent.get(row.agent).complete && byAgent.get(row.agent).reason !== "partial_observation"
+          || !row.complete && (row.status !== "unknown" || byAgent.get(row.agent).complete)
           || row.status === "idle" && (row.connection_state !== "ready" || row.epoch === null || row.native_session_id === null || row.pending_requests !== 0)
           || row.status === "needs_user" && !(row.pending_requests > 0)) fail();
       seen.add(key); return { ...row };
     });
     if (value.complete !== [...byAgent.values()].every(row => row.complete)) fail();
+    for (const [agent, summary] of byAgent) {
+      if (summary.reason === "partial_observation" && (summary.complete || !works.some(row => row.agent === agent && !row.complete))) fail();
+    }
     return { complete: value.complete, agents: byAgent, works };
   }
   const sameSnapshot = (left, right) => !!left && left.complete === right.complete && left.works.length === right.works.length
@@ -84,7 +88,7 @@
   function create({ api, getWorkspace, onOpen, translate = value => value, getLabel = () => "" }) {
     if ([api, getWorkspace, onOpen, translate, getLabel].some(value => typeof value !== "function")) throw Error("work_status_entry_required");
     const node = (tag, cls, content) => { const result = document.createElement(tag); result.className = cls; if (content !== undefined) result.textContent = content; return result; };
-    const root = node("section", "rabbit-work-status"), heading = node("h3", "", translate("当前工作"));
+    const root = node("section", "rabbit-work-status"), heading = node("h3", "", translate("小白兔已连接的工作"));
     const list = node("ul", "rabbit-work-list"), notice = node("p", "rabbit-work-notice");
     const external = node("section", "rabbit-external-work"), externalHeading = node("h3", ""), externalTime = node("p", "rabbit-work-notice"), externalList = node("ul", "rabbit-work-list"), externalNotice = node("p", "rabbit-work-notice");
     external.append(externalHeading, externalTime, externalList, externalNotice); external.hidden = true;
@@ -97,7 +101,7 @@
     const active = () => !!(visible && !suspended && !root.hidden && !document.hidden && root.isConnected !== false && workspace && workspace === currentWorkspace());
     function render() {
       const setText = (element, content) => { if (element.textContent !== content) element.textContent = content; };
-      setText(heading, translate("当前工作"));
+      setText(heading, translate("小白兔已连接的工作"));
       if (!rendered || rendered.value !== value || rendered.scope !== workspace || rendered.stamp !== generation) {
         list.replaceChildren();
         const items = (value?.works || []).map(row => {
@@ -120,7 +124,7 @@
         const { button, status } = rendered.items[index];
         let label; try { label = getLabel(Object.freeze({ ...row })); } catch (_) { /* Use the metadata-only default below. */ }
         setText(button, text(label) ? label : row.role === "specialist" ? translate("小白兔专员") : `${agents[row.agent]} · ${translate("连接中的对话")} · ${row.chat_id.slice(-6)}`);
-        const trusted = row.complete && value.agents.get(row.agent).complete;
+        const trusted = row.complete;
         setText(status, translate(trusted ? connections[row.connection_state] || states[row.status] : states.unknown));
       });
       setText(notice, !value.complete ? translate("部分工作状态未知") : !value.works.length ? translate("暂无已连接的工作") : "");

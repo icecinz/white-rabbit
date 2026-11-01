@@ -1,0 +1,35 @@
+/* Home and native conversations share layout, not draft or runtime state. */
+.composer-shell{display:block;width:100%;min-width:0;margin:0 auto}
+.composer-shell>.conversation-input{display:block;width:100%;min-width:0;resize:none;border:0;border-radius:0;background:none;color:var(--ink);font:inherit;font-size:14px;line-height:1.8;padding:2px 0 6px;min-height:53px;max-height:170px;outline:none;overflow:auto}
+.composer-shell>.conversation-input::placeholder{color:var(--muted)}
+.composer-shell>.conversation-input:focus,.composer-shell>.conversation-input:focus-visible{outline:none;box-shadow:none}
+.composer-shell>.profile-status{margin:0 0 10px}
+.composer-shell>.profile-choice-row{margin-bottom:12px}
+.composer-shell>.composer-bottomline{align-items:flex-start}
+.composer-shell .composer-hint{text-align:right;font-size:9px;color:var(--muted);line-height:1.5;overflow-wrap:anywhere}
+.composer-shell .composer-submit>.rbs-submit{display:flex;align-items:center;justify-content:center;gap:8px;min-width:76px;padding:9px 12px;border-radius:7px;font-size:11px;font-weight:500}
+
+/* Only the visible Codex branch owns this scroll/composer split. */
+#native-chats-panel:has(>div:not([hidden]) .rbs-conversation){display:flex;flex-direction:column;overflow:hidden}
+#native-chats-panel>div:not([hidden]):has(.rbs-conversation),
+#native-chats-panel .rbn-page:has(>.rbn-chat>.rbs-conversation),
+#native-chats-panel .rbn-chat:has(>.rbs-conversation){display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;width:100%;max-width:none}
+#native-chats-panel .rbn-page:has(>.rbn-chat>.rbs-conversation){margin:0}
+#native-chats-panel .rbn-chat>.rbs-conversation{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;width:100%;max-width:none;margin:0;padding:0;overflow:hidden}
+.rbs-conversation>.rbs-conversation-body{min-width:0;min-height:0;flex:1;overflow:auto}
+.rbs-conversation>.rbs-conversation-body>*{max-width:790px;margin-left:auto;margin-right:auto}
+.rbs-conversation>.rbs-conversation-composer{flex:none;min-width:0;width:100%;margin:0}
+.rbs-conversation-composer>.composer-shell{max-width:790px}
+#continuation-panel{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#continuation-panel>.rbs-conversation{display:flex;flex-direction:column;flex:1;min-height:0;max-width:none;margin:0;padding:0}
+#continuation-panel>.rbs-conversation>.rbs-conversation-body>h2{display:none}
+
+@media(max-width:700px){
+  .rbs-conversation>.rbs-conversation-body{padding:22px 18px 14px}
+  .rbs-conversation>.rbs-conversation-composer{padding:0 18px 14px}
+}
+@media(max-width:500px){
+  .composer-shell>.conversation-input{font-size:16px}
+  .rbs-conversation>.rbs-conversation-body{padding:18px 12px 12px}
+  .rbs-conversation>.rbs-conversation-composer{padding:0 12px 12px}
+}

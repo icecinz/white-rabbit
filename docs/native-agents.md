@@ -16,6 +16,10 @@ Keep credentials in the original agent's configuration. Do not put them in start
 
 When Codex, Hermes, or DSH is installing for a user, follow [the installation checklist](install-agent.md) to complete one real route first. This JSON contains local paths, not accounts or keys. Put **one of these groups** in `$HOME/.white-rabbit-connections.json`, outside the checkout, replacing every `/absolute/path/to/...` with a verified absolute path. JSON does not expand `$HOME` or `~`.
 
+If the agent uses a custom data directory through `HERMES_HOME` or `DSH_HOME`, add `"home": "/absolute/path/to/that/directory"` to its connection. The login service is not guaranteed to inherit the current shell's variables.
+
+Likewise, model access that relies on variables set only in the current terminal may not be available to the login service. Prefer the agent's own supported persistent login/configuration and verify a real reply after installation. Do not put secrets in this JSON or in chat.
+
 Codex:
 
 ```json
@@ -28,36 +32,50 @@ Hermes:
 {"schema_version":1,"connections":{"hermes":{"node":"/absolute/path/to/node","python":"/absolute/path/to/hermes-agent/venv/bin/python","root":"/absolute/path/to/hermes-agent"}}}
 ```
 
+Pi:
+
+```json
+{"schema_version":1,"connections":{"pi":{"node":"/absolute/path/to/node","cli":"/absolute/path/to/pi-coding-agent/dist/cli.js"}}}
+```
+
+Claude Code:
+
+```json
+{"schema_version":1,"connections":{"claude":{"python":"/absolute/path/to/claude-sdk-venv/bin/python","cli":"/absolute/path/to/claude"}}}
+```
+
+Claude's Python environment also needs the official Claude Agent SDK and the matching `rabbit-runtime`. First check the versions and install the runtime as described under [Claude Code](#claude-code).
+
 DeepSeek Harness:
 
 ```json
 {"schema_version":1,"connections":{"dsh":{"node":"/absolute/path/to/node","cli":"/absolute/path/to/deepseek-harness/lib/bin.js","root":"/absolute/path/to/deepseek-harness"}}}
 ```
 
-From the repository root, preflight and install:
+First choose a stable absolute path to Python 3.11+ as described in the [checklist](install-agent.md) and set it as `RABBIT_PYTHON` in this terminal. From the repository root, preflight and install:
 
 ```sh
-python3 -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
-python3 -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+"$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+"$RABBIT_PYTHON" -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
 ```
 
-Preflight checks basic requirements and paths without starting an agent or calling a model. Authentication, SDK/CLI compatibility, and real conversation still need verification. The installer keeps a private program copy and data under `$HOME/.imcodes/one-ai` and registers a per-user login service; IM.codes is not required. Later, double-click `打开小白兔.command` there or run `python3 -B "$HOME/.imcodes/one-ai/manage.py" open`.
+Preflight checks basic requirements and paths without starting an agent or calling a model. Authentication, SDK/CLI compatibility, and real conversation still need verification. The installer keeps a private program copy and data under `$HOME/.imcodes/one-ai` and registers a per-user login service; IM.codes is not required. Later, double-click `打开小白兔.command` there. Alternatively run `"/absolute/path/to/python3.11" -B "$HOME/.imcodes/one-ai/manage.py" open`, replacing the example with the absolute Python path selected at installation.
 
-For an existing installation, omit `--native-config` on update to retain saved connections. Supplying JSON replaces the complete `connections` set; merge existing entries before adding an agent. Get one real conversation working before adding memory, the specialist, or more agents.
+Keep the source checkout for documentation and updates. For an existing installation, omit `--native-config` on update to retain saved connections. Supplying JSON replaces the complete `connections` set; merge existing entries before adding an agent. Updates retain the saved service Python. If it is unavailable, pass `--python "$RABBIT_PYTHON"` explicitly to preflight and installation, and verify Pillow as described in the checklist. Get one real conversation working before adding memory, the specialist, or more agents.
 
 ## Foreground debugging command
 
 Run from the repository root. Use a separate development data directory and port, apart from the installed service and the agent's original transcripts:
 
 ```sh
-python3 -B 原型/server.py \
+"$RABBIT_PYTHON" -B 原型/server.py \
   --data-dir "$HOME/.white-rabbit-dev" \
   --port 17861
 ```
 
 Append **one of the argument groups below to the same command**. Replace all `/absolute/path/to/...` examples with paths on your own machine. Open <http://127.0.0.1:17861/>, choose the configured native agent/profile, and send a short request deliberately. The base command alone does not enable these native connections.
 
-This mode runs in the current terminal for development or troubleshooting; it does not provide login startup. For the complete current argument list, run `python3 -B 原型/server.py --help`.
+This mode runs in the current terminal for development or troubleshooting; it does not provide login startup. For the complete current argument list, run `"$RABBIT_PYTHON" -B 原型/server.py --help`.
 
 ### Codex
 
@@ -144,15 +162,30 @@ It keeps a separate fixed native conversation and calls the same supported appli
 
 The manual **Check and update** report has a separate analysis dependency: an available, already configured Claude text adapter with tools and native session persistence disabled. It analyzes only the four program-supplied metadata facts, records its requested/connection-reported model source, and does not acquire the Codex specialist's management tools. If this optional route is missing, facts can still be saved while the explanation remains incomplete. Refreshing a saved report does not trigger another analysis or change settings. See the [report pipeline](specialist.md#manual-status-report); configuring this route is not required for the first real-agent installation.
 
+## Daily workflow
+
+**Codex, Hermes, and Pi** share the composer path from the home draft into the native conversation. AI profile, read-only memory, interface choice, status badge, and file entry stay together. While an answer is running, the corner button stays Stop; newly typed text remains a draft rather than being queued. Refresh continues the same conversation. File selection is retained when you keep typing during an upload, alongside existing text and materials.
+
+Codex additionally supports model/reasoning adjustments for the unsent home draft and for one existing conversation. These update the same local setting rather than creating more named profiles or changing the global default. See [draft settings and specialist receipts](specialist.md#codex-draft-and-conversation-settings). Hermes/Pi retain saved-profile selection; their local fine-tuning is later work. **Claude Code and DSH keep their existing native entries; their unified-composer migration is not part of this release.**
+
+### Continue between Codex and Hermes
+
+1. In a Codex or Hermes conversation, choose **More → Continue with another AI** (`更多 → 换 AI 接着聊`). Choosing the other agent's saved profile enters the same path.
+2. Select the already read messages, registered complete files, and original images you want to carry. Preview the fixed versions and prepare the continuation draft. Preparation does not create a target conversation or call a model.
+3. Review the AI and memory profiles in that draft. **Send** creates the new native conversation and submits the selected versions. Unselected material, native tool state, approvals, and long-term memory are not silently copied; any selected memory is handled separately.
+4. Use the source/return entry to go back to the exact original conversation. Browser-local preparation and the source's unsent draft are retained across navigation and refresh.
+
+This new bidirectional workflow currently covers **Codex ↔ Hermes**. It preserves provenance and complete selected file/image versions, not a shared native identity or complete internal-state migration. If creation or sending is uncertain, retain and check the original ID/target; do not create a replacement conversation or resend. Other agents keep their existing handoff routes. The new workflow has not had a fresh physical-iPhone acceptance test.
+
 ## What to expect
 
 Text conversations, compatible full-text materials, and session continuation have implementations for the five routes. Recovery depends on the original session, working directory, and native files remaining available.
 
 | Route | Saved next-turn settings | Material / result boundary |
 | --- | --- | --- |
-| Codex | Model and supported reasoning level | Full text; original images only for supported configurations |
-| Hermes | Model and supported reasoning level | Full text and compatible images; exact delegated results can depend on the current connection cache |
-| Pi | Model and supported reasoning level | Full text; image use needs a verified vision-capable model and route; delegated results are current-connection scoped |
+| Codex | Model/reasoning adjustment for a home draft or one conversation; saved profiles remain available | Full text; original images only for supported configurations; new continuation with Hermes |
+| Hermes | Model and supported reasoning level through saved profiles | Full text and compatible images; new continuation with Codex; complete exact results can be saved after first successful retrieval |
+| Pi | Model and supported reasoning level through saved profiles | Full text; image use needs a verified vision-capable model and route; complete exact results can be saved after first successful retrieval |
 | Claude Code | Model selection; reasoning retains native settings | Full text; images are not enabled here; eligible final SDK results can be read from bounded local receipts after disconnect |
 | DeepSeek Harness | Local model override remains unconnected because the existing native setter may change global defaults | Full text and next-turn read-only memory selection; images are not enabled here |
 
@@ -160,7 +193,9 @@ The five routes can independently select supported read-only memory for the next
 
 Native target input/result routes are not equivalent to every complete specialist delegation path being validated. Keep the original request/session/turn identity when reading a result; a recent answer is not an exact result. Missing or cold connection state must not trigger an automatic resend.
 
-Claude's local operation ledger can now contain **final-answer text**, not only status metadata. It stores only successful, non-truncated, top-level SDK Results with UTF-8 text at most 128 KiB, together with SHA-256 and the original chat/client/session/epoch identity. Matching reads after disconnect or rebuild are labeled `stored_sdk_result`; they do not assert that the original connection is currently alive. Older receipts without stored text are not backfilled, and failures, subtasks, truncated/oversized results, corruption, or identity mismatch cannot be returned as a successful stored answer. Pi/Hermes still require their current-connection result caches. This limited saved body does not replace the agent's original full transcript or restore its internal state.
+Claude's local operation ledger can contain **final-answer text**, not only status metadata. It stores only successful, non-truncated, top-level SDK Results with UTF-8 text at most 128 KiB, together with SHA-256 and the original chat/client/session/epoch identity. Matching reads after disconnect or rebuild are labeled `stored_sdk_result`; they do not assert that the original connection is currently alive. Older receipts without stored text are not backfilled, and failures, subtasks, truncated/oversized results, corruption, or identity mismatch cannot be returned as a successful stored answer.
+
+Pi/Hermes also save an eligible complete result **after its first exact successful retrieval**. The original task ID can then read that saved result after service reconstruction, without starting another agent. An interruption before this first successful read can still leave the answer unavailable. Stored results describe a previous completion, not a live connection; missing evidence is not rebuilt from the latest answer. None of these limited saved bodies replaces the native transcript or restores complete internal state.
 
 Agents preserve their own transcripts, tools, permissions, and configurations. A selected text/material handoff does not migrate complete internal state. Offline tests, a successful connection, and a finished real task are different evidence; this release does not promise every tool, extension, approval shape, or recovery case.
 
@@ -173,7 +208,7 @@ The server binds to loopback. External mobile access currently depends on your s
 If you already run a local HAPI Hub, the included connector can manually bind its read-only work-discovery route:
 
 ```sh
-python3 -B 工具/hapi_work_connect.py --origin http://127.0.0.1:3006
+"$RABBIT_PYTHON" -B 工具/hapi_work_connect.py --origin http://127.0.0.1:3006
 ```
 
 Replace the port with your Hub's port. The tool accepts only a literal loopback HTTP origin, asks for the original HAPI access token without echoing it, and exchanges it for a JWT kept in White Rabbit's memory. Use `--rabbit-port` if the White Rabbit server uses another port. No HAPI process or agent is started by the connector.

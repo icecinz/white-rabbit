@@ -110,7 +110,7 @@ Claude 账本 V2 可在 `finish(..., result=record)` 的原终态事务内冻结
 
 连接按包内相邻路径启动`worker.mjs`，保留官方gateway客户端和原进程组关闭检查。可选`native_bootstrap.py`继续由所选Hermes Python直接执行，先以原生源码为导入来源、完成原profile环境初始化，再按相邻路径加载`session_settings.py`、`image_queue.py`与可选`result_cache.py`。它们保持自包含，不要求给Hermes解释器安装运行包，也不新增`-I`、环境修复或替代Agent循环。
 
-普通聊天继续使用原`prompt.submit`。交办任务可先探测当前连接结果扩展，再用单次提交编号读取原生完成文本；缓存不提供跨重启恢复或耐久去重。扩展与原生工作树不兼容时，已有设置、图片和普通聊天继续运行；交办任务不得自动降级补发。
+普通聊天继续使用原`prompt.submit`。交办任务可先探测当前连接结果扩展，再用单次提交编号读取原生完成文本；缓存不提供跨重启恢复或耐久去重。扩展与原生工作树不兼容时，已有设置、图片和普通聊天继续运行；交办任务不得自动降级补发。 宿主首次完整核对结果后，可将已核对文本保存到原生账本，供冷重建读取；这不扩展 gateway 缓存，也不回填未成功读取的旧结果。
 
 账本公开`validate_session_id`，消息codec公开`reference_value`，都沿用原有算法与错误类型。`maintenance_state()`只读原`hermes_operations`的pending计数，继续使用原锁和文件身份；未知请求不重发。对话、HTTP、profile／材料／记忆事务、附件协调与历史adoption仍归宿主。
 

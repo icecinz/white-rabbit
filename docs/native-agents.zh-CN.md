@@ -16,6 +16,10 @@
 
 让 Codex、Hermes 或 DSH 帮用户安装时，先按[安装清单](install-agent.zh-CN.md)完成一条真实通路。下面的 JSON 只记录本机路径，不存账号或 Key；**任选一组**写到仓库外的 `$HOME/.white-rabbit-connections.json`，把所有 `/absolute/path/to/...` 换成已核实的绝对路径。JSON 内不会展开 `$HOME` 或 `~`。
 
+如果平时通过 `HERMES_HOME` 或 `DSH_HOME` 使用自定义资料目录，需在对应连接中额外写入 `"home": "/该目录的绝对路径"`；登录启动服务不保证继承当前终端的变量。
+
+同样，若原 Agent 的模型服务依赖仅在当前终端设置的环境变量，登录启动服务未必能读取到。优先使用该 Agent 自己支持的持久登录／配置方式，并以安装后的真实回复核验；不要把密钥写入这个 JSON 或对话。
+
 Codex：
 
 ```json
@@ -28,36 +32,50 @@ Hermes：
 {"schema_version":1,"connections":{"hermes":{"node":"/absolute/path/to/node","python":"/absolute/path/to/hermes-agent/venv/bin/python","root":"/absolute/path/to/hermes-agent"}}}
 ```
 
+Pi：
+
+```json
+{"schema_version":1,"connections":{"pi":{"node":"/absolute/path/to/node","cli":"/absolute/path/to/pi-coding-agent/dist/cli.js"}}}
+```
+
+Claude Code：
+
+```json
+{"schema_version":1,"connections":{"claude":{"python":"/absolute/path/to/claude-sdk-venv/bin/python","cli":"/absolute/path/to/claude"}}}
+```
+
+Claude 的 Python 环境还需要官方 Claude Agent SDK 和同版 `rabbit-runtime`；先按下面 [Claude Code 的说明](#claude-code)核对版本及安装运行包。
+
 DeepSeek Harness：
 
 ```json
 {"schema_version":1,"connections":{"dsh":{"node":"/absolute/path/to/node","cli":"/absolute/path/to/deepseek-harness/lib/bin.js","root":"/absolute/path/to/deepseek-harness"}}}
 ```
 
-在仓库根目录预检并安装：
+先按[安装清单](install-agent.zh-CN.md)选择稳定的 Python 3.11+ 绝对路径，并在当前终端设为 `RABBIT_PYTHON`。在仓库根目录预检并安装：
 
 ```sh
-python3 -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
-python3 -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+"$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+"$RABBIT_PYTHON" -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
 ```
 
-预检不启动 Agent、不调用模型，只核基础环境及路径；登录、SDK／CLI 兼容和真实对话还需后续核验。安装器保存私有程序副本和数据在 `$HOME/.imcodes/one-ai`，注册当前用户登录启动，不需要另外安装 IM.codes。以后双击该目录的 `打开小白兔.command`，或运行 `python3 -B "$HOME/.imcodes/one-ai/manage.py" open`。
+预检不启动 Agent、不调用模型，只核基础环境及路径；登录、SDK／CLI 兼容和真实对话还需后续核验。安装器保存私有程序副本和数据在 `$HOME/.imcodes/one-ai`，注册当前用户登录启动，不需要另外安装 IM.codes。以后双击该目录的 `打开小白兔.command` 即可；也可用安装时选定的 Python 绝对路径运行 `"/absolute/path/to/python3.11" -B "$HOME/.imcodes/one-ai/manage.py" open`，将示例路径替换为实际路径。
 
-已有安装更新时省略 `--native-config` 可保留原连接。传入 JSON 会完整替换 `connections`；加新 Agent 前先合并原条目。先让一个 Agent 真正聊通，再配记忆、专员或其他 Agent。
+保留源码目录供文档和更新使用。已有安装更新时省略 `--native-config` 可保留原连接。传入 JSON 会完整替换 `connections`；加新 Agent 前先合并原条目。更新默认沿用已保存的服务 Python；旧路径不可用时，在预检和安装中添加 `--python "$RABBIT_PYTHON"` 明确更换，并按安装清单核对 Pillow。先让一个 Agent 真正聊通，再配记忆、专员或其他 Agent。
 
 ## 前台调试命令
 
 在仓库根目录运行。使用单独的调试数据目录和端口，不要与已安装服务或 Agent 正文目录混用：
 
 ```sh
-python3 -B 原型/server.py \
+"$RABBIT_PYTHON" -B 原型/server.py \
   --data-dir "$HOME/.white-rabbit-dev" \
   --port 17861
 ```
 
 将下面**任选一组参数追加到同一条命令末尾**。所有 `/absolute/path/to/...` 都需要换成本机路径。打开 <http://127.0.0.1:17861/>，选择已配置的原生 Agent／配置，再明确发送一条简短请求。只运行基础命令不会启用这些原生连接。
 
-此方式在当前终端前台运行，便于开发或排查，不负责登录启动。完整参数以 `python3 -B 原型/server.py --help` 为准。
+此方式在当前终端前台运行，便于开发或排查，不负责登录启动。完整参数以 `"$RABBIT_PYTHON" -B 原型/server.py --help` 为准。
 
 ### Codex
 
@@ -144,15 +162,30 @@ python3 -B 原型/server.py \
 
 手动**核对并更新**报告另有分析依赖：已有、可用的 Claude 文字适配器，关闭工具和原生会话持久化，只分析程序给定的四项元数据，并记录请求／连接报告的型号来源，不取得 Codex 专员的管理工具。缺少这条可选通路时仍可保存程序事实，说明保持未完成；刷新旧报告不重复分析、不改设置。见[报告流程](specialist.zh-CN.md#手动状态报告)。首次安装并接通一个真实 Agent 不要求先配置这条分析路线。
 
+## 日常操作
+
+**Codex、Hermes、Pi**从首页草稿到原生对话使用同一输入路径，AI 配置、只读记忆、接口方式、铭牌和文件入口保持在一起。回答中右下角保持停止；此时新输入只留作草稿，不排队发送。刷新后继续原会话。上传文件时继续打字，也会保留选入文件、原文字和已有材料。
+
+Codex 还可调整未发送的首页草稿或一段已有对话的模型／强度，更新同一份局部设置，不不断增加命名配置，也不改全局默认。见[草稿设置与专员回执](specialist.zh-CN.md#codex-草稿与本对话细调)。Hermes／Pi 继续选择保存配置，局部细调后置。**Claude Code、DSH 保留已有原生入口，本版不包含它们的统一输入区改造。**
+
+### 在 Codex 与 Hermes 之间接着聊
+
+1. 在 Codex 或 Hermes 对话中，点**更多 → 换 AI 接着聊**；选择另一位 Agent 的保存配置，也进入同一路径。
+2. 选择要带上的已读消息、已登记完整文件和原图，按固定版本预览并准备接续草稿。准备不创建目标对话、不调用模型。
+3. 在草稿里核对 AI 和记忆配置，**按发送**才新建原生对话，并提交选定版本。未选材料、原生工具状态、审批和长期记忆不偷偷复制；所选记忆另按配置处理。
+4. 从来源／返回入口回到准确原对话。准备内容只在当前浏览器保存，切页和刷新可继续；原对话未发草稿保留。
+
+这条新双向流程目前覆盖 **Codex ↔ Hermes**，保留来源与选定的完整文件／原图版本，不共享原生身份，也不迁移完整内部状态。创建或发送未知时保留原编号、原目标核对，不另建或重发。其他 Agent 保留已有交接路径。本次新流程尚未进行新的 iPhone 实机验收。
+
 ## 使用边界
 
 五条通路已有文字对话、兼容的完整文本材料和会话接续实现。恢复依赖原会话、工作目录与原生资料仍可用。
 
 | 通路 | 下轮保存配置 | 材料／结果边界 |
 | --- | --- | --- |
-| Codex | 模型与支持的强度 | 完整文本；指定受支持配置才开放原图 |
-| Hermes | 模型与支持的强度 | 完整文本与兼容原图；准确交办结果可能依赖当前连接缓存 |
-| Pi | 模型与支持的强度 | 完整文本；图片需已验证的视觉模型和通路；交办结果限当前连接 |
+| Codex | 首页草稿／本对话的模型与强度细调，保留保存配置入口 | 完整文本；指定受支持配置才开放原图；可与 Hermes 走新接续流程 |
+| Hermes | 通过保存配置选择模型与支持的强度 | 完整文本与兼容原图；可与 Codex 接续；完整准确结果可在首次成功读取后保存 |
+| Pi | 通过保存配置选择模型与支持的强度 | 完整文本；图片需已验证的视觉模型和通路；完整准确结果可在首次成功读取后保存 |
 | Claude Code | 选择模型，强度沿用原生 | 完整文本；图片未开放；符合条件的 SDK 最终结果可在断开后从有界本机回执读回 |
 | DeepSeek Harness | 局部模型覆盖暂未接通，因为现有原生设置接口可能修改全局默认 | 完整文本及下轮只读记忆选择；图片未开放 |
 
@@ -160,7 +193,9 @@ python3 -B 原型/server.py \
 
 有原生目标输入／结果接口，不代表所有完整专员交办链都已验收。读取结果需核对原请求、会话与轮次身份，不能取最近一条回答代替；冷连接或缺少缓存也不能触发自动补发。
 
-Claude 的本机操作账本现在可以保存**最终回答正文**，不只有状态元数据。只保存成功、未截断、不属于子任务的顶层 SDK Result，UTF-8 正文最多 128 KiB，同时核对 SHA-256 及原 chat／client／session／epoch 身份。断开或重建后匹配读回标为 `stored_sdk_result`，不声称原连接当前存活。旧回执没有正文不补写；失败、子任务、截断／超限、损坏或身份不符，均不能当作成功的存储回答。Pi／Hermes 仍依赖当前连接结果缓存。这份有限正文不替代原 Agent 的完整历史，也不恢复其内部状态。
+Claude 的本机操作账本可以保存**最终回答正文**，不只有状态元数据。只保存成功、未截断、不属于子任务的顶层 SDK Result，UTF-8 正文最多 128 KiB，同时核对 SHA-256 及原 chat／client／session／epoch 身份。断开或重建后匹配读回标为 `stored_sdk_result`，不声称原连接当前存活。旧回执没有正文不补写；失败、子任务、截断／超限、损坏或身份不符，均不能当作成功的存储回答。
+
+Pi／Hermes 也会在**首次按原编号成功取回完整结果后**保存符合条件的答案，服务重建后可按原任务编号读取，不必启动另一位 Agent。首次成功读取前中断，答案仍可能不可用。存储结果表示先前完成，不代表当前活连接；缺失时不从最近一条回答补造。这些有限正文都不替代完整原生历史，也不恢复全部内部状态。
 
 Agent 继续保留自己的正文、工具、权限和配置。材料交接不迁移完整内部状态。离线测试通过、连接成功、真实任务完成是不同证据，本版不承诺所有工具、扩展、审批和恢复情况都已经覆盖。
 
@@ -173,7 +208,7 @@ Agent 继续保留自己的正文、工具、权限和配置。材料交接不�
 已经使用本机 HAPI Hub 时，可以用随包工具手动绑定只读工作发现通路：
 
 ```sh
-python3 -B 工具/hapi_work_connect.py --origin http://127.0.0.1:3006
+"$RABBIT_PYTHON" -B 工具/hapi_work_connect.py --origin http://127.0.0.1:3006
 ```
 
 将端口改为实际 Hub 端口。工具只接受明确的本机 HTTP 地址，终端不回显地询问原 HAPI access token，交换出的 JWT 只留在小白兔内存。小白兔服务使用其他端口时追加 `--rabbit-port`。工具不启动 HAPI 或 Agent。

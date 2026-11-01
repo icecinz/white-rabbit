@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#f5f3ee">
+  <meta name="theme-color" content="#f4f0e7">
   <meta name="application-name" content="小白兔">
   <meta name="apple-mobile-web-app-title" content="小白兔">
   <title>小白兔 · AI 助手</title>
@@ -14,6 +14,8 @@
   <link rel="stylesheet" href="/workspace.css">
   <link rel="stylesheet" href="/specialist.css">
   <link rel="stylesheet" href="/work_status.css">
+  <link rel="stylesheet" href="/composer_shell.css">
+  <link rel="stylesheet" href="/soft_paper.css">
   <script src="/agents.js" defer></script>
   <script src="/markdown-it.min.js" defer></script>
   <script src="/rich_text.js" defer></script>
@@ -35,6 +37,7 @@
   <script src="/handoff_view.js" defer></script>
   <script src="/specialist_context.js" defer></script>
   <script src="/specialist_tools.js" defer></script>
+  <script src="/composer_shell.js" defer></script>
   <script src="/specialist.js" defer></script>
   <script src="/pi_native_history.js" defer></script>
   <script src="/pi_native.js" defer></script>
@@ -50,6 +53,7 @@
   <script src="/native_adoption.js" defer></script>
   <script src="/native_text_quote.js" defer></script>
   <script src="/native_file_quote.js" defer></script>
+  <script src="/continuations.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -103,6 +107,7 @@
       <p class="demo-mode-banner" id="demo-mode-banner" role="note" hidden>演示模式 · 仅虚构数据与模拟回答，不连接真实 AI；退出后清理本次数据。</p>
       <section id="workspace-panel" hidden aria-label="管理和设置"></section>
       <section id="native-chats-panel" hidden aria-label="原生对话"></section>
+      <section id="continuation-panel" hidden aria-label="接续草稿"></section>
       <div id="settings-mount-parking" hidden><section id="specialist-settings" aria-label="小白兔专员设置"></section><section id="native-chat-settings" aria-label="Agent 会话设置"></section></div>
       <div id="specialist-layout" class="specialist-layout" hidden>
         <section id="specialist-panel" hidden aria-label="小白兔专员"></section>

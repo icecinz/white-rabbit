@@ -25,7 +25,7 @@
     "Markdown排版": "Markdown formatting", "是否将回答显示为Markdown；只影响显示，不修改原文。": "Show replies as Markdown. This changes the display without changing the original text.", "只显示已接入文字索引的内部记录，不扩展读取原生工具或推理正文。": "Show internal records already included in the text index. This does not add native tool or reasoning content.", "偏好保存在这台电脑；界面语言仅保存在当前浏览器。": "Preferences are saved on this computer; the interface language is saved only in this browser.",
     "Enter发送，或Ctrl/⌘+Enter发送；输入法确认不发送。": "Use Enter or Ctrl / ⌘ + Enter to send. Confirming input-method suggestions does not send a message.", "用 Enter 发送消息": "Send messages with Enter", "用 Ctrl / ⌘ + Enter 发送消息": "Send messages with Ctrl / ⌘ + Enter", "把布局改为舒适留白": "Use the comfortable layout with more space", "把布局改为紧凑排列": "Use the compact layout",
     "在 AI 配置卡片上设为默认；不会改变已经打开的对话。": "Set the default on an AI profile card. Existing chats keep their selection.", "沿用 Agent 默认模型和参数。": "Use the Agent's default model and parameters.", "输入中文时，候选词确认不会发送。": "Confirming input-method suggestions will not send a message.", "跟随系统会随着系统明暗模式切换。": "System theme follows your device's light or dark mode.", "舒适留白或紧凑排列。": "Choose more space or a compact layout.", "关闭后按原始文字显示，不修改保存的内容。": "Turn off to show plain text. Saved content stays unchanged.", "只包括已接入文字索引的子代理协作、自动审批记录；不含系统、工具和推理正文。关闭只是隐藏，不会删除。": "Includes indexed subagent and approval records, without system, tool or reasoning bodies. Turning off hides records without deleting them.", "回到“对话”，打开一段共同对话，使用右上方“导出”下载 Markdown。": "Open a shared chat in Chats and use Export to download Markdown.", "共同对话保存在本机数据库；原有记录只读接入。": "Shared chats are stored in a local database; native records are read-only.", "这些偏好会保存到本机小白兔，刷新后仍保留。": "These preferences are saved on this computer and survive refresh.",
-    "当前工作": "Current work", "仅观察小白兔已连接的工作；不包括原应用中的其他工作。": "Rabbit-owned connections only; other work in the original apps is not observed.",
+    "小白兔已连接的工作": "Rabbit-connected work", "仅观察小白兔已连接的工作；不包括原应用中的其他工作。": "Rabbit-owned connections only; other work in the original apps is not observed.",
     "处理中": "Working", "等待确认": "Needs attention", "本连接空闲": "Connection idle", "状态待核对": "Status unknown", "尚未连接": "Not connected", "正在连接": "Connecting", "连接异常": "Connection error", "连接已关闭": "Connection closed", "连接中的对话": "Connected chat", "部分工作状态未知": "Some work states are unknown", "暂无已连接的工作": "No connected work",
     "HAPI报告的工作": "HAPI-reported work", "Hub 查询时间": "Hub query time", "非原生实时状态": "Not native real-time status", "Hub 活跃": "Hub active", "Hub 思考中": "Hub thinking", "Hub 等待确认": "Hub needs attention", "Hub 非活跃": "Hub inactive", "未命名工作": "Unnamed work", "Agent 未报告": "Agent unreported", "Hub 未列出工作": "No work reported by Hub", "HAPI状态待核对": "HAPI status unknown", "HAPI尚未核对，点“刷新检测”读取。": "HAPI is unverified. Use Refresh status to query it.", "只显示 Hub 报告；不证明原生执行者实时状态，也不能在此发送或审批。": "Hub reports only; native executor state is unverified. No sending or approval here.",
     "＋ 添加 Agent": "＋ Add Agent", "＋ 添加模型": "＋ Add model", "尚未配置；请按手动指南完成原生安装与连接检测。": "Not configured. Follow the manual guide to install the native Agent and check its connection.", "打开手动接入指南；原生安装、凭据和检测完成后才可接入。": "Open the manual setup guide. Native installation, credentials and connection checks are required.", "配置指导暂时打不开；现有连接保持原样。": "Setup guidance could not be opened. Existing connections stay unchanged.", "目录名称匹配，不代表已验证实际模型相同；每条连接沿用各自的状态。": "Catalog names match; this does not verify that the actual models are identical. Each connection keeps its own status.", "本机发现的模型。展开只查看，能否使用在发送时确认。": "Models found on this computer. Expand to view; availability is checked when you send.", "目录暂未报告模型。": "No models reported by the catalog yet."
@@ -473,7 +473,6 @@
       if (settings) {
         const list = node("div", "rbw-ai-settings-list");
         const entries = [
-          ["send_shortcut", { enter: "Enter 发送", "ctrl-enter": "Ctrl / ⌘ + Enter 发送" }],
           ["density", { comfortable: "舒适", compact: "紧凑" }],
           ["markdown", { false: "原始文字", true: "Markdown 排版" }],
           ["show_internal", { false: "隐藏", true: "显示" }],
@@ -527,6 +526,7 @@
       const box = node("div", "rbw-settings-box");
       box.append(
         settingRow("主题", "", selectSetting("theme", [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]])),
+        settingRow("发送快捷键", "", selectSetting("send_shortcut", [["enter", "Enter 发送"], ["ctrl-enter", "Ctrl / ⌘ + Enter 发送"]])),
         settingRow("界面语言", languageSaved ? "" : "当前页面已切换；浏览器未能保存，刷新后可能恢复中文。", languageSetting())
       );
       container.append(box);

@@ -17,6 +17,7 @@ from rabbit_runtime.model_observation import CodexModelObservation, ModelObserva
 CONNECTIONS_PATH = '/api/management/native-model-connections'
 CATALOG_PATH = '/api/management/native-model-catalog'
 SPECIALIST_CATALOG_PATH = '/api/management/specialist-model-catalog'
+DSH_GUIDE_PATH = '/api/management/dsh-model-guide'
 PREPARATION_PATH = '/api/management/native-model-preparation'
 _AGENTS = (('codex', 'native_chats', 2), ('pi', 'pi_native_chats', 1),
            ('hermes', 'hermes_native_chats', 1), ('claude', 'claude_native_chats', 1))
@@ -51,7 +52,7 @@ def query_fields(raw):
 def validate_fields(fields):
     if type(fields) is not dict or set(fields) != {'agent', 'chat_id', 'epoch'}:
         invalid()
-    if type(fields['agent']) is not str or fields['agent'] not in {row[0] for row in _AGENTS}:
+    if type(fields['agent']) is not str or fields['agent'] not in {row[0] for row in _AGENTS} | {'dsh'}:
         invalid()
     try:
         identity = chat_id(fields['chat_id'])
@@ -270,41 +271,99 @@ def refresh_specialist(service):
             'source': 'specialist', 'native_catalog_ready': True}
 
 
-def connections(service):
+def _agent_connections(agent, manager, limit):
+    candidates = []
+    before = _registry(manager)
+    for identity, owner in before:
+        with _action_scope(agent, owner) as observation:
+            snapshot = _observe(manager, agent, identity, owner, observation=observation)
+            if snapshot is not None:
+                candidates.append((identity, owner, snapshot))
+    if len(candidates) > limit:
+        raise _error('unavailable')
+    # Read titles outside the native locks, then recheck each exact owner.
+    titles = ({chat_id(row['id']): _title(row['title']) for row in manager.catalogue.list()}
+              if candidates else {})
     rows = []
-    for agent, _name, limit in _AGENTS:
-        manager = _manager(service, agent)
-        if manager is None:
-            continue
-        candidates = []
-        for identity, owner in _registry(manager):
-            with _action_scope(agent, owner) as observation:
-                snapshot = _observe(manager, agent, identity, owner, observation=observation)
-                if snapshot is not None:
-                    candidates.append((identity, owner, snapshot))
-        if not candidates:
-            continue
-        if len(candidates) > limit:
+    for identity, owner, snapshot in candidates:
+        if identity not in titles:
             raise _error('unavailable')
-        # Titles belong to the durable app catalogue. Read it once, outside all
-        # native/manager locks; a rename needs no second RAM title cache.
+        with _action_scope(agent, owner) as observation:
+            _observe(manager, agent, identity, owner, observation=observation, expected=snapshot)
+        rows.append({'agent': agent, 'chat_id': identity, 'title': titles[identity],
+                     'epoch': _snapshot_epoch(agent, snapshot)})
+    after = _registry(manager)
+    if (len(before) != len(after)
+            or any(a[0] != b[0] or a[1] is not b[1] for a, b in zip(before, after))):
+        raise _error('changed')
+    return rows
+
+
+def _dsh_connections(manager):
+    # The strict DSH enumeration proves cold placeholders as well as live
+    # owners; a busy or changed owner makes this agent unverified.
+    before = _registry(manager)
+    rows = manager.model_connections(require_complete=True)
+    after = _registry(manager)
+    if (type(rows) is not list or len(rows) > 1 or len(before) != len(after)
+            or any(a[0] != b[0] or a[1] is not b[1] for a, b in zip(before, after))):
+        raise _error('unavailable')
+    for row in rows:
+        if (type(row) is not dict or set(row) != {'agent', 'chat_id', 'title', 'epoch'}
+                or row['agent'] != 'dsh' or chat_id(row['chat_id']) != row['chat_id']
+                or not isinstance(row['epoch'], str) or not _EPOCH.fullmatch(row['epoch'])
+                or _title(row['title']) != row['title']
+                or row['chat_id'] not in {identity for identity, _ in before}):
+            raise _error('unavailable')
+    return rows
+
+
+def connections(service):
+    """Independent observations of existing Rabbit-owned connections only.
+
+    A complete observation is not proof that a model can be used or that
+    external apps are idle. A failed Agent contributes no incomplete rows.
+    """
+    rows, agents = [], {}
+    for agent, _name, limit in _AGENTS:
         try:
-            titles = {chat_id(row['id']): _title(row['title']) for row in manager.catalogue.list()}
+            manager = _manager(service, agent)
+            if manager is None:
+                agents[agent] = 'disabled'
+                continue
+            found = _agent_connections(agent, manager, limit)
         except Exception:
-            raise _error('unavailable') from None
-        for identity, owner, snapshot in candidates:
-            if identity not in titles:
-                raise _error('unavailable')
-            with _action_scope(agent, owner) as observation:
-                _observe(manager, agent, identity, owner, observation=observation, expected=snapshot)
-            rows.append({'agent': agent, 'chat_id': identity, 'title': titles[identity],
-                         'epoch': _snapshot_epoch(agent, snapshot)})
-    return {'workspace_id': service.workspace_id, 'connections': rows}
+            agents[agent] = 'unverified'
+        else:
+            rows.extend(found)
+            agents[agent] = 'observed'
+    try:
+        dsh = getattr(service, 'dsh_native_chats', None)
+        if dsh is None:
+            agents['dsh'] = 'disabled'
+        else:
+            rows.extend(_dsh_connections(dsh))
+            agents['dsh'] = 'observed'
+    except Exception:
+        agents['dsh'] = 'unverified'
+    return {'workspace_id': service.workspace_id, 'connections': rows, 'agents': agents}
 
 
 def refresh(service, fields):
     fields = validate_fields(fields)
     agent, identity, epoch = (fields[key] for key in ('agent', 'chat_id', 'epoch'))
+    if agent == 'dsh':
+        manager = getattr(service, 'dsh_native_chats', None)
+        if manager is None:
+            raise _error('unavailable')
+        try:
+            snapshot = manager.read_model_catalogue(identity, epoch)
+        except Exception:
+            raise _error('unavailable') from None
+        if (type(snapshot) is not dict or snapshot.get('workspace_id') != service.workspace_id
+                or snapshot.get('source_chat_id') != identity):
+            raise _error('changed')
+        return dict(fields, workspace_id=service.workspace_id, native_catalog_ready=True)
     manager = _manager(service, agent)
     if manager is None:
         raise _error('unavailable')

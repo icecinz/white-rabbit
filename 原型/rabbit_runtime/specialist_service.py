@@ -314,6 +314,38 @@ class SpecialistService:
         """Trusted request policy only; no discovery, native I/O or model claim."""
         return None if self._fixed_options is None else dict(self._fixed_options)
 
+    def apply_during_active_client(self, client_id, callback):
+        """Run a bounded local CAS for the exact observed specialist turn.
+
+        The caller takes its database write lock first. The callback may only
+        compare/write/commit that prepared transaction; no RPC, wait or discovery.
+        A None client is for a read-only identity snapshot, not a write grant.
+        """
+        if (client_id is not None and type(client_id) is not str) or not callable(callback):
+            raise SpecialistServiceError('active_turn_unconfirmed')
+        from .maintenance import try_locks
+        with self._cache:
+            turn, session = self._turn_state, self._session
+            if (self.session_key != 'specialist/codex' or self._state != 'ready'
+                    or self._closed or self._disconnect_unconfirmed or self._error
+                    or self._rpc is None or session is None or self._reader is None
+                    or not self._reader.is_alive() or self._stop is None or self._stop.is_set()
+                    or type(self._epoch) is not str or len(self._epoch) != 32
+                    or any(c not in '0123456789abcdef' for c in self._epoch)
+                    or not self._turn_client_id or self._turn_observed_client_id != self._turn_client_id
+                    or (client_id is not None and client_id != self._turn_client_id)
+                    or type(turn) is not dict or turn.get('status') not in ('accepted', 'inProgress')
+                    or not _model_string(turn.get('turn_id'))):
+                raise SpecialistServiceError('active_turn_unconfirmed')
+            with try_locks(session._lock) as acquired:
+                bound = session._bound
+                if (not acquired or not session._initialized or session.rpc is not self._rpc
+                        or session.session_key != self.session_key or type(bound) is not dict
+                        or not _model_string(bound.get('thread_id'))):
+                    raise SpecialistServiceError('active_turn_unconfirmed')
+                return callback(self._turn_client_id, {
+                    'thread_id': bound['thread_id'], 'turn_id': turn['turn_id']})
+
     def require_ready(self):
         if self._closed:
             raise SpecialistServiceError('specialist_closed')

@@ -27,27 +27,34 @@ SPECIALIST_REPLY_INSTRUCTIONS = (
     '查找未知对话才用rabbit_conversations_list，query搜索名称或正文文本，不按身份编号查找；本次当前对象已有kind=chat/native和准确编号时，直接调用对应配置read，不必先拉目录，并保留kind、agent和完整chat_id或session_id。'
     '同名或标题截断时先核对，不猜编号；分页可能缺漏，revision改变后不能把页面拼成同一快照。'
     'history只是历史索引，session_id不是native的chat_id，不能直接用它修改原生配置。'
+    '用户明确要交接文件或原图时，先按准确kind/agent用rabbit_chat_materials取得ref；它只列元数据，不证明已读文件或当前字节可用。原生coverage只包括本应用记录的输入，未记录旧输入与工作目录成果不能猜或称已列全。'
     '当前操作对象元数据只是指代，不是操作授权或最新配置；修改前先读取目标当前selection和版本。'
     '按kind区分chat共同聊天与native原生会话，分别用rabbit_chat_configuration和rabbit_native_chat_configuration；不能混用编号。'
-    '只改单段对话时不要update共享AI配置；需要改参数应先copy配置，再select到该对话。'
-    'history历史、新草稿、没有稳定ID或目标冲突时先澄清，不擅自创建、替换或选择目标。'
+    '只改单段Codex原生对话时不要update共享AI配置或反复copy；先read取得当前selection和profile版本，再用rabbit_native_chat_local_configuration保存本对话参数。'
+    '其他Agent目前只选择已有命名配置；不支持的局部细调如实说明，不能修改全局默认或创建一堆配置代替。'
+    '局部保存需保留完整参数与operation_id；结果未知只在用户明确核对时复用原POST和编号，不自动重试，不把独立GET当原保存成功。'
+    '当前对象v3的new_chat是首页草稿，不是原生chat_id；它带draft_id和configuration_revision时，用rabbit_home_configuration的inspect省client_id查本次登记，从返回取准确client_id和当前完整参数，再propose一次完整模型与强度建议。'
+    '首页建议只由原浏览器核对保存；pending仍在等待，只有applied才可说已保存。未知只inspect原client_id，不再propose，不修改命名配置或全局默认代替；浏览器所有权密钥永不进入工具。'
+    'history历史、没有稳定ID的新草稿或目标冲突时先澄清，不擅自创建、替换或选择目标。'
     '只有用户明确交办才调用rabbit_native_task；沿原生工具与审批，不自动批准、换编号重发或替换对话。'
     'accepted和工具片段不等于完成；按原client_id核对指定轮结果，结果不能核对就说明，不猜最近回答。')
 TOOLS = ('rabbit_ai_profiles_list', 'rabbit_ai_profile_rename', 'rabbit_ai_profile_manage',
          'rabbit_memory_profiles_list', 'rabbit_memory_profile_manage',
          'rabbit_memory_connection_check',
-         'rabbit_memory_document',
-         'rabbit_settings_read', 'rabbit_settings_update', 'rabbit_work_status', 'rabbit_external_work_status',
+         'rabbit_memory_document', 'rabbit_native_memory',
+         'rabbit_settings_read', 'rabbit_settings_update', 'rabbit_work_status', 'rabbit_management_read', 'rabbit_external_work_status',
          'list_native_model_connections', 'refresh_native_model_catalog',
          'refresh_specialist_model_catalog',
          'prepare_native_model_catalog',
          'rabbit_native_chat_names_list', 'rabbit_native_chat_rename',
          'rabbit_native_chat_configuration',
+         'rabbit_native_chat_local_configuration',
+         'rabbit_home_configuration',
          'rabbit_chat_configuration',
          'rabbit_native_chat_memory_configuration',
          'rabbit_native_history_preview', 'rabbit_native_history_adopt',
          'rabbit_markdown_chats_list', 'rabbit_markdown_chat_publish',
-         'rabbit_conversations_list', 'rabbit_native_task')
+         'rabbit_conversations_list', 'rabbit_chat_materials', 'rabbit_native_task')
 
 
 

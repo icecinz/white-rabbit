@@ -1,6 +1,6 @@
 """One Hermes-native session owner, with its own protocol and transcript authority.
 
-Only application identities/receipts are saved locally. Hermes owns messages,
+Application identities/receipts and explicitly read exact results are saved locally. Hermes owns messages,
 tools, approvals, profiles and compression. This is not a Codex item adapter.
 """
 from collections import OrderedDict
@@ -178,6 +178,7 @@ class HermesNativeHolder:
         self._events, self._requests = OrderedDict(), OrderedDict()
         self._event_number = self._seen_events = 0
         self._active = self._terminal = None
+        self._settle_target = self._settle_worker = None
         self._saw_start = False
         self._interrupt_sent = set()
         self.profile_intents, self._catalogue_observer = profile_intents, catalogue_observer
@@ -452,7 +453,9 @@ class HermesNativeHolder:
     def _consume(self):
         while not self._stop.is_set():
             try: event = self._rpc.next_event(timeout=.25)
-            except TimeoutError: continue
+            except TimeoutError:
+                self._ensure_terminal_settle()
+                continue
             except Exception:
                 if not self._stop.is_set(): self._fault('event_stream_closed')
                 return
@@ -463,6 +466,51 @@ class HermesNativeHolder:
                     self._cache.notify_all()
             except Exception:
                 self._fault('invalid_native_event'); return
+            self._ensure_terminal_settle()
+
+    def _ensure_terminal_settle(self):
+        # The existing reader only schedules a queued terminal observation.
+        # A retained thread reference closes the exit/new-event race: the next
+        # reader iteration starts a successor only after that thread has exited.
+        with self._cache:
+            if (self._stop.is_set() or self._settle_target is None
+                    or self._settle_worker is not None and self._settle_worker.is_alive()):
+                return
+            worker = threading.Thread(target=self._settle_terminal,
+                name='rabbit-hermes-settle', daemon=True)
+            self._settle_worker = worker
+            try: worker.start()
+            except Exception:
+                self._settle_worker = None
+                self._settle_target = None
+                if not self._problem: self._problem = 'completion_unverified'
+
+    def _settle_terminal(self):
+        while True:
+            with self._cache:
+                target, self._settle_target = self._settle_target, None
+                if target is None or self._stop.is_set(): return
+            acquired = False
+            while not self._stop.is_set() and not acquired:
+                acquired = self._action.acquire(timeout=.1)
+            if not acquired: return
+            try:
+                with self._cache:
+                    rpc, epoch, runtime, client, terminal = target
+                    if (self._stop.is_set() or self._state != 'ready' or self._rpc is not rpc or self._epoch != epoch
+                            or self._runtime != runtime
+                            or self._active != client or self._terminal is not terminal):
+                        continue
+                # Keep the event reader free for _barrier; a terminal event is
+                # not an idle/accepted proof and must not finish a ledger alone.
+                try: self._read_native(expected_terminal=terminal)
+                except Exception:
+                    with self._cache:
+                        if not self._problem: self._problem = 'completion_unverified'
+                finally:
+                    with self._cache: self._cache.notify_all()
+            finally:
+                self._action.release()
 
     def _event(self, event):
         if type(event) is not dict or type(event.get('type')) is not str:
@@ -484,6 +532,8 @@ class HermesNativeHolder:
             self._saw_start, self._terminal = True, None
         elif kind == 'message.complete' and self._active and self._saw_start:
             self._terminal = _copy(event)
+            self._settle_target = (self._rpc, self._epoch, self._runtime,
+                self._active, self._terminal)
             for row in self._requests.values():
                 if row['state'] in ('pending', 'unknown'): row['state'] = 'expired'
         elif kind in ('approval.request', 'clarify.request'):
@@ -519,6 +569,13 @@ class HermesNativeHolder:
         elif kind in ('clarify.expire', 'approval.expire'):
             for (identity, _qid), row in self._requests.items():
                 if identity == payload.get('request_id') and row['state'] == 'pending': row['state'] = 'expired'
+        elif kind == 'session.info' and self._active and self._terminal is not None:
+            # Hermes emits this after clearing running/inflight in its finally
+            # block. Recheck the same turn; the event itself is not idle proof.
+            # Compression keys may advance during the prior read's barrier;
+            # _read_native still verifies their exact durable successor chain.
+            self._settle_target = (self._rpc, self._epoch, self._runtime,
+                self._active, self._terminal)
 
     def _advance_key(self, key):
         key = _session_id(key)
@@ -535,7 +592,7 @@ class HermesNativeHolder:
                 self.store.attach(self.identity, successor, previous=previous); previous = successor
         self._live_key = key
 
-    def _read_native(self, *, allow_failed=False):
+    def _read_native(self, *, allow_failed=False, expected_terminal=None):
         with self._cache:
             known_tokens = {row['token'] for row in self._requests.values()}
         value = self._rpc.request('session.activate', {'session_id': self._runtime}, timeout=20)
@@ -593,7 +650,8 @@ class HermesNativeHolder:
             # A response acknowledgment, this submission's observed terminal
             # event and a native idle read are all required. Text matching is
             # never evidence of a lost prompt's acceptance.
-            if self._active and self._terminal is not None and not value['running'] and not value.get('queued'):
+            if (self._active and self._terminal is not None and not value['running'] and not value.get('queued')
+                    and (expected_terminal is None or self._terminal is expected_terminal)):
                 receipt = self.store.operation(self._active)
                 status = self._terminal.get('payload', {}).get('status')
                 terminal = {'complete': 'completed', 'error': 'failed', 'interrupted': 'interrupted'}.get(status)
@@ -601,6 +659,7 @@ class HermesNativeHolder:
                 if receipt['status'] == 'accepted' and terminal and not (type(inflight) is dict and inflight.get('streaming') is True):
                     self.store.finish(self._active, terminal)
                     self._active = self._terminal = None
+                    if self._problem == 'completion_unverified': self._problem = ''
         self._settle_attachment()
 
     def open(self):
@@ -721,6 +780,15 @@ class HermesNativeHolder:
                 if (self._state != 'ready' or not self._rpc.running or self._task_result_context is not context
                         or context[0] is not self._rpc or context[1:3] != (self._epoch, self._runtime)):
                     return unavailable
+                # Keep current verified output useful if only saving fails. Its
+                # evidence remains current_connection_result, never stored.
+                try:
+                    self.store.remember_result(self.identity, client_id, value)
+                except HermesStoreError as error:
+                    if error.code not in ('io_failed', 'readonly'):
+                        raise
+                except OSError:
+                    pass
                 return _copy(value)
             except Exception:
                 return unavailable
@@ -1190,6 +1258,7 @@ class HermesNativeHolder:
     def close(self):
         with self._action:
             self._stop.set()
+            with self._cache: self._settle_target = None
             if self._rpc is not None:
                 self._rpc.close()
                 stats = self._rpc.stats
@@ -1198,6 +1267,9 @@ class HermesNativeHolder:
             if self._reader is not None:
                 self._reader.join(timeout=3)
                 if self._reader.is_alive(): raise RuntimeError('Hermes事件读取者仍未退出。')
+            if self._settle_worker is not None:
+                self._settle_worker.join(timeout=3)
+                if self._settle_worker.is_alive(): raise RuntimeError('Hermes结束核对仍未退出。')
             self._state = 'closed'
             self._task_result_context = None
 
@@ -1399,6 +1471,12 @@ class HermesNativeChats:
                 fields = {k: v for k, v in body.items() if k != '_one_ai_csrf'} if type(body) is dict else body
                 validate_fields(fields, ('client_id', 'title'))
                 return self.catalogue.create(fields['client_id'], fields['title'], self._prepare)
+            if path.startswith(ROOT + '/creations/'):
+                if method != 'GET' or body is not None or query:
+                    raise _error('creation_method', '请只读核对原创建编号。', status=405)
+                creation = chat_id(path.removeprefix(ROOT + '/creations/'))
+                return {'workspace_id': self.workspace_id, 'agent': 'hermes',
+                        'creation_id': creation, 'chat': self.catalogue.creation(creation)}
             parts = path.removeprefix(ROOT+'/').split('/') if path.startswith(ROOT+'/') else []
             if len(parts) not in (1, 2): raise _error('route', '找不到此Hermes原生操作。', status=404)
             identity = chat_id(parts[0]); action = parts[1] if len(parts) == 2 else None

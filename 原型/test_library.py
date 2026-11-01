@@ -476,6 +476,23 @@ class NativeBindingLibraryTests(unittest.TestCase):
                 [(row['agent'], row['session_id']) for row in bindings]),
             excluded_source_getter=single, enabled_native_agents_getter=lambda: enabled)
 
+    def test_bound_original_title_remains_searchable_after_native_rename(self):
+        row = self.catalogued('新名称')
+        other = self.catalogued('无关对话')
+        self.native('codex', 'original', '曾用名称 月亮7521', '2026-01-01T00:00:00Z', ['前文', '实际内容 紫船'])
+        self.native('codex', 'other', '不同来源', '2026-01-01T00:00:00Z', ['月亮7521'])
+        self.native('hermes', 'original', '曾用名称 月亮7521', '2026-01-01T00:00:00Z', ['独立来源'])
+        library = self.linked_library([self.binding(row, 'original', adopted=True), self.binding(other, 'other')], enabled=('codex',))
+        result = library.list(query='曾用名称', agent='codex')
+        self.assertEqual(result['total'], 1)
+        item = result['items'][0]
+        self.assertEqual((item['kind'], item['id'], item['title'], item['available']), ('native', row['id'], '新名称', True))
+        self.assertEqual(item['index_source'], {'agent': 'codex', 'session_id': 'original'})
+        self.assertNotIn('indexed_match', item)  # A title is not a message location.
+        self.assertEqual(library.list(query='曾用名称 紫船', agent='codex')['items'][0]['indexed_match']['message_id'], 'original-1')
+        self.assertEqual({item['key'] for item in library.list(query='月亮7521')['items']},
+                         {'native:codex:' + row['id'], 'native:codex:' + other['id'], 'history:hermes:original'})
+
     def test_same_title_different_native_sids_and_agents_do_not_cross_match(self):
         first, second = self.catalogued('同名目录'), self.catalogued('同名目录')
         self.native('codex', 'source-a', '索引A', '2026-01-01T00:00:00Z', ['开头', 'Alpha 独有'])

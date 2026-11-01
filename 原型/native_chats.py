@@ -15,6 +15,7 @@ from urllib.parse import parse_qs
 from rabbit_runtime.native_session_store import NativeSessionStore, NativeSessionStoreError, request_sha256
 from rabbit_runtime.codex_native_session import build_turn_params, NativeSessionError
 from native_profile_intents import NativeProfileIntents, NativeProfileIntentError
+from native_chat_selection import NativeChatSelections
 from native_memory_intents import NativeMemoryIntents, NativeMemoryIntentError, validate_selection
 from native_profile_catalog import (NativeProfileUnavailable, resolve_native_profile,
                                     project_native_profiles, require_image_support)
@@ -67,6 +68,7 @@ class NativeChats:
         self.root = Path(data_dir) / 'native-workspaces'
         self.catalogue = NativeChatCatalogue(catalogue_path)
         self.profiles = AIProfiles(catalogue_path)
+        self.selections = NativeChatSelections(catalogue_path, workspace_id=workspace_id)
         self.profile_intents = NativeProfileIntents(catalogue_path, workspace_id=workspace_id)
         self.memory_intents = NativeMemoryIntents(catalogue_path, workspace_id=workspace_id,
                                                  query_filter=memory_query_filter)
@@ -170,6 +172,12 @@ class NativeChats:
             with self._lock:
                 self._available()
                 return self.catalogue.create(fields['client_id'], fields['title'], self._prepare_workspace)
+        if path.startswith(ROOT + '/creations/'):
+            if method != 'GET' or body is not None or query:
+                raise _error(405, 'native_chat_creation_method', '请只读核对原创建编号。', unsent=True)
+            creation = chat_id(path.removeprefix(ROOT + '/creations/'))
+            return {'workspace_id': self.workspace_id, 'agent': 'codex',
+                    'creation_id': creation, 'chat': self.catalogue.creation(creation)}
         parts = path.removeprefix(ROOT + '/').split('/') if path.startswith(ROOT + '/') else []
         if len(parts) not in (1, 2) or len(parts) == 2 and parts[1] not in _ACTIONS:
             raise _error(404, 'native_chat_route', '找不到这个原生对话操作。', unsent=True)
@@ -278,9 +286,15 @@ class NativeChats:
             if action == 'profiles':
                 catalogue = SpecialistHTTP(owner.holder)._call(owner.holder.models)
                 self._remember_catalogue(identity, catalogue)
+                named = self.profiles.list()['profiles']
+                selected = self.selections.read('codex', identity)
+                current = (project_native_profiles([selected['profile']], catalogue)
+                           if selected['profile_current'] and selected['profile'] is not None
+                           and selected['profile']['id'] not in {row['id'] for row in named} else [])
                 return {'workspace_id': self.workspace_id, 'chat_id': identity,
                         'native_catalog_ready': True,
-                        'profiles': project_native_profiles(self.profiles.list()['profiles'], catalogue)}
+                        'profiles': project_native_profiles(named, catalogue),
+                        'current_profile': current[0] if current else None}
             intent = memory_intent = None
             if action == 'send':
                 # The raw application request (including reference hashes) is

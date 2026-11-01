@@ -48,7 +48,26 @@
   Object.assign(en, { "命令": "Command", "命令执行中": "Command running", "命令失败": "Command failed", "已拒绝": "Declined", "命令完成": "Command completed", "命令已结束": "Command ended", "状态未返回": "Status not returned", "退出码": "Exit code", "未返回退出码": "Exit code not returned", "退出码格式不受支持": "Unsupported exit-code format", "工作目录": "Working directory", "命令输出": "Command output", "原始命令结果": "Original command result", "修改中": "Changing files", "修改已完成": "File changes completed", "修改失败": "File changes failed" });
   Object.assign(en, { "消息已由原生 Agent 接收，正在等待本轮结束；原草稿暂时保留。": "The native Agent has received the message. Waiting for this turn to end; the original draft is kept for now.", "正在发送；原始消息与配置已保存。": "Sending; the original message and configuration have been saved.", "上次发送尚未确认；保留原始回执，不会自动再次发送。": "The previous send is unconfirmed; its original receipt is kept, and it will not be sent again automatically." });
   function node(tag, cls, text) { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = String(text); if (["button", "input", "select", "textarea", "summary"].includes(tag)) n.setAttribute("data-control-interface", "human"); return n; }
-  function create({ root, api, getWorkspace = () => "", onError = () => {}, openDocument = null, session = null, onManageProfiles = null, materialImages = null, materialFiles = null, materialInputs = false, composerRoot = null, composerLabel = null, settingsRoot = null, guideRoot = null, guideText: guideSource = "", onOpenManual = null, getGuideContext = () => null, onTurnSettled = null, onGuideCheckContext = null, getCommandContext = null, onStatusCheck = null }) {
+  // DSH directory is reference-only; never pass this through profile selection.
+  function dshCatalogue(value) {
+    const exact = (row, fields) => row && typeof row === "object" && !Array.isArray(row) && Object.keys(row).length === fields.length && fields.every(key => Object.hasOwn(row, key));
+    const safe = (value, limit) => typeof value === "string" && !!value.trim() && Array.from(value).length <= limit && !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value) && !/(?:\/(?:Users|home|private|tmp)\/|[A-Za-z]:\\|\b(?:sk[-_]|deck_)[A-Za-z0-9_-]{12})/.test(value);
+    if (!exact(value, ["source", "observed_at", "source_chat_id", "models", "partial"]) || value.source !== "dsh/session.models"
+        || typeof value.observed_at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value.observed_at) || !Number.isFinite(Date.parse(value.observed_at))
+        || typeof value.source_chat_id !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value.source_chat_id)
+        || typeof value.partial !== "boolean" || !Array.isArray(value.models) || value.models.length > 4096 || JSON.stringify(value).length > 524288) throw Error("DSH 模型目录不完整。");
+    const identities = new Set(), providers = new Map(), models = value.models.map(row => {
+      if (!exact(row, ["provider", "provider_name", "model", "name", "efforts"]) || !safe(row.provider, 256) || !safe(row.provider_name, 512)
+          || !safe(row.model, 1024) || !safe(row.name, 512) || row.efforts !== null && (!Array.isArray(row.efforts) || !row.efforts.length || row.efforts.length > 32
+          || row.efforts.some(item => !safe(item, 128)) || new Set(row.efforts).size !== row.efforts.length)) throw Error("DSH 模型目录不完整。");
+      const key = JSON.stringify([row.provider, row.model]);
+      if (identities.has(key) || providers.has(row.provider) && providers.get(row.provider) !== row.provider_name || !providers.has(row.provider) && providers.size >= 256) throw Error("DSH 模型目录重复。");
+      identities.add(key); providers.set(row.provider, row.provider_name);
+      return { provider: row.provider, provider_name: row.provider_name, model: row.model, name: row.name, efforts: row.efforts === null ? null : [...row.efforts] };
+    });
+    return { source: value.source, observed_at: value.observed_at, source_chat_id: value.source_chat_id, models, partial: value.partial };
+  }
+  function create({ root, api, getWorkspace = () => "", onError = () => {}, openDocument = null, session = null, onManageProfiles = null, materialImages = null, materialFiles = null, materialInputs = false, composerRoot = null, composerLabel = null, settingsRoot = null, guideRoot = null, guideText: guideSource = "", onOpenManual = null, getGuideContext = () => null, onTurnSettled = null, onGuideCheckContext = null, getCommandContext = null, onDraftBindingChange = null, onCommandSettled = null, onPrepareCommand = null, onCommandObserved = null, onStatusCheck = null, onModelCheck = null, onChooseConfiguration = null, getSendShortcut = () => "enter", extraActions = [] }) {
     if (!root || typeof api !== "function") throw Error("专员页面缺少入口或接口。");
     if (getCommandContext !== null && typeof getCommandContext !== "function") throw Error("当前工作对象入口无效。");
     // A renderer owns one immutable HTTP/storage scope. Switching chats creates
@@ -59,20 +78,24 @@
     const expectedSession = chatId === null ? null : "chat/codex/" + chatId;
     const memorySession = expectedSession || "specialist/codex";
     const composerMount = chatId === null ? composerRoot : null, titleMount = chatId === null ? composerLabel : null, settingsMount = settingsRoot, guideMount = chatId === null ? guideRoot : null;
+    const sharedComposer = chatId !== null && typeof window.RabbitComposerShell?.mount === "function";
+    let configurationWriting = false, conversationBody = null;
     if ([composerMount, titleMount, settingsMount, guideMount].some(value => value !== null && typeof value.append !== "function")) throw Error("专员布局入口不完整。");
     const disconnectFeedback = { "zh-CN": "连接已断开，原生记录仍保留；后台工具是否退出未核实。", en: "Disconnected; native records remain. Background-tool exit has not been verified." };
-    let settingsVisible = false, visible = false, enabled = true, destroyed = false, language = "zh-CN", timer = null, generation = 0, reading = false, mutating = false, writeVersion = 0, preparing = false, openingForSend = false, guideCheckReading = false, draftEdits = 0, viewVersion = 0;
+    const commandReadbackError = "专员结果已返回，配置读回仍待核对。";
+    let settingsVisible = false, visible = false, enabled = true, destroyed = false, language = "zh-CN", timer = null, generation = 0, reading = false, mutating = false, writeVersion = 0, preparing = false, openingForSend = false, guideCheckReading = false, modelCheckReading = false, modelCheckResult = null, draftEdits = 0, viewVersion = 0;
     const lane = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
     const laneCreated = Date.now();
     let workspace = "", storageKey = "", sessionKey = "", draft = "", draftMaterials = [], pending = null, draftStorageInvalid = false, snapshot = null, epoch = null, seq = null, nextCursor = null, historyAvailable = null, feedback = "", errorText = "";
     const history = new Map(), live = new Map(), itemNodes = new Map(), requestNodes = new Map(), burned = new Set(), loadedCursors = new Set();
     let pendingCommand = null;
+    let draftBinding = null, proposedBinding = null, lastCommand = null, draftFrame8 = false, commandReadbackReading = null, commandObservation = null;
     const handoffView = window.RabbitHandoffView?.create();
     const nativeMaterials = chatId !== null && window.RabbitNativeMaterials ? window.RabbitNativeMaterials.create({ api, images: materialImages, files: materialFiles, getWorkspace, onError }) : null;
     let materialsEnabled = chatId !== null && materialInputs === true, filePicker = null;
-    let firstPageLoaded = false, snapshotReadable = false, readingPartial = false, fullReadPending = false, openFeedbackPending = false, historyRestore = null;
+    let firstPageLoaded = false, snapshotReadable = false, readingPartial = false, fullReadPending = false, openFeedbackPending = false, historyRestore = null, initialComposerRead = false;
     let answerJournal = Object.create(null), answering = false;
-    let selectedProfile = null, profileRows = [], profilesReadable = false, profilesReading = false, profilesError = "", profilesRequest = 0, nativeCatalogReady = false, pendingVerified = true;
+    let selectedProfile = null, profileRows = [], currentProfileRow = null, localConfigurationPending = null, localConfigurationInvalid = false, localConfigurationUnsupported = false, localConfigurationSupported = false, localConfigurationCommitting = false, profilesReadable = false, profilesReading = false, profilesError = "", profilesRequest = 0, nativeCatalogReady = false, pendingVerified = true;
     const configurationSelection = chatId === null ? null : window.RabbitProfiles?.createNativeSelection?.({ agent: "codex", parseProfile: profileChoice });
     let selectionUnsupported = false;
     const memorySelection = chatId === null ? null : window.RabbitProfiles?.createNativeMemorySelection?.({ agent: "codex" });
@@ -122,11 +145,25 @@
     root.append(page); root.hidden = true;
     function button(text, callback, cls = "rbs-button") { const b = node("button", cls, translate(text)); b.type = "button"; b.addEventListener("click", callback); return b; }
     const agentGuide = guide && button("设置 Agent", () => chooseGuide("agent"), "rbs-guide-choice"), modelGuide = guide && button("设置大模型", () => chooseGuide("model"), "rbs-guide-choice"), closeGuide = guide && button("收起指南", () => chooseGuide(""), "rbs-guide-close");
-    if (guide) guideActions.append(node("span", "rbs-guide-label"), agentGuide, modelGuide, closeGuide);
     const guideCheckButton = guide && button("核对并更新", checkGuide, "rbs-button rbs-guide-check");
+    const modelCheckButton = guide && button("核对模型与强度", checkModels, "rbs-button rbs-guide-model-check");
+    const modelCheckNotice = guide && node("p", "rbs-guide-source");
     const manualButton = guide && typeof onOpenManual === "function" ? button("打开手册", () => onOpenManual(guideChoice === "agent" ? "设置 Agent" : "切换大模型"), "rbs-guide-choice rbs-guide-manual") : null;
-    if (guide) { guide.replaceChildren(guideCheckButton, statusReportMount, guideActions, guideSheet); guideCheckButton.setAttribute("data-control-interface", "ai"); statusReportMount.setAttribute("data-control-interface", "ai"); }
+    if (guide) { guideActions.append(node("span", "rbs-guide-label"), agentGuide, modelGuide, modelCheckButton, closeGuide); guide.replaceChildren(guideCheckButton, statusReportMount, guideActions, modelCheckNotice, guideSheet); guideCheckButton.setAttribute("data-control-interface", "ai"); modelCheckButton.setAttribute("data-control-interface", "ai"); modelCheckNotice.setAttribute("role", "status"); statusReportMount.setAttribute("data-control-interface", "ai"); }
     const openButton = button("打开专员", () => mutate("open", {})), sendButton = button("发送", submitComposer, "rbs-button rbs-primary rbs-submit"), checkButton = button("核对上次发送", reconcile), moreButton = button("继续读取原生记录", () => refresh({ cursor: nextCursor }));
+    const targetNotice = node("div", "rbs-command-target"), targetLabel = node("span", "rbs-command-target-label");
+    const currentTargetButton = button("改为当前", rebindCurrent, "rbs-button rbs-command-target-action");
+    const targetConflict = node("div", "rbs-command-target-conflict"), targetConflictText = node("p");
+    const keepTargetButton = button("保留原对象", () => { proposedBinding = null; render(); });
+    const replaceTargetButton = button("改为新对象", () => { if (proposedBinding) adoptBinding(proposedBinding); });
+    const checkCommandButton = button("核对设置结果", () => {
+      if (!lastCommand?.readback_failed || commandReadbackReading || !terminal.has(lastCommand.status)) return;
+      lastCommand.reported = false; observeCommandTurn(snapshot, { manual: true }); render();
+    });
+    moreBox.append(checkCommandButton); checkCommandButton.setAttribute("data-control-interface", "human");
+    targetConflict.append(targetConflictText, keepTargetButton, replaceTargetButton); targetNotice.append(targetLabel, currentTargetButton, targetConflict);
+    for (const control of [currentTargetButton, keepTargetButton, replaceTargetButton]) control.setAttribute("data-control-interface", "human");
+    if (chatId === null) composer.replaceChildren(targetNotice, input, materialBox, composerActions, ...(composerStatus ? [composerStatus] : []));
     (settingsActions || moreBox).append(openButton);
     const disconnectLabel = chatId === null ? "断开连接，保留原对话" : "断开连接";
     const disconnectButton = button(disconnectLabel, disconnect); (settingsActions || moreBox).append(disconnectButton);
@@ -184,6 +221,28 @@
         return true;
       }, changed: render });
       if (filePicker) composerActions.replaceChildren(filePicker.root, sendButton);
+    }
+    let aiTrigger = null, memoryTrigger = null, composerHint = null;
+    if (sharedComposer) {
+      const choices = node("div", "profile-choice-row"), support = node("details", "composer-more"), supportTitle = node("summary", "", "更多");
+      aiTrigger = button("AI 配置", () => onChooseConfiguration?.("ai"), "profile-trigger");
+      memoryTrigger = button("记忆配置", () => onChooseConfiguration?.("memory"), "profile-trigger");
+      const method = node("label", "interface-choice"), methodSelect = node("select");
+      method.append(node("span", "", "接口方式"), methodSelect); methodSelect.setAttribute("aria-label", "接口方式");
+      for (const [value, label] of [["program", "纯程序接口"], ["ai", "AI接口（待接入）"], ["mixed", "混合接口（待接入）"]]) {
+        const option = node("option", "", label); option.value = value; option.disabled = value !== "program"; methodSelect.append(option);
+      }
+      methodSelect.value = "program";
+      choices.append(aiTrigger, memoryTrigger, method); support.append(supportTitle, ...extraActions);
+      if (filePicker) support.append(filePicker.root);
+      composerHint = node("span", "composer-hint"); sendButton.className += " send-button";
+      window.RabbitComposerShell.mount({ root: composer, status: configurationStatus, choices, input, materials: [materialBox], support, send: sendButton, hint: composerHint });
+      const body = node("div", "rbs-conversation-body conversation-scroll"), composerRegion = node("div", "rbs-conversation-composer composer-region");
+      conversationBody = body;
+      page.className += " rbs-conversation"; body.append(header, notices, feed, requests); composerRegion.append(composer); page.replaceChildren(body, composerRegion);
+      // The same controls remain owned by this native renderer; the old
+      // settings copies are removed only after their common picker is present.
+      profileBox?.remove();
     }
     function fileInputState() {
       if (chatId === null || !materialsEnabled || !nativeMaterials || !workspace || workspace !== String(getWorkspace() || "") || !enabled || destroyed
@@ -275,7 +334,7 @@
     function selectionReady() { return !selectionUnsupported && (!configurationSelection || configurationSelection.ready()); }
     function selectionControlled() { return selectionUnsupported || configurationSelection?.controlled() === true; }
     function syncConfigurationSelection() {
-      const blocked = !enabled || destroyed || !snapshotReadable || mutating || preparing || openingForSend || answering || !!filePicker?.busy() || !!pending || draftStorageInvalid || !!nativePending().length || !!activeTurn() || hasUnresolvedRequests() || snapshot?.disconnect_unconfirmed === true || ready() && snapshot.requests_available !== true;
+      const blocked = !!localConfigurationInvalid || !!localConfigurationPending && !localConfigurationCommitting || !enabled || destroyed || !snapshotReadable || mutating || preparing || openingForSend || answering || !!filePicker?.busy() || !!pending || draftStorageInvalid || !!nativePending().length || !!activeTurn() || hasUnresolvedRequests() || snapshot?.disconnect_unconfirmed === true || ready() && snapshot.requests_available !== true;
       configurationSelection?.synchronize({ blocked, save,
         apply: value => { const previous = selectedProfile; selectedProfile = value; if (!save()) { selectedProfile = previous; return false; } draftEdits++; return true; } });
       memorySelection?.synchronize({ blocked, save,
@@ -283,15 +342,16 @@
       if (configurationSelection?.takeCatalogRefresh(ready() && !mutating && !preparing && !openingForSend && !profilesReading)) { profilesReadable = false; void loadProfiles(); }
       if (memorySelection?.takeCatalogRefresh(snapshotReadable && !mutating && !preparing && !openingForSend && !memoryReading)) { memoryReadable = false; void loadMemoryProfiles(); }
     }
+    const availableProfileRows = () => currentProfileRow ? [...profileRows, currentProfileRow] : profileRows;
     function profileReady() {
-      return selectionReady() && (!configurationSelection || configurationSelection.matchesProfile(selectedProfile)) && (selectedProfile === null || profilesReadable && profileRows.some(row => row.id === selectedProfile.id && row.revision === selectedProfile.revision && row.available === true
+      return !localConfigurationPending && !localConfigurationInvalid && selectionReady() && (!configurationSelection || configurationSelection.matchesProfile(selectedProfile)) && (selectedProfile === null || profilesReadable && availableProfileRows().some(row => row.id === selectedProfile.id && row.revision === selectedProfile.revision && row.available === true
         && JSON.stringify(profileChoice(row)) === JSON.stringify(selectedProfile)));
     }
     function materialsReady() {
       if (!draftMaterials.length) return true;
       if (chatId === null || !nativeMaterials || !materialsEnabled) return false;
       return !draftMaterials.some(row => row.kind === "image") || selectedProfile !== null && !!selectedProfile.model_id && profilesReadable
-        && profileRows.some(row => row.id === selectedProfile.id && row.revision === selectedProfile.revision && row.available === true && row.image_input === "supported");
+        && availableProfileRows().some(row => row.id === selectedProfile.id && row.revision === selectedProfile.revision && row.available === true && row.image_input === "supported");
     }
     async function loadInitialProfiles() { if (!configurationSelection?.managed() || configurationSelection.takeCatalogRefresh(ready())) await loadProfiles(); }
     async function loadInitialMemoryProfiles() { if (!memorySelection?.managed() || memorySelection.takeCatalogRefresh(snapshotReadable)) await loadMemoryProfiles(); }
@@ -304,13 +364,16 @@
         const value = await api(apiRoot + "/profiles");
         if (stamp !== generation || request !== profilesRequest || writes !== writeVersion || destroyed || target !== String(getWorkspace() || "")) return;
         if (!object(value) || value.workspace_id !== workspace || value.chat_id !== chatId || !Array.isArray(value.profiles) || value.profiles.length > 512 || typeof value.native_catalog_ready !== "boolean") throw Error("原生配置列表或所属对话没有读完整。");
-        const rows = value.profiles.map(row => {
+        const readRow = row => {
           const choice = profileChoice(row);
           if (typeof row.available !== "boolean" || row.unavailable_reason != null && (typeof row.unavailable_reason !== "string" || row.unavailable_reason.length > 1000)) throw Error("原生配置兼容状态没有读完整。");
           if (row.image_input !== undefined && !["supported", "unsupported", "unknown"].includes(row.image_input)) throw Error("原生图像能力没有读完整。");
           return { ...choice, available: row.available, unavailable_reason: row.unavailable_reason || "", image_input: row.image_input || "unknown" };
-        });
-        if (new Set(rows.map(row => row.id)).size !== rows.length) throw Error("原生配置标识重复。");
+        };
+        const rows = value.profiles.map(readRow), local = value.current_profile == null ? null : readRow(value.current_profile);
+        if (new Set(rows.map(row => row.id)).size !== rows.length || local && rows.some(row => row.id === local.id)) throw Error("原生配置标识重复。");
+        localConfigurationSupported = Object.hasOwn(value, "current_profile");
+        currentProfileRow = local && selectedProfile && canonical(profileChoice(local)) === canonical(selectedProfile) ? local : null;
         profileRows = rows; nativeCatalogReady = value.native_catalog_ready; profilesReadable = true; profilesError = "";
       } catch (error) { if (stamp === generation && request === profilesRequest && writes === writeVersion && !destroyed) { profilesReadable = false; profilesError = message(error, "原生配置列表暂时无法读取；原选择与草稿保留。"); } }
       finally { if (stamp === generation && request === profilesRequest && !destroyed) { profilesReading = false; render(); } }
@@ -321,6 +384,121 @@
       return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, "0")).join("");
     }
     function commandCurrent(binding) { try { return !binding || binding.isCurrent() === true; } catch (_) { return false; } }
+    function getDraftBinding() { return draftBinding ? copy(draftBinding) : null; }
+    function getGuideBinding() { const value = draftBinding || lastCommand?.target; return value ? copy(value) : null; }
+    function notifyBinding() {
+      if (typeof onDraftBindingChange !== "function") return;
+      const stamp = generation, scope = workspace, original = draftBinding, value = getDraftBinding(), command = original === null ? lastCommand : null;
+      Promise.resolve().then(() => {
+        if (!destroyed && generation === stamp && draftBinding === original && scope === String(getWorkspace() || ""))
+          onDraftBindingChange(value, command && command === lastCommand ? { workspace_id: scope, client_id: command.client_id, target: copy(command.target), status: command.status } : null);
+      }).catch(() => { /* A guide update cannot change the saved instruction. */ });
+    }
+    function captureBinding() {
+      const value = getCommandContext();
+      if (!object(value) || !exact(value, ["context", "isCurrent", ...(Object.hasOwn(value, "target") ? ["target"] : [])])
+          || typeof value.isCurrent !== "function" || value.isCurrent() !== true) throw Error("当前工作对象尚未核实，原指令保留。");
+      const codec = commandCodec(), context = value.context === null ? null : codec.normalize(value.context);
+      const target = codec.normalizeBinding(Object.hasOwn(value, "target") ? value.target : { workspace_id: workspace, context, label: codec.label(context), guide: "model", return_to: context });
+      if (target.workspace_id !== workspace || canonical(target.context) !== canonical(context)) throw Error("指令对象不属于当前工作区；原稿保留。");
+      return target;
+    }
+    function adoptBinding(value) {
+      const next = commandCodec().normalizeBinding(value);
+      if (chatId !== null || !enabled || destroyed || next.workspace_id !== workspace || workspace !== String(getWorkspace() || "")) return false;
+      const previous = draftBinding, edits = draftEdits, framed = draftFrame8;
+      draftBinding = next; draftFrame8 = true; draftEdits++;
+      if (!save()) { draftBinding = previous; draftEdits = edits; draftFrame8 = framed; errorText = "浏览器不能保存指令对象；原文字和对象保留。"; render(); return false; }
+      proposedBinding = null; notifyBinding(); render(); return true;
+    }
+    function bindTarget(value) {
+      syncWorkspace(); const target = commandCodec().normalizeBinding(value);
+      if (chatId !== null || destroyed || !enabled || target.workspace_id !== workspace) return false;
+      if (draft.trim() && (!draftBinding || canonical(draftBinding.context) !== canonical(target.context))) {
+        proposedBinding = target; render(); return false;
+      }
+      if (draft.trim() && draftBinding) return true; // A guide theme never rewrites this instruction's object.
+      return adoptBinding(target);
+    }
+    function rebindCurrent() {
+      try { return adoptBinding(captureBinding()); }
+      catch (error) { reportError(error, "当前对象暂不可选；原指令保留。"); render(); return false; }
+    }
+    function restoredCommand(value) {
+      if (value === null) return null;
+      if (!exact(value, ["client_id", "target", "draft_revision", "thread_id", "turn_id", "status", "reported", "readback_failed"])
+          || !/^specialist\/ui\/[A-Za-z0-9_.-]{1,100}$/.test(value.client_id)
+          || !Number.isSafeInteger(value.draft_revision) || value.draft_revision < 0
+          || !["submitted_unknown", "accepted", ...terminal].includes(value.status) || typeof value.reported !== "boolean" || typeof value.readback_failed !== "boolean"
+          || value.thread_id !== null && !nativeToken(value.thread_id) || value.turn_id !== null && !nativeToken(value.turn_id)) throw Error("专员原请求状态无法核对。");
+      const target = commandCodec().normalizeBinding(value.target);
+      if (target.workspace_id !== workspace) throw Error("专员原请求属于另一个工作区。");
+      return { ...value, target };
+    }
+    function observeCommandReceipt(receipt) {
+      if (!lastCommand || receipt?.client_id !== lastCommand.client_id || !["submitted_unknown", "accepted", ...terminal].includes(receipt.status)) return;
+      if (terminal.has(lastCommand.status)) return;
+      if (lastCommand.status === receipt.status && (!nativeToken(receipt.thread_id) || receipt.thread_id === lastCommand.thread_id)
+          && (!nativeToken(receipt.turn_id) || receipt.turn_id === lastCommand.turn_id)) return;
+      if (nativeToken(receipt.thread_id)) lastCommand.thread_id = receipt.thread_id;
+      if (nativeToken(receipt.turn_id)) lastCommand.turn_id = receipt.turn_id;
+      lastCommand.status = receipt.status; save();
+    }
+    function renderCommandTarget() {
+      targetNotice.hidden = chatId !== null || !(draft.trim() || proposedBinding) || !(draftFrame8 || typeof getCommandContext === "function");
+      if (targetNotice.hidden) return;
+      let current = null; try { if (typeof getCommandContext === "function") current = captureBinding(); } catch (_) { /* No guessed replacement target. */ }
+      targetLabel.textContent = draftBinding ? (language === "en" ? "Target: " : "调整对象：") + draftBinding.label
+        : language === "en" ? "Choose this instruction’s target" : "调整对象待确认";
+      targetLabel.setAttribute("title", targetLabel.textContent);
+      currentTargetButton.textContent = draftBinding ? language === "en" ? "Use current" : "改为当前" : language === "en" ? "Use current" : "设为当前";
+      currentTargetButton.hidden = !!draftBinding && !!current && canonical(draftBinding.context) === canonical(current.context);
+      currentTargetButton.disabled = !current || draftStorageInvalid;
+      targetConflict.hidden = !proposedBinding;
+      targetConflictText.textContent = proposedBinding ? (language === "en" ? "Keep the written instruction for its original target, or use " : "这条指令已有内容。保留原对象，还是改为：") + proposedBinding.label + "？" : "";
+      keepTargetButton.textContent = language === "en" ? "Keep original" : "保留原对象";
+      replaceTargetButton.textContent = language === "en" ? "Use new target" : "改为新对象";
+    }
+    function observeCommandTurn(value, options = {}) {
+      if (chatId !== null || !lastCommand) return;
+      for (const receipt of value?.receipts || []) observeCommandReceipt(receipt);
+      const turn = value?.turn_state;
+      if (lastCommand.turn_id && turn?.turn_id === lastCommand.turn_id && terminal.has(turn.status)) lastCommand.status = turn.status;
+      if (!terminal.has(lastCommand.status)) {
+        if (lastCommand.target?.context?.schema_version === 3 && lastCommand.target.context.target.kind === "new_chat"
+            && typeof onCommandObserved === "function" && !commandObservation) {
+          const command = lastCommand, stamp = generation, scope = workspace;
+          const current = () => !destroyed && enabled && generation === stamp && scope === String(getWorkspace() || "") && lastCommand === command;
+          commandObservation = command;
+          Promise.resolve().then(() => current() && onCommandObserved({ workspace_id: scope, client_id: command.client_id,
+            thread_id: command.thread_id, turn_id: command.turn_id, status: command.status, target: copy(command.target), isCurrent: current }))
+            .catch(() => { /* The terminal readback keeps an explicit retry; no new timer or automatic resend. */ })
+            .finally(() => { if (commandObservation === command) { commandObservation = null; if (current() && terminal.has(command.status)) observeCommandTurn(snapshot); } });
+        }
+        return;
+      }
+      if (commandObservation || lastCommand.reported || typeof onCommandSettled !== "function") return;
+      const command = lastCommand, stamp = generation, scope = workspace;
+      const current = () => !destroyed && enabled && stamp === generation && scope === String(getWorkspace() || "") && lastCommand === command;
+      // Persist the unverified result before starting its GET. A reload keeps
+      // the original target and manual check; it never repeats the command.
+      command.readback_failed = true; command.reported = true;
+      if (!save()) { errorText = commandReadbackError; return; }
+      commandReadbackReading = command;
+      Promise.resolve().then(() => current() && onCommandSettled({ workspace_id: scope, client_id: command.client_id,
+        thread_id: command.thread_id, turn_id: command.turn_id, status: command.status, target: copy(command.target), manual: options.manual === true, isCurrent: current }))
+        .then(result => {
+          if (result === false && current()) throw Error("readback_unverified");
+          if (current()) {
+            command.readback_failed = false;
+            if (save()) { if (errorText === commandReadbackError) errorText = ""; }
+            else { command.readback_failed = true; errorText = commandReadbackError; }
+            render();
+          }
+        })
+        .catch(() => { if (current()) { command.readback_failed = true; errorText = commandReadbackError; save(); render(); } })
+        .finally(() => { if (commandReadbackReading === command) { commandReadbackReading = null; if (!destroyed) render(); } });
+    }
     function restoredPending(value, version) {
       const manual = chatId === null && version === 6 && /^specialist\/check\/[A-Za-z0-9_.-]{1,100}$/.test(value?.client_id);
       if (!object(value) || !manual && !/^specialist\/ui\/[A-Za-z0-9_.-]{1,100}$/.test(value.client_id) || typeof value.text !== "string" || value.text.length > 200000 || !["submitted_unknown", "accepted"].includes(value.state)) throw Error("发送回执格式无效。");
@@ -355,8 +533,9 @@
       let previous, sessionWritten = false;
       try {
         previous = window.sessionStorage.getItem(sessionKey);
-        const version = chatId === null && pending?.target_context ? 7 : chatId === null && pending?.client_id?.startsWith("specialist/check/") ? 6 : pending && !pending.body_json ? 1 : chatId === null ? selectedMemory || pending?.memory_profile ? 5 : 1 : selectedMemory || pending?.memory_profile ? 4 : pending?.body_json && !pending.intent_sha256 ? 2 : 3;
-        const encoded = JSON.stringify({ version, ...([5, 6, 7].includes(version) ? { scope: "specialist", scope_id: "specialist/codex" } : {}), draft, pending, ...(version === 1 ? {} : { selected_profile: selectedProfile, material_refs: draftMaterials }), ...(version >= 4 ? { selected_memory: selectedMemory } : {}), answer_journal: answerJournal, lane_created: laneCreated, ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}), ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}) });
+        const pendingFormat = chatId === null && pending?.target_context ? 7 : chatId === null && pending?.client_id?.startsWith("specialist/check/") ? 6 : pending && !pending.body_json ? 1 : chatId === null ? selectedMemory || pending?.memory_profile ? 5 : 1 : selectedMemory || pending?.memory_profile ? 4 : pending?.body_json && !pending.intent_sha256 ? 2 : 3;
+        const version = chatId === null && (draftFrame8 || typeof getCommandContext === "function") ? 8 : pendingFormat;
+        const encoded = JSON.stringify({ version, ...([5, 6, 7, 8].includes(version) ? { scope: "specialist", scope_id: "specialist/codex" } : {}), draft, pending, ...(version === 1 ? {} : { selected_profile: selectedProfile, material_refs: draftMaterials }), ...(version >= 4 ? { selected_memory: selectedMemory } : {}), ...(version === 8 ? { pending_format: pendingFormat, draft_binding: draftBinding, draft_revision: draftEdits, last_command: lastCommand } : {}), answer_journal: answerJournal, lane_created: laneCreated, ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}), ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}) });
         window.sessionStorage.setItem(sessionKey, encoded); sessionWritten = true;
         window.localStorage.setItem(storageKey, encoded);
       } catch (_) {
@@ -379,32 +558,45 @@
       const id = String(getWorkspace() || "");
       if (id === workspace) return;
       save(); workspace = id; storageKey = id ? storagePrefix() + lane : ""; sessionKey = id ? (chatId === null ? "rabbit.specialist.page.v1." + encodeURIComponent(id) : "rabbit.native-chat.page.v1." + encodeURIComponent(id) + "." + chatId) : ""; generation++;
-      draft = ""; draftMaterials = []; pending = null; pendingCommand = null; draftStorageInvalid = false; answerJournal = Object.create(null); snapshot = null; snapshotReadable = false; epoch = null; seq = null; nextCursor = null; historyAvailable = null; feedback = ""; errorText = "";
+      draft = ""; draftMaterials = []; pending = null; pendingCommand = null; draftBinding = proposedBinding = lastCommand = commandReadbackReading = commandObservation = null; draftFrame8 = false; draftEdits = 0; draftStorageInvalid = false; answerJournal = Object.create(null); snapshot = null; snapshotReadable = false; epoch = null; seq = null; nextCursor = null; historyAvailable = null; feedback = ""; errorText = "";
       nativeMaterials?.setScope(JSON.stringify([workspace, chatId]));
-      selectedProfile = null; profileRows = []; profilesReadable = profilesReading = nativeCatalogReady = false; profilesError = ""; profilesRequest++; pendingVerified = true; preparing = false; writeVersion++;
+      selectedProfile = null; profileRows = []; currentProfileRow = null; localConfigurationPending = null; localConfigurationInvalid = localConfigurationUnsupported = localConfigurationSupported = localConfigurationCommitting = configurationWriting = false; profilesReadable = profilesReading = nativeCatalogReady = false; profilesError = ""; profilesRequest++; pendingVerified = true; preparing = false; writeVersion++;
       selectedMemory = null; memoryRows = []; memoryReadable = memoryReading = false; memoryError = ""; memoryRequest++; memoryVersion++;
       memoryEvidence.clear(); memoryCards.clear(); memoryEvidenceError = "";
-      history.clear(); live.clear(); itemNodes.clear(); requestNodes.clear(); burned.clear(); loadedCursors.clear(); firstPageLoaded = false; fullReadPending = false; openFeedbackPending = false; feed.replaceChildren(); requests.replaceChildren();
+      history.clear(); live.clear(); itemNodes.clear(); requestNodes.clear(); burned.clear(); loadedCursors.clear(); firstPageLoaded = false; fullReadPending = false; openFeedbackPending = false; initialComposerRead = false; feed.replaceChildren(); requests.replaceChildren();
+      if (chatId !== null && workspace) try {
+        const raw = window.localStorage.getItem(localConfigurationKey());
+        if (raw) localConfigurationPending = localConfigurationRecord(JSON.parse(raw));
+      } catch (_) { localConfigurationInvalid = true; }
       selectionUnsupported = false; configurationSelection?.reset(undefined, { workspace, chatId });
       memorySelectionUnsupported = false; memorySelection?.reset(undefined, { workspace, chatId });
-      guideTurnScope = null; guideTerminalTurns.clear(); guideOwnClients.clear(); guideOwnTurns.clear(); historyRestore = null;
+      guideTurnScope = null; guideTerminalTurns.clear(); guideOwnClients.clear(); guideOwnTurns.clear(); historyRestore = null; modelCheckResult = null;
       try {
         const saved = sessionKey && JSON.parse(window.sessionStorage.getItem(sessionKey) || "null");
-        if (saved && (saved.version === 1 || chatId !== null && [2, 3, 4].includes(saved.version) || chatId === null && [5, 6, 7].includes(saved.version) && saved.scope === "specialist" && saved.scope_id === "specialist/codex") && typeof saved.draft === "string" && saved.draft.length <= 200000) {
+        if (saved && (saved.version === 1 || chatId !== null && [2, 3, 4].includes(saved.version) || chatId === null && [5, 6, 7, 8].includes(saved.version) && saved.scope === "specialist" && saved.scope_id === "specialist/codex") && typeof saved.draft === "string" && saved.draft.length <= 200000) {
           draft = saved.draft;
           if (Object.hasOwn(saved, "configuration_selection")) { if (!configurationSelection) throw Error(); configurationSelection.reset(saved.configuration_selection, { workspace, chatId }); }
           if (saved.version >= 2) selectedProfile = saved.selected_profile === null ? null : profileChoice(saved.selected_profile);
           if (saved.version >= 3) draftMaterials = materialRefs(saved.material_refs);
           if (saved.version >= 4) selectedMemory = saved.selected_memory === null ? null : selectedMemoryChoice(saved.selected_memory);
-          if ([5, 6, 7].includes(saved.version) && (selectedProfile !== null || draftMaterials.length)) throw Error();
+          if ([5, 6, 7, 8].includes(saved.version) && (selectedProfile !== null || draftMaterials.length)) throw Error();
+          if (saved.version === 8) {
+            if (![1, 5, 6, 7].includes(saved.pending_format) || !Number.isSafeInteger(saved.draft_revision) || saved.draft_revision < 0) throw Error();
+            draftFrame8 = true; draftEdits = saved.draft_revision;
+            draftBinding = saved.draft_binding === null ? null : commandCodec().normalizeBinding(saved.draft_binding);
+            if (draftBinding && draftBinding.workspace_id !== workspace) throw Error();
+            lastCommand = restoredCommand(saved.last_command);
+          }
           const p = saved.pending;
-          if (p !== null && p !== undefined) { pending = restoredPending(p, saved.version); pendingVerified = saved.version === 1; if (saved.version === 6) guideOwnClients.add(pending.client_id); }
+          if (p !== null && p !== undefined) { const format = saved.version === 8 ? saved.pending_format : saved.version; pending = restoredPending(p, format); pendingVerified = format === 1; if (format === 6) guideOwnClients.add(pending.client_id); }
+          if (pending && lastCommand?.client_id === pending.client_id && canonical(lastCommand.target.context) !== canonical(pending.target_context || null)) throw Error();
           if (p !== null && p !== undefined && !pending) draftStorageInvalid = true;
           if (object(saved.answer_journal)) for (const [digest, state] of Object.entries(saved.answer_journal).slice(0, 128)) if (/^[a-f0-9]{64}$/.test(digest) && ["submitted_unknown", "response_submitted", "resolved"].includes(state)) answerJournal[digest] = state;
           if (Object.hasOwn(saved, "memory_selection")) { if (!memorySelection) throw Error(); memorySelection.reset(saved.memory_selection, { workspace, chatId }); }
         } else if (saved !== null && saved !== false) draftStorageInvalid = true;
       } catch (_) { draftStorageInvalid = true; /* Keep unreadable draft storage out of incoming handoffs. */ }
       input.value = draft;
+      notifyBinding();
     }
     function initialProfileChoice(value) {
       if (selectionControlled() || chatId === null || !enabled || destroyed || !workspace
@@ -445,6 +637,39 @@
       if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedProfile = previous.profile; selectedMemory = previous.memory; throw Error("浏览器不能保存原生草稿；原内容保留，尚未发送。"); }
       draftEdits++; if (hasMemory) memoryVersion++; render(); return true;
     }
+    // The quote picker captures only the current ordinary Codex draft. It may
+    // append to existing text/materials but never replaces the native session,
+    // its selected model or memory, or any submitted request.
+    function captureQuoteDraft() {
+      if (chatId === null || !workspace || workspace !== String(getWorkspace() || "") || !enabled || destroyed
+          || !visible || settingsVisible || document.hidden || !snapshotReadable || !snapshot?.connection || snapshot?.binding?.session_key !== expectedSession
+          || !["not_open", "ready", "closed"].includes(snapshot.connection.state) || snapshot.disconnect_unconfirmed === true
+          || filePicker?.busy() || mutating || preparing || openingForSend || answering || pending || draftStorageInvalid
+          || nativePending().length || activeTurn() || hasUnresolvedRequests() || ready() && snapshot.requests_available !== true
+          || !selectionReady() || !memorySelectionReady() || input.value !== draft) return null;
+      const refs = materialRefs(draftMaterials);
+      const stamp = canonical([workspace, chatId, generation, viewVersion, draftEdits, draft, refs,
+        selectedProfile, selectedMemory, memoryVersion, configurationSelection?.checkpoint(), memorySelection?.checkpoint(),
+        epoch, seq, snapshot.connection.state, snapshot.binding.thread_id, snapshot.requests_available, snapshot.turn_state]);
+      return { stamp, text: draft, material_refs: refs };
+    }
+    function applyQuoteDraft(expected, text, material_refs, material_preview) {
+      try {
+        const current = captureQuoteDraft();
+        if (!current || !exact(expected, ["stamp", "text", "material_refs"]) || canonical(expected) !== canonical(current)
+            || !validText(text) || !text.startsWith(current.text) || Array.from(text).length > 30000
+            || typeof TextEncoder !== "function" || new TextEncoder().encode(text).length > 128 * 1024) return false;
+        const refs = materialRefs(material_refs), before = current.material_refs;
+        if (refs.length < before.length || canonical(refs.slice(0, before.length)) !== canonical(before)
+            || refs.length > before.length && (!materialsEnabled || !nativeMaterials || material_preview === undefined)
+            || !fitsSend("specialist/ui/00000000-0000-4000-8000-000000000000", text, selectedProfile, refs, selectedMemory)) return false;
+        if (refs.length > before.length) nativeMaterials.seed(refs, material_preview);
+        const previous = { draft, input: input.value, refs: draftMaterials, edits: draftEdits };
+        draft = text; input.value = text; draftMaterials = refs; draftEdits++;
+        if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; draftEdits = previous.edits; render(); return false; }
+        render(); return true;
+      } catch (_) { return false; }
+    }
     function message(error, fallback) { const text = String(error && error.message || ""); return text && text.length < 300 ? text : fallback; }
     function reportError(error, fallback) { errorText = message(error, fallback); onError(error); }
     function ready() { return snapshotReadable && snapshot && snapshot.connection && snapshot.connection.state === "ready"; }
@@ -461,9 +686,12 @@
       if (pending.memory_profile && !memoryVerified) return;
       if ((pending.material_refs?.length || pending.memory_profile) && receipt.status === "accepted") { pending.state = "accepted"; save(); return; }
       if (receipt.status === "accepted" || terminal.has(receipt.status)) {
-        const sameCommand = pendingCommand ? pendingCommand.client_id === pending.client_id && pendingCommand.edits === draftEdits && commandCurrent(pendingCommand) : !pending.target_context;
+        const sameCommand = pendingCommand ? pendingCommand.client_id === pending.client_id && pendingCommand.edits === draftEdits && commandCurrent(pendingCommand)
+          : lastCommand?.client_id === pending.client_id
+            ? lastCommand.draft_revision === draftEdits && canonical(lastCommand.target) === canonical(draftBinding)
+            : !pending.target_context;
         if (receipt.status !== "rejected" && sameCommand && draft === pending.text && JSON.stringify(draftMaterials) === JSON.stringify(pending.material_refs || [])
-            && canonical(selectedMemory) === canonical(pending.memory_profile || null)) { draft = ""; input.value = ""; draftMaterials = []; }
+            && canonical(selectedMemory) === canonical(pending.memory_profile || null)) { draft = ""; input.value = ""; draftMaterials = []; draftBinding = proposedBinding = null; notifyBinding(); }
         pending = null; pendingCommand = null; save();
       }
     }
@@ -651,8 +879,8 @@
             const body = node("div", "rbs-item-body");
             const manualCheck = item.type === "userMessage" && /^specialist\/check\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(item.clientId);
             const quoted = !manualCheck && !row.display_truncated && item.type === "userMessage" && Array.isArray(parts)
-              && (parts.length === 1 && parts[0].type === "text" && handoffView?.render(body, { message: text, role: "user", messageKey: key, language })
-                || handoffView?.renderParts?.(body, { parts, messageKey: key, language }));
+              && (parts.length === 1 && parts[0].type === "text" && (!Object.hasOwn(parts[0], "text_elements") || Array.isArray(parts[0].text_elements) && parts[0].text_elements.length === 0) && handoffView?.render(body, { message: text, role: "user", messageKey: key, language })
+                || handoffView?.renderParts?.(body, { parts, messageKey: key, language, materialCard: nativeMaterials ? ref => nativeMaterials.card(ref, { language, verifyOnOpen: true }) : null }));
             if (quoted && chatId !== null && nativeMaterials && parts[0]?.type === "text") {
               const manifest = window.RabbitHandoffView?.parse(parts[0].text, "user");
               if (manifest?.schema_version === 2) {
@@ -777,18 +1005,18 @@
     async function refresh(options = {}) {
       syncWorkspace();
       if (!enabled || destroyed) return;
-      if (mutating || preparing) { if (options.timer !== true) fullReadPending = true; return; }
+      if (mutating || preparing || configurationWriting) { if (options.timer !== true) fullReadPending = true; return; }
       if (reading) { if (options.timer !== true) fullReadPending = true; return; }
       if (!pendingVerified) await verifyPending();
       // Fingerprint verification yields; another read or mutation may start
       // while it runs. Claim the read only after checking its scope again.
-      syncWorkspace(); if (!enabled || destroyed || mutating || preparing) return;
+      syncWorkspace(); if (!enabled || destroyed || mutating || preparing || configurationWriting) return;
       if (reading) { if (options.timer !== true) fullReadPending = true; return; }
       const omitItems = options.timer === true && ready() && firstPageLoaded && historyAvailable
         && snapshot.binding.thread_id && snapshot.live_cache_incomplete !== true;
       reading = true; readingPartial = !!omitItems; const stamp = generation, writes = writeVersion, target = workspace;
-      const currentRead = () => stamp === generation && writes === writeVersion && !destroyed && !mutating && !preparing && target === String(getWorkspace() || "");
-      let cursor = options.cursor, preserveError = options.preserveError === true;
+      const currentRead = () => stamp === generation && writes === writeVersion && !destroyed && !mutating && !preparing && !configurationWriting && target === String(getWorkspace() || "");
+      let cursor = options.cursor, preserveError = options.preserveError === true, completeRead = false;
       let query = [];
       if (cursor !== undefined && cursor !== null) query.push("cursor=" + encodeURIComponent(JSON.stringify(cursor)));
       if (seq !== null) query.push("after_seq=" + encodeURIComponent(String(seq)));
@@ -812,11 +1040,12 @@
         if (chatId !== null && currentRead()) { if (memorySelection) memorySelection.observe(value); else if (Object.hasOwn(value, "memory_selection") || Object.hasOwn(value, "memory_selection_error")) memorySelectionUnsupported = true; }
         await readMaterialReceipt(currentRead);
         await syncAnswerJournal(value);
-        if (currentRead()) observeGuideTurn(value);
+        if (currentRead()) { observeGuideTurn(value); observeCommandTurn(value); }
         if (currentRead() && openFeedbackPending && !readingPartial && ready()) {
           if (Object.values(disconnectFeedback).includes(feedback)) feedback = "";
           openFeedbackPending = false;
         }
+        completeRead = !readingPartial && currentRead() && snapshotReadable;
       } catch (error) { if (currentRead()) { snapshotReadable = false; reportError(error, "专员状态暂时无法读取。"); render(); } }
       finally {
         reading = false; readingPartial = false;
@@ -824,6 +1053,7 @@
         if (stamp === generation && !destroyed) { render(); if (readAgain) await refresh({ preserveError: true }); else { await restoreExistingHistory(); schedule(); } }
         else schedule();
       }
+      return completeRead && currentRead() && snapshotReadable;
     }
     async function restoreExistingHistory() {
       const request = historyRestore;
@@ -860,11 +1090,11 @@
       }
       finally { mutating = false; if (!destroyed && stamp === generation) { render(); await refresh({ preserveError: true }); if (kind === "open" && ready()) { await loadInitialProfiles(); await loadInitialMemoryProfiles(); } } }
     }
-    function submitComposer() { return draft.trim() ? send() : activeTurn() ? interrupt() : undefined; }
+    function submitComposer() { return activeTurn() ? interrupt() : draft.trim() ? send() : undefined; }
     function canCheckGuide() {
       if (typeof onStatusCheck === "function") return chatId === null && visible && !settingsVisible && !document.hidden && enabled && !destroyed && !!workspace && !guideCheckReading;
       return chatId === null && visible && !settingsVisible && !document.hidden && enabled && !destroyed && snapshotReadable
-        && !guideCheckReading && !reading && !openingForSend && !mutating && !preparing && !answering && !pending && !draftStorageInvalid
+        && !guideCheckReading && !lastCommand?.readback_failed && !reading && !openingForSend && !mutating && !preparing && !answering && !pending && !draftStorageInvalid
         && !draft.trim() && !draftMaterials.length && !nativePending().length && !activeTurn() && !hasUnresolvedRequests()
         && (ready() ? snapshot.requests_available === true : canOpenForSend());
     }
@@ -908,19 +1138,19 @@
       await send({ manualCheckText: text });
     }
     async function send(options = {}) {
+      if (configurationWriting || lastCommand?.readback_failed || proposedBinding) return;
       syncWorkspace();
       const manual = chatId === null && typeof options.manualCheckText === "string", requestText = manual ? options.manualCheckText : draft;
       if (manual && !canCheckGuide()) return;
       if (!selectionReady() || !memorySelectionReady() || filePicker?.busy() || guideCheckReading || openingForSend || pending || draftStorageInvalid || nativePending().length || activeTurn() || hasUnresolvedRequests() || mutating || preparing || !enabled || destroyed
           || document.hidden || chatId !== null && (!visible || settingsVisible) || !requestText.trim() || requestText.length > 200000) return;
       let command = null;
-      if (!manual && chatId === null && typeof getCommandContext === "function") {
+      if (!manual && chatId === null && (draftFrame8 || typeof getCommandContext === "function")) {
         try {
-          const value = getCommandContext();
-          if (!exact(value, ["context", "isCurrent"]) || typeof value.isCurrent !== "function") throw Error("当前工作对象尚未核实，原草稿保留。");
-          const context = value.context === null ? null : commandCodec().normalize(value.context);
-          if (context && context.workspace_id !== workspace) throw Error("当前工作对象属于另一个入口，尚未发送。");
-          command = { context, isCurrent: value.isCurrent, edits: draftEdits };
+          if (!draftBinding) throw Error("这份指令尚未确定对象；请点“设为当前”或从目标对话进入专员，原稿保留。");
+          const target = commandCodec().normalizeBinding(draftBinding), original = draftBinding, scope = workspace;
+          if (target.workspace_id !== workspace) throw Error("当前工作对象属于另一个入口，尚未发送。");
+          command = { context: target.context, target, isCurrent: () => draftBinding === original && scope === workspace && scope === String(getWorkspace() || ""), edits: draftEdits };
           if (!commandCurrent(command)) return;
         } catch (error) { reportError(error, "当前工作对象尚未核实，原草稿保留。"); render(); return; }
       }
@@ -932,7 +1162,7 @@
         try {
           const value = await mutate("open", {});
           opened = value !== null && stamp === generation && scope === String(getWorkspace() || "") && !destroyed && enabled && ready()
-            && !document.hidden && view === viewVersion && (chatId === null || visible && !settingsVisible) && draftEdits === edits && draft === text
+            && !document.hidden && (chatId === null || view === viewVersion && visible && !settingsVisible) && draftEdits === edits && draft === text
             && canonical([selectedProfile, draftMaterials, selectedMemory]) === choices && commandCurrent(command) && (!thread || snapshot?.binding?.thread_id === thread);
         } finally { openingForSend = false; if (!destroyed) render(); }
         if (!opened) return;
@@ -951,25 +1181,37 @@
           if (chatId === null && memory) { fixedMemoryPolicy(); submitted.memory_derived_sha256 = null; submitted.native_request_sha256 = null; submitted.native_thread_id = snapshot?.binding?.thread_id || null; }
           submitted.profile = profile; submitted.material_refs = refs; if (memory) submitted.memory_profile = memory;
           submitted.body_json = JSON.stringify(sendBody(clientId, text, profile, refs, memory, context)); submitted.request_sha256 = await bodyHash(submitted.body_json); submitted.intent_sha256 = await bodyHash(canonical(JSON.parse(submitted.body_json)));
-          if (stamp !== generation || destroyed || !enabled || filePicker?.busy() || document.hidden || view !== viewVersion || workspace !== String(getWorkspace() || "") || !profileReady() || (manual ? !visible || settingsVisible || !!draft.trim() || choices !== canonical([selectedProfile, draftMaterials, selectedMemory]) : !materialsReady() || !memoryReady()
+          if (stamp !== generation || destroyed || !enabled || filePicker?.busy() || document.hidden || (manual || chatId !== null) && view !== viewVersion || workspace !== String(getWorkspace() || "") || !profileReady() || (manual ? !visible || settingsVisible || !!draft.trim() || choices !== canonical([selectedProfile, draftMaterials, selectedMemory]) : !materialsReady() || !memoryReady()
               || JSON.stringify(refs) !== JSON.stringify(draftMaterials) || canonical(memory) !== canonical(selectedMemory))) return;
           if (command && (!commandCurrent(command) || command.edits !== draftEdits || draft !== text)) return;
+          if (command && typeof onPrepareCommand === "function") {
+            const isCurrent = () => stamp === generation && !destroyed && enabled && workspace === String(getWorkspace() || "")
+              && commandCurrent(command) && command.edits === draftEdits && draft === text;
+            const prepared = await onPrepareCommand({ workspace_id: workspace, client_id: clientId, target: copy(command.target), isCurrent });
+            if (prepared === false) throw Error("设置请求登记尚未完成；原指令保留。");
+            if (!isCurrent() || document.hidden) return;
+          }
         } catch (error) { if (stamp === generation && !destroyed) reportError(error, "发送指纹没有保存，尚未发送。"); return; }
         finally { preparing = false; render(); }
       }
       if (!commandCurrent(command)) return;
+      const previousCommand = lastCommand;
       pending = submitted; pendingVerified = true;
-      if (!save()) { pending = null; errorText = "浏览器不能保存发送回执，尚未发送；原草稿保留。"; render(); return; }
+      if (command) lastCommand = { client_id: clientId, target: copy(command.target), draft_revision: draftEdits,
+        thread_id: snapshot?.binding?.thread_id || null, turn_id: null, status: "submitted_unknown", reported: false, readback_failed: false };
+      if (!save()) { pending = null; lastCommand = previousCommand; errorText = "浏览器不能保存发送回执，尚未发送；原草稿保留。"; render(); return; }
       if (command) pendingCommand = { ...command, client_id: clientId };
       if (manual) guideOwnClients.add(clientId);
       const value = await mutate("send", submitted.body_json ? JSON.parse(submitted.body_json) : sendBody(submitted.client_id, submitted.text), () => {
         if (pending !== submitted) return;
         pending = null; pendingCommand = null;
+        if (lastCommand?.client_id === submitted.client_id) lastCommand.status = "rejected";
         if (!save()) { pending = submitted; feedback = "这次消息已确认尚未发送，但浏览器无法清除本地回执；原稿仍保留。"; }
         else feedback = "这次消息尚未发送；原稿保留，修改后可以手动发送。";
       });
-      if (value && value.receipt) finishPending(value.receipt);
+      if (value && value.receipt) { observeCommandReceipt(value.receipt); finishPending(value.receipt); observeCommandTurn(snapshot); }
       render();
+      return value;
     }
     function canDisconnect() {
       return snapshotReadable && snapshot && ["ready", "failed", "closed"].includes(snapshot.connection.state)
@@ -1252,6 +1494,40 @@
           || /(?:\/(?:Users|home|private|tmp)\/|[A-Za-z]:\\|\b(?:sk[-_]|deck_)[A-Za-z0-9_-]{12})/.test(value)) return "";
       return Array.from(value).slice(0, limit).join("");
     }
+    function guideSameModelName(name, model) {
+      const normalized = value => value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+      const left = normalized(name), right = normalized(model);
+      return !!left && left === right;
+    }
+    function guideEffortSummary(entries, english) {
+      const unknown = entries.filter(row => !row.levels || !row.levels.length);
+      const known = entries.filter(row => row.levels && row.levels.length);
+      if (!known.length) return english ? "Keep native / unverified" : "沿用原生 / 尚未核对";
+      const sets = new Map();
+      for (const row of known) {
+        const key = [...row.levels].sort().join("\u0000");
+        if (!sets.has(key)) sets.set(key, { levels: row.levels, names: [] });
+        sets.get(key).names.push(row.name);
+      }
+      const groups = [...sets.values()].sort((a, b) => b.names.length - a.names.length || b.levels.length - a.levels.length);
+      const baseline = groups[0], parts = [baseline.levels.join(" · ")];
+      for (const group of groups.slice(1)) {
+        const missing = baseline.levels.filter(level => !group.levels.includes(level));
+        const extra = group.levels.filter(level => !baseline.levels.includes(level));
+        const changes = [missing.length ? (english ? "not listed: " : "未列出 ") + missing.join(" · ") : "", extra.length ? (english ? "also lists: " : "另列出 ") + extra.join(" · ") : ""].filter(Boolean).join(english ? ", " : "，");
+        parts.push(group.names.join("、") + (english ? ": " : " ") + changes);
+      }
+      if (unknown.length) parts.push(unknown.map(row => row.name).join("、") + (english ? ": unverified" : " 尚未核对"));
+      return parts.join("；");
+    }
+    function guideTime(value, english) {
+      const match = typeof value === "string" && /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+      if (!match) return english ? "Not reported" : "未报告";
+      const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number), date = new Date(value);
+      const calendar = new Date(Date.UTC(year, month - 1, day));
+      if (year < 100 || month < 1 || month > 12 || day < 1 || calendar.getUTCFullYear() !== year || calendar.getUTCMonth() !== month - 1 || calendar.getUTCDate() !== day || hour > 23 || minute > 59 || second > 59 || !Number.isFinite(date.getTime())) return english ? "Not reported" : "未报告";
+      return date.toLocaleString(english ? "en-US" : "zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) + (english ? " (local time)" : "（本地时间）");
+    }
     function guideMarkdown() {
       if (typeof guideSource !== "string") return "";
       const sections = new Map();
@@ -1261,6 +1537,22 @@
       }
       const topic = guideChoice === "agent" ? "设置 Agent" : "切换大模型";
       return [sections.get(topic), sections.has("常用指令") ? "## 常用指令\n\n" + sections.get("常用指令") : ""].filter(Boolean).join("\n\n");
+    }
+    async function checkModels() {
+      syncWorkspace();
+      if (typeof onModelCheck !== "function" || modelCheckReading || !visible || settingsVisible || !enabled || destroyed || document.hidden || !workspace || guideChoice !== "model") return;
+      const stamp = generation, view = viewVersion, scope = workspace;
+      const isCurrent = () => !destroyed && enabled && visible && !settingsVisible && !document.hidden && guideChoice === "model" && generation === stamp && viewVersion === view && workspace === scope && scope === String(getWorkspace() || "");
+      modelCheckReading = true; modelCheckResult = null; render();
+      try {
+        const result = await onModelCheck({ workspace_id: scope, isCurrent });
+        if (!isCurrent() || result === null) return;
+        const valid = ["updated", "unavailable", "unsupported"].every(key => Array.isArray(result?.[key]) && result[key].every(id => ["codex", "pi", "hermes", "claude", "dsh"].includes(id)))
+          && (result?.saveFailed === undefined || typeof result.saveFailed === "boolean")
+          && (result?.partial === undefined || Array.isArray(result.partial) && result.partial.every(id => id === "dsh" && result.updated.includes(id)));
+        modelCheckResult = valid ? result : { error: true };
+      } catch (_) { if (isCurrent()) modelCheckResult = { error: true }; }
+      finally { modelCheckReading = false; if (!destroyed) render(); }
     }
     function renderGuide() {
       if (!guide) return;
@@ -1274,6 +1566,19 @@
       guideCheckButton.setAttribute("aria-description", checkDescription);
       guideCheckButton.setAttribute("aria-label", guideCheckButton.textContent);
       guideCheckButton.disabled = !canCheckGuide();
+      modelCheckButton.hidden = guideChoice !== "model" || typeof onModelCheck !== "function";
+      modelCheckButton.disabled = modelCheckReading || !visible || settingsVisible || !enabled || destroyed || document.hidden || !workspace;
+      modelCheckButton.textContent = modelCheckReading ? english ? "Checking models…" : "正在核对模型…" : english ? "Check models and reasoning" : "核对模型与强度";
+      const modelCheckDescription = english ? "Read the model directories of existing connections. DSH providers may access the network; this does not change settings." : "读取已有连接的模型目录。DSH 的提供商可能联网；不会修改设置。";
+      modelCheckButton.setAttribute("data-tooltip", modelCheckDescription); modelCheckButton.setAttribute("aria-description", modelCheckDescription);
+      modelCheckNotice.hidden = modelCheckButton.hidden || !modelCheckResult;
+      const checkedLabels = { codex: "Codex", pi: "Pi", hermes: "Hermes", claude: "Claude Code", dsh: "DeepSeek Harness" };
+      modelCheckNotice.textContent = modelCheckResult?.error ? english ? "Check incomplete; previous catalogue remains." : "核对未完成，保留之前的目录。" : modelCheckResult ? [
+        modelCheckResult.updated.length ? (english ? "Read: " : "已读取：") + modelCheckResult.updated.map(id => checkedLabels[id] + (modelCheckResult.partial?.includes(id) ? english ? " (partial)" : "（部分）" : "")).join("、") : "",
+        modelCheckResult.unavailable.length ? (english ? "Not verified: " : "未核实：") + modelCheckResult.unavailable.map(id => checkedLabels[id]).join("、") : "",
+        modelCheckResult.unsupported.length ? (english ? "Catalogue not connected: " : "目录未接入：") + modelCheckResult.unsupported.map(id => checkedLabels[id]).join("、") : "",
+        modelCheckResult.saveFailed ? (english ? "Some catalogue records are not confirmed saved" : "尚未确认部分目录记录已保存") : ""
+      ].filter(Boolean).join("；") : "";
       agentGuide.textContent = english ? "Set up Agent" : "设置 Agent";
       modelGuide.textContent = english ? "Choose model" : "切换大模型";
       if (manualButton) manualButton.textContent = english ? "Open manual" : "打开手册";
@@ -1293,11 +1598,14 @@
       const targetText = [guideText(target.title, 80), guideText(target.profile_name, 40), Number.isSafeInteger(target.profile_revision) && target.profile_revision > 0 ? "v" + target.profile_revision : ""].filter(Boolean).join(" · ");
       const cacheKey = canonical([guideChoice, language, workspace, backend, targetText,
         nativeTarget ? target.chat_id : null, target.model_id || null, target.reasoning_effort ?? null, verification]);
-      if (guideCache?.catalog === catalog && guideCache.key === cacheKey) return;
-      guideCache = { catalog, key: cacheKey };
+      const history = object(context?.history) && context.history.workspace_id === workspace && object(context.history.catalogues) ? context.history : null;
+      const dsh = object(context?.dsh) && context.dsh.workspace_id === workspace ? context.dsh : null;
+      if (guideCache?.catalog === catalog && guideCache?.history === history && guideCache?.dsh === dsh && guideCache.key === cacheKey) return;
+      guideCache = { catalog, history, dsh, key: cacheKey };
       guideSheet.replaceChildren();
       const title = node("h2", "", english ? guideChoice === "agent" ? "Agent reference" : "Model reference" : guideChoice === "agent" ? "Agent 设置提示" : "大模型设置提示");
       guideSheet.append(title, node("p", "rbs-guide-target", targetText ? (english ? "Target to name: " : "要调整的对象：") + targetText : english ? "Name the conversation or saved configuration you want to change." : "告诉专员要改哪段对话或哪份配置。"));
+      if (guideChoice === "model") guideSheet.append(node("p", "rbs-guide-source", english ? "Ask the specialist to adjust the target conversation’s Agent, model or reasoning. Changing Agent requires another conversation with its context carried over." : "在这里让专员调整目标对话的 Agent、模型和强度；换 Agent 需另建对话并带入内容。"));
       if (verification) guideSheet.append(node("p", "rbs-guide-verification", verification === "inherited"
         ? english ? "Next turn inherits native settings; no model or reasoning level is selected here." : "下轮沿用原生设置；这里没有指定模型和强度。"
         : english ? "The latest configuration needs verification. Use Check and update." : "最新配置待核对，点“核对并更新”。"));
@@ -1315,31 +1623,72 @@
         const labels = { codex: "Codex", pi: "Pi", hermes: "Hermes", claude: "Claude Code", dsh: "DeepSeek Harness" };
         const order = [backend, ...["codex", "pi", "hermes", "claude", "dsh"].filter(id => id !== backend)];
         for (const id of order) {
-          const group = node("details", "rbs-guide-candidates"); group.open = id === backend;
+          const group = node("details", "rbs-guide-candidates"); group.open = id === backend && id !== "dsh";
           group.append(node("summary", "", labels[id]));
-          const source = catalog?.native_profile_capabilities?.[id];
+          if (id === "dsh") {
+            let source = null, historical = false;
+            try { if (dsh?.catalogue) source = dshCatalogue(dsh.catalogue); } catch (_) { /* Invalid native response is not an observation. */ }
+            if (!source && history?.catalogues?.dsh) {
+              try { source = dshCatalogue(history.catalogues.dsh); historical = true; } catch (_) { /* Ignore malformed historical information. */ }
+            }
+            if (!source || guideTime(source.observed_at, false) === "未报告") {
+              group.append(node("p", "", english ? "Models and reasoning options are unverified. Open an existing conversation and check models." : "模型与强度尚未核对；打开已有对话后点“核对模型与强度”。"));
+              group.append(node("p", "rbs-guide-source", english ? "Last update (catalogue): Not yet verified" : "上次更新（目录读取）：尚未核对"));
+            } else {
+              if (historical) group.append(node("p", "rbs-guide-source", english ? "Previous catalogue record (needs verification)" : "上次目录记录（待核实）"));
+              if (source.partial) group.append(node("p", "rbs-guide-source", english ? "Some providers could not be checked." : "部分提供商未核实。"));
+              const names = [], efforts = [];
+              for (const row of source.models) {
+                const name = guideText(row.name), model = guideText(row.model), provider = guideText(row.provider_name);
+                if (!name || !model || !provider) continue;
+                const label = name + (guideSameModelName(name, model) ? "" : " · " + model) + " · " + provider;
+                names.push(label);
+                const levels = row.efforts === null ? null : row.efforts.map(level => guideText(level, 128)).filter(Boolean);
+                efforts.push({ name: label, levels });
+              }
+              group.append(node("p", "", (historical ? english ? "Models: " : "模型：" : english ? "Models (catalogue candidates): " : "模型（目录候选）：") + (names.join("、") || (english ? "None reported" : "暂无"))));
+              group.append(node("p", "", (english ? "Reasoning options: " : "强度：") + guideEffortSummary(efforts, english)));
+              group.append(node("p", "rbs-guide-source", (english ? "Last update (catalogue): " : "上次更新（目录读取）：") + guideTime(source.observed_at, english)));
+              group.append(node("p", "rbs-guide-source", english ? "Reads the directory only; providers may access the network. This does not enable switching in this conversation." : "只读取目录，提供商可能联网；目录不代表可在本对话切换。"));
+            }
+            guideSheet.append(group); continue;
+          }
+          const liveSource = catalog?.native_profile_capabilities?.[id];
+          let historySource = null;
+          if (liveSource?.catalogue_available !== true && history && typeof window.RabbitProfiles?.nativeCapabilities === "function" && Object.hasOwn(history.catalogues, id)) {
+            try {
+              const saved = window.RabbitProfiles.nativeCapabilities({ [id]: history.catalogues[id] })?.[id];
+              if (saved?.enabled === true && saved.catalogue_available === true && guideTime(saved.observed_at, false) !== "未报告") historySource = saved;
+            } catch (_) { /* Invalid history is not a verified observation. */ }
+          }
+          const source = historySource || liveSource, historical = !!historySource;
+          if (historical) group.append(node("p", "rbs-guide-source", english ? "Previous catalogue record (needs verification)" : "上次目录记录（待核实）"));
           if (!["codex", "pi", "hermes", "claude"].includes(id) || source?.catalogue_available !== true || !Array.isArray(source.models)) {
-            group.append(node("p", "", ["codex", "pi", "hermes", "claude"].includes(id) ? english ? "Models and reasoning options are unverified." : "模型与强度尚未核对。" : english ? "Model catalogue is not connected here." : "本入口未接入模型目录。"));
+            group.append(node("p", "", ["codex", "pi", "hermes", "claude"].includes(id) ? english ? "Models and reasoning options are unverified. Open an existing conversation and check models." : "模型与强度尚未核对；打开已有对话后点“核对模型与强度”。" : english ? "Model catalogue is not connected here." : "本入口未接入模型目录。"));
           } else if (!source.models.length) {
             group.append(node("p", "", english ? "Catalogue read; no candidates were reported." : "目录已读取，暂无可显示候选。"));
           } else {
             const rows = source.models.filter(row => guideText(row.name) && guideText(row.model));
-            const table = node("table", "rbs-guide-table"), head = node("tr"), body = node("tbody");
-            head.append(node("th", "", english ? "Model" : "模型"), node("th", "", english ? "Reasoning options" : "可请求的强度")); table.append(head, body);
+            const table = node("div", "rbs-guide-table"), effortRows = [], names = [];
             for (const row of rows) {
-              const line = node("tr"), available = row.explicit_effort_supported === true && Array.isArray(row.supported_efforts) ? row.supported_efforts.filter(value => ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(value)) : [];
+              const available = row.explicit_effort_supported === true && Array.isArray(row.supported_efforts) ? row.supported_efforts.filter(value => ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(value)) : [];
               const name = guideText(row.name), model = guideText(row.model), provider = guideText(row.provider);
-              line.append(node("td", "", name + (model && model !== name ? " · " + model : "") + (provider ? " · " + provider : "")), node("td", "", available.length ? available.join(" · ") : english ? "Keep native / unverified" : "沿用原生 / 尚未核对")); body.append(line);
+              const label = name + (model && !guideSameModelName(name, model) ? " · " + model : "") + (provider ? " · " + provider : "");
+              names.push(label);
+              effortRows.push({ name: label, levels: available });
             }
+            table.append(node("p", "", (historical ? english ? "Models: " : "模型：" : english ? "Available models: " : "可用模型：") + (names.join("、") || (english ? "None reported" : "暂无")) + (!historical && names.length ? (english ? " (catalogue candidates)" : "（目录候选）") : "")));
+            const effortLabel = id === "hermes" ? english ? "Requestable reasoning: " : "可请求强度：" : english ? "Reasoning options: " : "强度：";
+            table.append(node("p", "", effortLabel + guideEffortSummary(effortRows, english)));
             group.append(table);
-            if (!bundledGuide && id === "pi") group.append(node("p", "rbs-guide-source", english ? "Pi: none maps to native off. Provider behavior may differ." : "Pi：none 对应原生 off；提供商行为可能不同。"));
-            if (!bundledGuide && id === "hermes") group.append(node("p", "rbs-guide-source", english ? "Hermes lists request levels; the provider may map them differently." : "Hermes 这里列的是请求强度，提供商可能另作映射。"));
+            if (id === "pi") group.append(node("p", "rbs-guide-source", english ? "Pi: none maps to native off. Provider behavior may differ." : "Pi：none 对应原生 off；提供商行为可能不同。"));
+            if (id === "hermes") group.append(node("p", "rbs-guide-source", english ? "Hermes lists request levels; the provider may map them differently." : "Hermes 这里列的是请求强度，提供商可能另作映射。"));
           }
+          group.append(node("p", "rbs-guide-source", (english ? "Last update (catalogue): " : "上次更新（目录读取）：") + (source?.catalogue_available === true ? guideTime(source.observed_at, english) : english ? "Not yet verified" : "尚未核对")));
           if (source?.catalogue_available === true) {
             const evidence = node("details", "rbs-guide-evidence");
             evidence.append(node("summary", "", english ? "Catalogue source" : "目录来源"),
-              node("p", "rbs-guide-source", (english ? "Source: " : "来源：") + (guideText(source.source) || (english ? "Not reported" : "未报告"))),
-              node("p", "rbs-guide-source", (english ? "Last observed: " : "上次目录观察：") + (guideText(source.observed_at) || (english ? "Not reported" : "未报告"))));
+              node("p", "rbs-guide-source", (english ? "Source: " : "来源：") + (guideText(source.source) || (english ? "Not reported" : "未报告"))));
             if (guideText(source.source_chat_id)) evidence.append(node("p", "rbs-guide-source", (english ? "Source conversation: " : "来源对话：") + guideText(source.source_chat_id)));
             group.append(evidence);
           }
@@ -1379,10 +1728,12 @@
       const helper = window.RabbitProfiles?.renderStatus;
       configurationStatus.hidden = typeof helper !== "function";
       if (typeof helper !== "function") return;
-      const english = language === "en", policy = snapshotReadable && chatId === null && snapshot?.requested_model_policy;
+      const english = language === "en";
       const staleAI = !selectionReady() || selectedProfile !== null && !profileReady(), staleMemory = !memoryReady(), staleChoice = staleAI || staleMemory;
-      const model = staleAI ? english ? "Saved choice needs verification" : "原选配置待核对" : chatId === null ? policy?.applies_to === "each_turn" ? guideText(policy.model) || null : null : selectedProfile?.model_id || null;
-      const effort = staleAI ? null : chatId === null ? policy?.applies_to === "each_turn" ? guideText(policy.effort) || null : null : selectedProfile?.reasoning_effort || null;
+      const native = snapshotReadable && snapshot?.native?.thread?.id === snapshot?.binding?.thread_id ? snapshot.native.thread : null;
+      const requestedModel = selectedProfile?.model_id?.replace(/^local\/codex\//, "");
+      const model = staleAI ? english ? "Saved choice needs verification" : "原选配置待核对" : selectedProfile?.model_id || native?.model || null;
+      const effort = staleAI ? null : selectedProfile?.reasoning_effort || (!requestedModel || requestedModel === native?.model ? native?.reasoningEffort : null) || null;
       const state = !snapshotReadable || pending?.state === "submitted_unknown" || snapshot?.disconnect_unconfirmed === true ? english ? "Needs verification" : "待核对"
         : staleChoice ? english ? "Saved choice needs verification" : "原选配置待核对"
         : hasUnresolvedRequests() ? english ? "Needs your answer" : "等待确认" : activeTurn() || pending?.state === "accepted" ? english ? "Replying" : "正在回复"
@@ -1391,20 +1742,30 @@
         memory: staleMemory ? english ? "Memory choice needs verification" : "记忆配置待核对" : selectedMemory ? selectedMemory.name + (english ? " · read only" : " · 只读") : english ? "No added shared memory" : "不附加共享记忆", status: state, observed: false, language });
     }
     function render() {
+      const followLatest = visible && !settingsVisible && conversationBody?.clientHeight > 0 && conversationBody.scrollHeight - conversationBody.scrollTop - conversationBody.clientHeight < 48;
       syncConfigurationSelection();
       renderGuide(); renderConfigurationStatus();
       toolStatus?.update({ workspace, snapshot: snapshotReadable ? snapshot : null, active: visible && enabled && !destroyed, language, disabled: mutating || preparing || openingForSend });
       handoffView?.setScope(JSON.stringify([workspace, chatId, epoch, snapshot?.binding?.thread_id ?? null]));
       root.setAttribute("lang", language); input.placeholder = chatId === null ? language === "en" ? "Message the Rabbit specialist…" : "给小白兔专员发消息…" : language === "en" ? "Message Codex…" : "给 Codex 发消息…";
-      if (chatId === null && !settingsPanel) composer.replaceChildren(...(typedMemoryScope(snapshot) || selectedMemory || pending?.memory_profile ? [memoryBox] : []), input, materialBox, composerActions, ...(composerStatus ? [composerStatus] : []));
+      if (chatId === null && !settingsPanel) composer.replaceChildren(...(typedMemoryScope(snapshot) || selectedMemory || pending?.memory_profile ? [memoryBox] : []), targetNotice, input, materialBox, composerActions, ...(composerStatus ? [composerStatus] : []));
+      renderCommandTarget();
+      checkCommandButton.textContent = lastCommand?.target?.context?.schema_version === 3 && lastCommand.target.context.target.kind === "new_chat"
+        ? language === "en" ? "Check and apply suggestion" : "核对并应用建议" : language === "en" ? "Check settings result" : "核对设置结果";
+      checkCommandButton.hidden = !lastCommand?.readback_failed; checkCommandButton.disabled = !!commandReadbackReading || mutating || preparing || !enabled;
       const labels = [[openButton, chatId === null ? "打开专员" : "打开对话"], [checkButton, "核对上次发送"], [moreButton, "继续读取原生记录"]]; for (const [button, label] of labels) button.textContent = translate(label);
       const state = snapshot && snapshot.connection.state || "not_open"; connection.textContent = translate(snapshotReadable ? { not_open: "尚未打开", ready: "已连接", opening: "正在连接", failed: "连接失败", closed: "已关闭" }[state] || "连接失败" : "状态待核对");
       if (composerStatus) {
-        composerStatus.textContent = openingForSend ? language === "en" ? "Connecting…" : "正在连接…" : pending ? translate(pending.state === "accepted" ? "消息已由原生 Agent 接收，正在等待本轮结束；原草稿暂时保留。" : "上次发送尚未确认；保留原始回执，不会自动再次发送。") : connection.textContent;
+        composerStatus.textContent = commandReadbackReading ? language === "en" ? "Checking settings result…" : "正在核对设置结果…"
+          : lastCommand?.readback_failed ? language === "en" ? "Settings result needs checking in specialist More." : "设置结果待核对，请打开专员的“更多”。"
+          : openingForSend ? language === "en" ? "Connecting…" : "正在连接…" : pending ? translate(pending.state === "accepted" ? "消息已由原生 Agent 接收，正在等待本轮结束；原草稿暂时保留。" : "上次发送尚未确认；保留原始回执，不会自动再次发送。") : connection.textContent;
         composerStatus.setAttribute("lang", language);
       }
       if (titleMount) {
-        titleMount.textContent = translate("小白兔专员");
+        const attention = hasUnresolvedRequests() || Object.values(answerJournal).includes("submitted_unknown") || !!proposedBinding
+          || !!draft.trim() && !draftBinding && (draftFrame8 || typeof getCommandContext === "function")
+          || !mutating && !preparing && (!!errorText || pending?.state === "submitted_unknown" || lastCommand?.readback_failed || lastCommand && ["submitted_unknown", "failed", "interrupted", "rejected"].includes(lastCommand.status) || nativePending().length > 0 && !activeTurn());
+        titleMount.textContent = translate("小白兔专员") + (attention ? language === "en" ? " · Needs attention" : " · 需处理" : "");
         titleMount.setAttribute("lang", language);
       }
       if (maintenanceLabel) maintenanceLabel.textContent = language === "en" ? "Connection and tools" : "连接与工具";
@@ -1422,11 +1783,19 @@
         else originalAppLink.removeAttribute?.("href");
       }
       checkButton.hidden = !pending; checkButton.disabled = !(pending?.material_refs?.length || pending?.memory_profile) && !ready() || mutating || preparing || draftStorageInvalid;
-      const stopAction = !draft.trim() && !!activeTurn();
+      const stopAction = !!activeTurn();
       sendButton.textContent = stopAction ? language === "en" ? "Stop" : "停止" : translate("发送");
       sendButton.setAttribute("data-composer-action", stopAction ? "stop" : "send");
       sendButton.disabled = stopAction ? !enabled || destroyed || !ready() || mutating || preparing || openingForSend || guideCheckReading
-        : !selectionReady() || !!filePicker?.busy() || !enabled || !(ready() ? snapshot.requests_available === true && profileReady() && materialsReady() && memoryReady() : canOpenForSend() && !reading) || openingForSend || guideCheckReading || mutating || preparing || draftStorageInvalid || hasUnresolvedRequests() || !!pending || nativePending().length > 0 || !!activeTurn() || !draft.trim() || draft.length > 200000;
+        : chatId === null && (draftFrame8 || typeof getCommandContext === "function") && !draftBinding || !!proposedBinding || !!lastCommand?.readback_failed || configurationWriting || !selectionReady() || !!filePicker?.busy() || !enabled || !(ready() ? snapshot.requests_available === true && profileReady() && materialsReady() && memoryReady() : canOpenForSend() && !reading) || openingForSend || guideCheckReading || mutating || preparing || draftStorageInvalid || hasUnresolvedRequests() || !!pending || nativePending().length > 0 || !!activeTurn() || !draft.trim() || draft.length > 200000;
+      if (sharedComposer) {
+        const view = getComposerView();
+        for (const [trigger, label, value] of [[aiTrigger, language === "en" ? "AI configuration" : "AI 配置", currentProfileRow && selectedProfile?.id === currentProfileRow.id ? (language === "en" ? "This chat · adjusted" : "本对话 · 已调整") : selectedProfile?.name || "Codex"], [memoryTrigger, language === "en" ? "Memory" : "记忆配置", selectedMemory?.name || (language === "en" ? "No added memory" : "不额外带入记忆")]]) {
+          trigger.replaceChildren(node("span", "", label), node("strong", "", value), node("span", "", "⌄"));
+          trigger.disabled = typeof onChooseConfiguration !== "function" || !view || view.busy;
+        }
+        composerHint.textContent = getSendShortcut() === "ctrl-enter" ? "⌘/Ctrl+Enter 发送 · Enter 换行" : "Enter 发送 · Shift+Enter 换行";
+      }
       materialBox.hidden = !draftMaterials.length;
       materialBox.replaceChildren();
       if (draftMaterials.length) {
@@ -1498,8 +1867,29 @@
       if (snapshot && snapshot.requests_available === true && Array.isArray(snapshot.requests)) for (const token of burned) if (!keys.has(token)) burned.delete(token);
       requests.replaceChildren(...cards);
       filePicker?.update(language);
+      if (followLatest) conversationBody.scrollTop = conversationBody.scrollHeight;
     }
-    input.addEventListener("input", () => { draft = input.value; draftEdits++; save(); render(); });
+    input.addEventListener("input", () => {
+      const wasEmpty = !draft.trim(), previous = draftBinding;
+      draft = input.value; draftEdits++;
+      if (chatId === null && (draftFrame8 || typeof getCommandContext === "function")) {
+        draftFrame8 = true;
+        if (!draft.trim()) { draftBinding = proposedBinding = null; }
+        else if (wasEmpty && !draftBinding && typeof getCommandContext === "function") {
+          try { draftBinding = captureBinding(); } catch (error) { reportError(error, "指令对象尚未确定；文字保留。"); }
+        }
+      }
+      const saved = save();
+      if (!saved) errorText = "浏览器不能保存最新指令；文字保留在输入框，请勿刷新。";
+      else if (previous !== draftBinding) notifyBinding();
+      render();
+    });
+    if (sharedComposer) input.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229 && !event.shiftKey
+          && (getSendShortcut() === "ctrl-enter" ? event.ctrlKey || event.metaKey : !event.ctrlKey && !event.metaKey)) {
+        event.preventDefault(); if (!activeTurn()) void send();
+      }
+    });
     if (composerMount) {
       const focusComposer = async () => { if (enabled && !destroyed) { syncWorkspace(); render(); if (!snapshotReadable && !reading && !mutating && !preparing) { await refresh(); await loadInitialMemoryProfiles(); } } };
       input.addEventListener("focus", focusComposer); input.addEventListener("click", focusComposer);
@@ -1509,7 +1899,7 @@
     async function show(options = {}) {
       if (destroyed) return;
       settingsVisible = false; visible = true; root.hidden = false; if (guideMount) guideMount.hidden = false; syncWorkspace();
-      if (options?.restoreHistory === true && chatId === null && composerMount && !historyRestore)
+      if (options?.restoreHistory === true && (chatId === null && composerMount || sharedComposer) && !historyRestore)
         historyRestore = { workspace, generation, view: viewVersion, attempted: false };
       render(); await refresh(); await restoreExistingHistory();
       if (ready()) await loadInitialProfiles(); await loadInitialMemoryProfiles();
@@ -1517,12 +1907,212 @@
     async function showSettings() { if (destroyed) return; viewVersion++; historyRestore = null; settingsVisible = true; visible = true; root.hidden = true; if (guideMount) guideMount.hidden = true; syncWorkspace(); render(); await refresh(); if (ready()) await loadInitialProfiles(); await loadInitialMemoryProfiles(); }
     function hide() { viewVersion++; historyRestore = null; settingsVisible = false; visible = false; root.hidden = true; if (guideMount) guideMount.hidden = true; clearTimeout(timer); timer = null; save(); schedule(); if (!settingsPanel) toolStatus?.reset(); }
     function setLanguage(value) { language = value === "en" ? "en" : "zh-CN"; requestNodes.clear(); render(); }
-    function setEnabled(value) { enabled = value === true; if (composerMount && !destroyed) syncWorkspace(); if (!enabled) hide(); render(); }
+    function setEnabled(value) {
+      enabled = value === true; if (composerMount && !destroyed) syncWorkspace(); if (!enabled) hide(); render();
+      // Make a restored sidebar draft sendable without another focus gesture.
+      // This reads the existing holder only; it never opens an Agent.
+      if (enabled && composerMount && !destroyed && workspace && !initialComposerRead) { initialComposerRead = true; void refresh(); }
+    }
     function setMaterialInputs(value) { materialsEnabled = chatId !== null && value === true; render(); }
     function destroy() { destroyed = true; hide(); toolStatus?.destroy(); generation++; fullReadPending = false; if (composerMount) composer.remove(); if (guideMount) guide.remove(); settingsPanel?.remove(); if (document.removeEventListener) document.removeEventListener("visibilitychange", visibility); }
-    function getConfigurationContext() { return { agent_instance_id: "local/codex", profile_id: selectedProfile?.id || null, profile_name: selectedProfile?.name || null, profile_revision: selectedProfile?.revision || null, model_id: selectedProfile?.model_id || null, reasoning_effort: selectedProfile?.reasoning_effort ?? null }; }
+    function getConfigurationContext() { return { agent_instance_id: "local/codex", profile_id: selectedProfile?.id || null, profile_name: selectedProfile?.name || null, profile_revision: selectedProfile?.revision || null, model_id: selectedProfile?.model_id || null, reasoning_effort: selectedProfile?.reasoning_effort ?? null,
+      memory_profile_id: selectedMemory?.id || null, memory_profile_revision: selectedMemory?.revision || null,
+      ai_selection_revision: configurationSelection?.ready() && configurationSelection.matchesProfile(selectedProfile) && Number.isSafeInteger(snapshot?.configuration_selection?.selection?.revision) ? snapshot.configuration_selection.selection.revision : null,
+      memory_selection_revision: memorySelection?.ready() && memorySelection.matchesProfile(selectedMemory) && Number.isSafeInteger(snapshot?.memory_selection?.selection?.revision) ? snapshot.memory_selection.selection.revision : null }; }
+    function applyConfigurationReadback(value) {
+      if (chatId === null || destroyed || !enabled || workspace !== String(getWorkspace() || "") || !snapshotReadable || configurationWriting) return false;
+      const fields = ["configuration_selection", "memory_selection"];
+      if (!exact(value, fields) || fields.some(field => !object(value[field]) || value[field].workspace_id !== workspace || value[field].agent !== "codex" || value[field].chat_id !== chatId)) return false;
+      writeVersion++; configurationSelection?.observe(value); memorySelection?.observe(value);
+      snapshot = { ...snapshot, ...copy(value) }; render(); return true;
+    }
+    function localConfigurationKey() { return "rabbit.native-local-configuration.v1." + encodeURIComponent(workspace) + "." + chatId; }
+    function localConfigurationRecord(value) {
+      if (!exact(value, ["body_json", "request_sha256"]) || typeof value.body_json !== "string" || value.body_json.length > 6000 || !/^[a-f0-9]{64}$/.test(value.request_sha256 || "")) throw Error("本对话待核保存记录不完整，请保留记录核对。");
+      const body = JSON.parse(value.body_json);
+      if (!exact(body, ["agent", "chat_id", "expected_revision", "base_profile_id", "base_profile_revision", "parameters", "operation_id"]) || body.agent !== "codex" || body.chat_id !== chatId
+          || !Number.isSafeInteger(body.expected_revision) || body.expected_revision < 1 || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(body.operation_id || "") || !exact(body.parameters, ["model_id", "reasoning_effort"])) throw Error("本对话待核保存对象不完整，请保留记录核对。");
+      profileChoice({ id: body.base_profile_id, revision: body.base_profile_revision, name: "本对话", agent_instance_id: "local/codex", device_id: "local", ...body.parameters });
+      return { body_json: value.body_json, request_sha256: value.request_sha256 };
+    }
+    function clearLocalConfiguration(record, key) {
+      try { const saved = window.localStorage.getItem(key); if (saved !== null && saved !== JSON.stringify(record)) return false; window.localStorage.removeItem(key); }
+      catch (_) { return false; }
+      if (localConfigurationPending === record) localConfigurationPending = null;
+      return true;
+    }
+    function initialSelectionDTO(value) {
+      if (value?.workspace_id !== workspace || value.agent !== "codex" || value.chat_id !== chatId || value.profile_current !== true) throw Error("原对话的配置状态尚未核实。");
+      const dto = Object.fromEntries(["workspace_id", "agent", "chat_id", "selection", "profile", "profile_current"].map(field => [field, value[field]]));
+      const check = window.RabbitProfiles.createNativeSelection({ agent: "codex", parseProfile: profileChoice });
+      check.reset(undefined, { workspace, chatId }); check.observe({ configuration_selection: dto });
+      check.synchronize({ blocked: false, save: () => true, apply: () => true });
+      if (!check.ready()) throw Error("原对话的配置状态尚未核实。");
+      return copy(dto);
+    }
+    function localConfigurationReceipt(value, record) {
+      const body = JSON.parse(record.body_json);
+      if (value?.scope !== "native_local_configuration" || value.inference_performed !== false || value.connection_checked !== false
+          || !exact(value.operation, ["id", "request_sha256", "replayed"]) || value.operation.id !== body.operation_id || value.operation.request_sha256 !== record.request_sha256 || typeof value.operation.replayed !== "boolean"
+          || value.workspace_id !== workspace || value.agent !== "codex" || value.chat_id !== chatId || value.profile_current !== true || value.selection?.revision !== body.expected_revision + 1
+          || value.profile?.model_id !== body.parameters.model_id || value.profile?.reasoning_effort !== body.parameters.reasoning_effort) throw Error("本对话保存回执尚未核实，请保留原请求重试核对。");
+      return initialSelectionDTO(value);
+    }
+    // Home owns the preparation journal. Never open an Agent or write a native
+    // draft before the exact target's complete configuration receipt is saved.
+    async function prepareInitialLocalConfiguration(preparation, isCurrent = () => true) {
+      syncWorkspace();
+      if (chatId === null || !object(preparation) || preparation.created_chat_id !== chatId || typeof preparation.onProgress !== "function" || typeof isCurrent !== "function"
+          || destroyed || !enabled || configurationWriting || localConfigurationPending || localConfigurationInvalid) throw Error("首页配置准备对象尚未核实；原草稿保留。");
+      const base = profileChoice(preparation.base_profile), parameters = copy(preparation.parameters);
+      if (!exact(parameters, ["model_id", "reasoning_effort"])) throw Error("首页只支持调整模型和强度。");
+      profileChoice({ ...base, ...parameters });
+      const scope = workspace, stamp = generation;
+      const current = () => !destroyed && enabled && generation === stamp && workspace === scope && scope === String(getWorkspace() || "") && isCurrent();
+      const progress = patch => { if (preparation.onProgress(copy(patch)) !== true) throw Error("浏览器未能保存原配置交接；请沿原对话核对。"); Object.assign(preparation, copy(patch)); };
+      if (!current()) return null;
+      await refresh();
+      if (!current()) return null;
+      if (!snapshotReadable || mutating || preparing || openingForSend || answering || reading || pending || draftStorageInvalid || draft !== "" || input.value !== "" || draftMaterials.length || nativePending().length || activeTurn() || hasUnresolvedRequests()
+          || snapshot?.disconnect_unconfirmed === true || snapshot?.binding?.thread_id !== null || history.size || live.size || snapshot?.receipts?.length) throw Error("这段对话已有工作或状态待核对，未覆盖其配置。");
+      writeVersion++; configurationWriting = true; render();
+      const read = async () => initialSelectionDTO(await api("/api/management/native-chat-configuration?agent=codex&chat_id=" + encodeURIComponent(chatId)));
+      try {
+        let observed = await read();
+        if (!current()) return null;
+        let record = preparation.local_request === null ? null : localConfigurationRecord(preparation.local_request);
+        if (record) {
+          const body = JSON.parse(record.body_json), prior = initialSelectionDTO(preparation.base_selection);
+          if (body.base_profile_id !== base.id || body.base_profile_revision !== base.revision || canonical(body.parameters) !== canonical(parameters)
+              || body.expected_revision !== prior.selection.revision || prior.selection.ai_profile_id !== base.id || prior.selection.ai_profile_revision !== base.revision || canonical(prior.profile) !== canonical(base)
+              || await bodyHash(canonical(body)) !== record.request_sha256) throw Error("原首页配置请求与参数不一致，没有重试。");
+        }
+        if (preparation.local_result !== null) {
+          if (!record) throw Error("原配置回执缺少对应请求，不能采用。");
+          const received = localConfigurationReceipt(preparation.local_result, record);
+          if (canonical(observed) !== canonical(received)) throw Error("原对话配置已变化，没有采用过期结果。");
+        } else {
+          if (!record) {
+            const prior = preparation.base_selection === null ? null : initialSelectionDTO(preparation.base_selection);
+            const desired = value => value.selection.revision === 1 && value.selection.ai_profile_id === base.id && value.selection.ai_profile_revision === base.revision && canonical(value.profile) === canonical(base);
+            if (prior && prior.selection.revision > 0 && canonical(prior) !== canonical(observed)) throw Error("原对话的基础选择已变化，未覆盖。");
+            if (observed.selection.revision === 0) {
+              if (prior && prior.selection.revision !== 0) throw Error("原对话的基础选择版本不一致。");
+              if (!prior) progress({ base_selection: observed });
+              if (!current()) return null;
+              const chosen = await api("/api/management/native-chat-configuration", { method: "POST", body: JSON.stringify({ agent: "codex", chat_id: chatId, expected_revision: 0, ai_profile_id: base.id, ai_profile_revision: base.revision }) }, false);
+              if (chosen?.scope !== "native_next_turn_selection" || chosen.inference_performed !== false || chosen.connection_checked !== false) throw Error("基础配置保存回执待核对。");
+              observed = initialSelectionDTO(chosen);
+            }
+            if (!desired(observed)) throw Error("原对话已有其他配置或版本，未覆盖。");
+            // A recovered GET is an observed base, never an invented POST receipt.
+            progress({ base_selection: observed });
+            if (!current()) return null;
+            const body = { agent: "codex", chat_id: chatId, expected_revision: observed.selection.revision, base_profile_id: base.id, base_profile_revision: base.revision,
+              parameters: copy(parameters), operation_id: window.crypto?.randomUUID?.() };
+            record = localConfigurationRecord({ body_json: JSON.stringify(body), request_sha256: await bodyHash(canonical(body)) });
+            if (!current()) return null;
+            progress({ local_request: record });
+          }
+          if (!current()) return null;
+          const result = await api("/api/management/native-chat-local-configuration", { method: "POST", body: record.body_json }, false);
+          localConfigurationReceipt(result, record);
+          progress({ local_result: result });
+        }
+        if (!current()) return null;
+        const dto = localConfigurationReceipt(preparation.local_result, record);
+        configurationSelection.observe({ configuration_selection: dto }); snapshot = { ...snapshot, configuration_selection: dto }; render();
+        if (!configurationSelection.ready()) throw Error("配置已保存，本机采用状态仍需核对。");
+        return copy(dto.profile);
+      } finally { if (generation === stamp && workspace === scope) { configurationWriting = false; if (!destroyed) render(); } }
+    }
+    async function saveLocalConfiguration(parameters, expectedView, retry = false) {
+      const view = getComposerView(), detail = view?.local_configuration;
+      if (!view || view.busy || view.view !== expectedView || !detail || localConfigurationInvalid || (retry ? !localConfigurationPending : !detail.available)) return false;
+      const scope = workspace, stamp = generation, version = viewVersion, key = localConfigurationKey();
+      const current = () => !destroyed && enabled && visible && !settingsVisible && generation === stamp && viewVersion === version && workspace === scope && scope === String(getWorkspace() || "");
+      let record = localConfigurationPending;
+      writeVersion++; configurationWriting = true; render();
+      try {
+        if (!record) {
+          if (!exact(parameters, ["model_id", "reasoning_effort"])) throw Error("本对话只支持调整模型和强度。");
+          const checked = profileChoice({ ...detail.profile, ...parameters });
+          const operationId = window.crypto?.randomUUID?.();
+          const body = { agent: "codex", chat_id: chatId, expected_revision: detail.expected_revision, base_profile_id: detail.profile.id, base_profile_revision: detail.profile.revision,
+            parameters: { model_id: checked.model_id, reasoning_effort: checked.reasoning_effort }, operation_id: operationId };
+          const json = JSON.stringify(body); record = localConfigurationRecord({ body_json: json, request_sha256: await bodyHash(canonical(body)) });
+          if (!current()) return false;
+          const existing = window.localStorage.getItem(key);
+          if (existing !== null) { localConfigurationPending = localConfigurationRecord(JSON.parse(existing)); throw Error("这个对话已有待核保存，请重试原保存。"); }
+          try { window.localStorage.setItem(key, JSON.stringify(record)); } catch (_) { throw Error("浏览器不能保存本次调整，尚未提交；原选择保留。"); }
+          localConfigurationPending = record;
+        }
+        if (await bodyHash(canonical(JSON.parse(record.body_json))) !== record.request_sha256) throw Error("原保存参数与摘要不一致，没有重试。");
+        if (!current() || window.localStorage.getItem(key) !== JSON.stringify(record)) return false;
+        const body = JSON.parse(record.body_json), value = await api("/api/management/native-chat-local-configuration", { method: "POST", body: record.body_json }, false);
+        if (!current()) return false;
+        const dto = localConfigurationReceipt(value, record);
+        localConfigurationCommitting = true;
+        configurationSelection.observe({ configuration_selection: dto }); snapshot = { ...snapshot, configuration_selection: dto }; render();
+        if (!configurationSelection.ready() || !clearLocalConfiguration(record, key)) throw Error("配置已保存，本机采用结果仍需核对；草稿保留。");
+        profilesError = ""; return true;
+      } catch (error) {
+        if (current()) {
+          if (error.accepted === false && record) clearLocalConfiguration(record, key);
+          if (error.status === 404 && error.accepted === false) { localConfigurationUnsupported = true; error = Object.assign(Error("当前服务尚不支持调整本对话；原选择与参数保留。"), { status: 404, accepted: false }); }
+          profilesError = message(error, "保存结果尚未确认；请在调整本对话中重试原保存。");
+        }
+        throw error;
+      } finally { if (generation === stamp && workspace === scope) { localConfigurationCommitting = false; configurationWriting = false; if (current()) render(); } }
+    }
+    function getComposerView() {
+      if (!sharedComposer || destroyed || !enabled || !visible || settingsVisible || workspace !== String(getWorkspace() || "")) return null;
+      const selected = snapshot?.configuration_selection, persisted = configurationSelection?.managed() && configurationSelection.ready() && configurationSelection.matchesProfile(selectedProfile)
+        && selected?.workspace_id === workspace && selected?.chat_id === chatId && selected?.agent === "codex" && selected?.profile_current === true
+        && selectedProfile !== null && selected.selection?.ai_profile_id === selectedProfile.id && selected.selection?.ai_profile_revision === selectedProfile.revision;
+      return { local_configuration: { workspace_id: workspace, chat_id: chatId, profile: persisted ? copy(selectedProfile) : null, expected_revision: persisted ? selected.selection.revision : null,
+          available: !!persisted && !localConfigurationPending && !localConfigurationInvalid && !localConfigurationUnsupported && localConfigurationSupported && profilesReadable,
+          pending: localConfigurationPending ? copy(JSON.parse(localConfigurationPending.body_json).parameters) : null,
+          reason: localConfigurationInvalid ? "原保存记录待核对" : localConfigurationUnsupported || !localConfigurationSupported ? "当前服务尚未支持" : !persisted ? "先明确选择一份已保存配置" : "" },
+        ai_profile_id: selectedProfile?.id || null, memory_profile_id: selectedMemory?.id || "none", existing: true, native_history: true, native_agent: "codex",
+        view: canonical([workspace, chatId, generation, viewVersion, snapshot?.configuration_selection?.selection?.revision, snapshot?.memory_selection?.selection?.revision]),
+        busy: !snapshotReadable || configurationWriting || mutating || preparing || openingForSend || answering || !!pending || draftStorageInvalid || !!filePicker?.busy() || nativePending().length > 0 || !!activeTurn() || hasUnresolvedRequests(),
+        notice: profilesError || memoryError };
+    }
+    async function chooseConfiguration(kind, row, expectedView) {
+      const view = getComposerView();
+      if (!["ai", "memory"].includes(kind) || !view || view.busy || view.view !== expectedView || localConfigurationPending || localConfigurationInvalid) return false;
+      const memory = kind === "memory", machine = memory ? memorySelection : configurationSelection;
+      const field = memory ? "memory_selection" : "configuration_selection", failureField = memory ? "memory_selection_error" : "configuration_selection_error";
+      const previous = snapshot?.[field], revision = previous?.selection?.revision;
+      if (!machine || previous?.workspace_id !== workspace || previous?.agent !== "codex" || previous?.chat_id !== chatId || !Number.isSafeInteger(revision)) throw Error("当前对话配置状态待核对；草稿保留。");
+      const chosen = memory ? row === "none" || row?.id === "none" ? null : selectedMemoryChoice(row) : profileChoice(row);
+      if (!memory && row.native_available !== true) throw Error("这份配置尚未确认可用于原生Codex；原选择保留。");
+      const scope = workspace, stamp = generation, version = viewVersion;
+      const current = () => !destroyed && enabled && generation === stamp && viewVersion === version && workspace === scope && scope === String(getWorkspace() || "");
+      const path = memory ? "/api/management/native-chat-memory-configuration" : "/api/management/native-chat-configuration";
+      const idField = memory ? "memory_profile_id" : "ai_profile_id", revisionField = memory ? "memory_profile_revision" : "ai_profile_revision";
+      writeVersion++; configurationWriting = true; render();
+      try {
+        const value = await api(path, { method: "POST", body: JSON.stringify({ agent: "codex", chat_id: chatId, expected_revision: revision, [idField]: chosen?.id || null, [revisionField]: chosen?.revision || null }) }, false);
+        if (!current()) return false;
+        if (value?.scope !== (memory ? "native_next_turn_memory_selection" : "native_next_turn_selection") || value.inference_performed !== false || value.connection_checked !== false
+            || value.workspace_id !== scope || value.agent !== "codex" || value.chat_id !== chatId || value.profile_current !== true
+            || value.selection?.[idField] !== (chosen?.id || null) || value.selection?.[revisionField] !== (chosen?.revision || null)) throw Error("保存回执与当前选择不一致；请核对原对话。");
+        const saved = Object.fromEntries(["workspace_id", "agent", "chat_id", "selection", "profile", "profile_current"].map(key => [key, value[key]]));
+        machine.observe({ [field]: saved }); snapshot = { ...snapshot, [field]: saved }; render();
+        if (!machine.ready()) throw Error("配置已保存，浏览器采用状态仍待核对；草稿保留。");
+        return true;
+      } catch (error) {
+        if (current()) { machine.observe({ [failureField]: true }); errorText = message(error, "配置保存结果待核对；草稿与材料保留。"); }
+        throw error;
+      } finally {
+        configurationWriting = false;
+        if (current()) { render(); await refresh({ preserveError: true }); }
+      }
+    }
     function updateGuideContext() { guideCache = null; renderGuide(); }
-    render(); return { show, showSettings, hide, refresh, setLanguage, setEnabled, setMaterialInputs, destroy, selectSavedProfile, putDraft, getTextSnapshot, getConfigurationContext, updateGuideContext, openGuide, getStatusReportMount: () => statusReportMount };
+    render(); return { getDraftBinding, getGuideBinding, bindTarget, applyConfigurationReadback, getComposerView, chooseConfiguration, saveLocalConfiguration, prepareInitialLocalConfiguration, sendDraft: send, focusComposer: () => input.focus({ preventScroll: true }), show, showSettings, hide, refresh, setLanguage, setEnabled, setMaterialInputs, destroy, selectSavedProfile, putDraft, captureQuoteDraft, applyQuoteDraft, getTextSnapshot, getConfigurationContext, updateGuideContext, openGuide, getStatusReportMount: () => statusReportMount };
   }
-  window.RabbitSpecialist = Object.freeze({ create });
+  window.RabbitSpecialist = Object.freeze({ create, dshCatalogue });
 })();

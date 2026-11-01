@@ -112,6 +112,21 @@ def normalize(value, check_paths=True):
                 kind = ('directory' if field in ('root', 'home', 'history_root') else
                         'executable' if (provider, field) in _EXECUTABLES else 'file')
                 normalized[field] = _path(raw, kind=kind, check_paths=check_paths)
+        if check_paths and provider == 'hermes':
+            # The native connection requires this exact upstream entry. Merely
+            # accepting an existing folder can leave launchd restarting a server
+            # that cannot construct the connection.
+            if not (Path(normalized['root']) / 'hermes_cli' / 'main.py').is_file():
+                _reject('hermes_source_entry_unavailable')
+        if check_paths and provider == 'dsh':
+            # Match the same package-root/CLI identity check as the native
+            # connection, without changing the lexical paths saved to the plist.
+            try:
+                matches = Path(normalized['cli']).resolve() == (Path(normalized['root']) / 'lib' / 'bin.js').resolve()
+            except (OSError, RuntimeError, ValueError):
+                _reject('dsh_cli_root_unavailable')
+            if not matches:
+                _reject('dsh_cli_root_mismatch')
         out[provider] = normalized
     return {'schema_version': 1, 'connections': out}
 

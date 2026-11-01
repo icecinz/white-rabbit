@@ -170,7 +170,7 @@
     const status_report = value.status_report == null ? null : window.RabbitStatusChecks.normalize(value.status_report, value.workspace_id);
     return { ai_profiles: rows, memory_profiles: memories, memory_connections, native_memory_sources, status_report, default_ai_profile_id: value.default_ai_profile_id, default_ai_profile_revision: defaultRevision, default_memory_profile_id: "none", revision: value.revision, ...(value.workspace_id === undefined ? {} : { workspace_id: value.workspace_id }), ...(native_profile_capabilities === undefined ? {} : { native_profile_capabilities }) };
   }
-  function create({ api, root, getSelection, onChoose, onManage, onCatalog = () => {}, getInventory = () => null, getCapabilities = () => ({}), getWorkspace = () => "", getNativeAgents = () => [], onChooseNative = null, onMemoryManual = null }) {
+  function create({ api, root, getSelection, onChoose, onManage, onCatalog = () => {}, getInventory = () => null, getCapabilities = () => ({}), getWorkspace = () => "", getNativeAgents = () => [], onChooseNative = null, onMemoryManual = null, onAskSpecialist = null, canAskSpecialist = () => false, onLocalConfiguration = null }) {
     let data = null, loading = null, requestVersion = 0, picker = null, editor = null, manager = null, managerKind = "ai", returnFocus = null;
     let workspace = "", pendingCreation = null, creationBusy = false, creationInvalid = false, creationNotice = "";
     const nativeAttach = { saving: false, unknownSources: new Set(), confirmedProfileId: null, confirmedSourceRef: undefined, errorSourceRef: undefined, error: "", notice: "" };
@@ -315,7 +315,12 @@
     }
     function renderPicker() {
       if (!picker) return;
-      const captured = picker, now = current(), list = captured.kind === "memory" ? data?.memory_profiles || [] : data?.ai_profiles || [], nativeMemory = captured.kind === "memory" && now.native_history === true;
+      const captured = picker, now = current();
+      if (captured.localEditor) { renderLocalConfiguration(captured); return; }
+      const all = captured.kind === "memory" ? data?.memory_profiles || [] : data?.ai_profiles || [], nativeMemory = captured.kind === "memory" && now.native_history === true;
+      const nativeAgents = Array.isArray(now.native_agents) ? now.native_agents.filter(agent => ["codex", "hermes"].includes(agent)) : now.native_agent ? [now.native_agent] : null;
+      const list = captured.kind === "ai" && nativeAgents ? all.filter(row => nativeAgents.includes(agents.backendOfInstance(row.agent_instance_id))) : all;
+      const usable = row => captured.kind === "ai" && nativeAgents ? row.native_available === true : row.available === true && (!nativeMemory || row.id === "none" || row.mode === "read_only");
       const panel = node("div", "profile-picker-panel"), head = node("header", "profile-picker-header");
       const title = node("h2", "", captured.kind === "memory" ? "记忆配置" : "AI 配置"); title.id = "profile-picker-title";
       head.append(title, action("关闭", close)); panel.append(head);
@@ -327,27 +332,27 @@
       const collection = node("div", "profile-choice-list");
       for (const row of list) {
         const selected = row.id === captured.selected;
-        const control = action("", () => { captured.selected = row.id; renderPicker(); }, "profile-choice"); control.setAttribute("aria-pressed", String(selected)); control.disabled = row.available !== true || captured.saving;
-        control.append(node("strong", "", nativeMemory && row.id === "none" ? "不额外带入共享记忆" : row.name), node("span", "profile-note", captured.kind === "memory" ? row.id === "none" ? nativeMemory ? "不额外带入共享记忆；原 Agent 自身记忆沿用原配置。" : row.detail : `${memoryProgramLabel(row.program)} · ${memoryModeLabel(row.mode)} · 第 ${row.revision} 版${row.available ? "" : ` · ${row.reason || "目前不可用"}`}` : `${row.available ? "可选择 · 发送时验证" : row.reason || "目前不可用"} · 第 ${row.revision} 版`)); collection.append(control);
+        const control = action("", () => { captured.selected = row.id; return captured.kind === "ai" ? applyPicker(captured) : renderPicker(); }, "profile-choice"); control.setAttribute("aria-pressed", String(selected)); control.disabled = !usable(row) || captured.saving;
+        control.append(node("strong", "", nativeMemory && row.id === "none" ? "不额外带入共享记忆" : row.name), node("span", "profile-note", captured.kind === "memory" ? row.id === "none" ? nativeMemory ? "不额外带入共享记忆；原 Agent 自身记忆沿用原配置。" : row.detail : `${memoryProgramLabel(row.program)} · ${memoryModeLabel(row.mode)} · 第 ${row.revision} 版${row.available ? "" : ` · ${row.reason || "目前不可用"}`}` : `${usable(row) ? "可选择 · 发送时验证" : (now.native_agent ? row.native_reason : row.reason) || "目前不可用"} · 第 ${row.revision} 版`)); collection.append(control);
       }
       const native = nativeChoices(captured);
       let savedHost = panel;
       if (native.length) {
-        panel.append(node("h3", "", "原生配置"), node("p", "profile-note", "带上当前草稿、兼容的材料和只读记忆，打开原生对话；不会自动发送。所选配置在发送时再次核对。"));
+        panel.append(node("h3", "", "原生配置"), node("p", "profile-note", "只选择下一次发送使用的 Agent；草稿和材料留在首页，发送时再打开对话。"));
         const nativeList = node("div", "profile-choice-list");
         for (const row of nativeSavedChoices(captured)) {
           const control = action("", () => applyNative(captured, agents.backendOfInstance(row.agent_instance_id), row), "profile-choice profile-native-saved-choice");
-          control.dataset.profileId = row.id; control.disabled = captured.saving || captured.nativeAttempted || now.busy;
+          control.dataset.profileId = row.id; control.disabled = captured.saving || now.busy;
           control.append(node("strong", "", row.name), node("span", "profile-note", `${agentName(row.agent_instance_id)} · 第 ${row.revision} 版 · 发送时核对原生配置`)); nativeList.append(control);
         }
         for (const row of native) {
           const control = action(row.label, () => applyNative(captured, row.agent), "profile-choice profile-native-choice");
-          control.dataset.agent = row.agent; control.disabled = captured.saving || captured.nativeAttempted || now.busy;
+          control.dataset.agent = row.agent; control.disabled = captured.saving || now.busy;
           nativeList.append(control);
         }
         panel.append(nativeList);
         const saved = node("details", "profile-saved-choices"); saved.open = captured.savedOpen === true;
-        saved.append(node("summary", "", "统一文字配置"), node("p", "profile-note", "使用共享上下文的文字连接；不提供完整原生工具。"));
+        saved.append(node("summary", "", "文字兼容配置"), node("p", "profile-note", "使用共享上下文的文字连接；不提供完整原生工具。"));
         saved.addEventListener("toggle", () => { if (picker === captured) captured.savedOpen = saved.open; });
         panel.append(saved); savedHost = saved;
       }
@@ -355,10 +360,69 @@
       if (captured.error) { const note = node("p", "profile-error", captured.error); note.setAttribute("role", "alert"); panel.append(note); }
       const buttons = node("div", "profile-actions");
       const apply = action(captured.saving ? "正在选择…" : captured.kind === "memory" && (now.existing || nativeMemory) ? "在这段对话继续" : "用于下一次发送", () => applyPicker(captured), "rbw-button rbw-primary");
-      apply.disabled = captured.saving || !list.some(row => row.id === captured.selected && row.available === true) || now.busy;
-      buttons.append(action("取消", close), action("管理这些配置", () => { const kind = captured.kind; close(); onManage(kind); }), apply);
+      apply.disabled = captured.saving || !list.some(row => row.id === captured.selected && usable(row)) || now.busy;
+      buttons.append(action("取消", close), action("管理这些配置", () => { const kind = captured.kind; close(); onManage(kind); }));
+      if (captured.kind === "memory") buttons.append(apply);
       if (captured.kind === "memory" && !nativeMemory) { const fresh = action(captured.saving ? "正在创建…" : "新开空白对话", () => applyPicker(captured, true)); fresh.disabled = apply.disabled; buttons.append(fresh); panel.append(node("p", "profile-note", "新开空白对话时，当前未发送内容留在原话题。不会把已有聊天或旧库资料写入新记忆库。")); }
-      savedHost.append(buttons); root.replaceChildren(panel);
+      savedHost.append(buttons);
+      const more = node("details", "profile-identifiers"); more.append(node("summary", "", "更多"));
+      const extra = node("div", "profile-actions");
+      const ask = action("请专员调整", () => {
+        if (picker !== captured || current().view !== captured.view || captured.saving || !canAskSpecialist()) return;
+        const kind = captured.kind; close(false); onAskSpecialist?.({ kind });
+      }); ask.disabled = !canAskSpecialist() || typeof onAskSpecialist !== "function" || captured.saving;
+      const chosen = all.find(row => row.id === captured.selected && row.id !== "none");
+      const manual = action("手动调整命名配置", () => {
+        if (picker !== captured || current().view !== captured.view || captured.saving || !chosen) return;
+        const kind = captured.kind; close(false); onManage(kind, { id: chosen.id, revision: chosen.revision });
+      }); manual.disabled = !chosen || captured.saving;
+      if (captured.kind === "ai" && now.native_agent === "codex" && now.local_configuration) {
+        const tune = action(now.local_configuration.scope === "home" ? "调整新对话" : "调整本对话", () => {
+          const next = current(), local = next.local_configuration;
+          if (picker !== captured || next.view !== captured.view || next.busy || !local || !(local.available || local.pending)) return;
+          captured.localEditor = { target: { workspace_id: local.workspace_id, chat_id: local.chat_id, draft_id: local.draft_id }, value: { ...(local.pending || { model_id: local.profile.model_id, reasoning_effort: local.profile.reasoning_effort }) }, error: "" };
+          renderPicker();
+        }); tune.disabled = captured.saving || now.busy || !(now.local_configuration.available || now.local_configuration.pending) || typeof onLocalConfiguration !== "function";
+        extra.append(tune);
+        if (now.local_configuration.reason) more.append(node("p", "profile-note", now.local_configuration.reason));
+      }
+      extra.append(ask, manual); more.append(extra, node("p", "profile-note", "手动调整会修改这份共享命名配置。")); panel.append(more);
+      root.replaceChildren(panel);
+    }
+    function renderLocalConfiguration(captured) {
+      const local = captured.localEditor, now = current(), scope = now.local_configuration;
+      const sameTarget = () => picker === captured && current().local_configuration?.workspace_id === local.target.workspace_id && current().local_configuration?.chat_id === local.target.chat_id && current().local_configuration?.draft_id === local.target.draft_id;
+      const home = scope?.scope === "home";
+      const pending = !!scope?.pending, value = { agent_instance_id: "local/codex", ...(scope?.pending || local.value) };
+      const panel = node("div", "profile-picker-panel"), head = node("header", "profile-picker-header");
+      const title = node("h2", "", home ? "调整新对话" : "调整本对话"); title.id = "profile-picker-title";
+      head.append(title, action("关闭", close)); panel.append(head, node("p", "profile-note", home ? "保存在这份草稿中，发送时使用；不修改命名配置。" : "只修改这段对话的下一轮；不修改命名配置。"));
+      const grid = node("div", "profile-editor-grid");
+      const models = [["", "沿用原生当前设置"], ...modelChoices("codex").filter(row => nativeModel({ agent_instance_id: "local/codex", model_id: row.id })).map(row => [row.id, modelLabel(row)])];
+      if (value.model_id && !models.some(row => row[0] === value.model_id)) models.push([value.model_id, "原模型（目录待核对）", true]);
+      grid.append(selectField("大模型", models, value.model_id, id => { if (captured.saving || pending) return; local.value = { model_id: id, reasoning_effort: null }; renderPicker(); }));
+      const strength = [["", "沿用原生当前强度"], ...effortOptions(nativeModel(value)).map(id => [id, id])];
+      if (value.reasoning_effort && !strength.some(row => row[0] === value.reasoning_effort)) strength.push([value.reasoning_effort, value.reasoning_effort + "（待核对）", true]);
+      grid.append(selectField("强度", strength, value.reasoning_effort || "", id => { if (captured.saving || pending) return; local.value.reasoning_effort = id || null; renderPicker(); }));
+      for (const control of grid.querySelectorAll("select")) { aiControl(control); control.disabled = captured.saving || pending; }
+      panel.append(grid);
+      if (pending) panel.append(node("p", "profile-note", "上次保存结果待核对；重试沿用原参数与请求编号。"));
+      if (local.error) { const note = node("p", "profile-error", local.error); note.setAttribute("role", "alert"); panel.append(note); }
+      const actions = node("div", "profile-actions"), back = action("返回配置列表", () => { if (!captured.saving) { captured.localEditor = null; captured.view = current().view; renderPicker(); } });
+      const save = aiControl(action(captured.saving ? "正在保存…" : pending ? "重试原保存" : home ? "保存新对话设置" : "保存本对话", async () => {
+        const before = current(); if (!sameTarget() || captured.saving || before.busy || typeof onLocalConfiguration !== "function") return;
+        if (!!before.local_configuration?.pending !== pending || !pending && before.view !== captured.view) { local.error = "当前选择已变化，请重新打开核对。"; renderPicker(); return; }
+        captured.saving = true; local.error = ""; renderPicker();
+        try {
+          const accepted = await onLocalConfiguration({ ...local.value }, pending ? before.view : captured.view, pending);
+          if (!sameTarget()) return;
+          if (accepted === true) close(false);
+          else local.error = "当前对话或选择已变化，请重新打开核对。";
+        } catch (error) { if (sameTarget()) local.error = readable(error, "保存结果待核对；原参数保留，没有自动重试。"); }
+        finally { if (picker === captured) { captured.saving = false; renderPicker(); } }
+      }, "rbw-button rbw-primary"));
+      save.disabled = captured.saving || now.busy || !sameTarget() || !(scope?.pending || scope?.available && now.view === captured.view && nativeSupported(value));
+      back.disabled = captured.saving; actions.append(back, save); panel.append(actions); root.replaceChildren(panel);
     }
     function nativeChoices(captured) {
       if (captured.kind !== "ai" || current().existing !== false || typeof onChooseNative !== "function") return [];
@@ -372,29 +436,28 @@
       return (data?.ai_profiles || []).filter(row => row.native_available === true && ["codex", "pi", "hermes", "claude"].includes(agents.backendOfInstance(row.agent_instance_id)) && available.has(agents.backendOfInstance(row.agent_instance_id)));
     }
     async function applyNative(captured, agent, saved = null) {
-      if (picker !== captured || captured.saving || captured.nativeAttempted || current().busy || current().view !== captured.view || !nativeChoices(captured).some(row => row.agent === agent)) return;
+      if (picker !== captured || captured.saving || current().busy || current().view !== captured.view || !nativeChoices(captured).some(row => row.agent === agent)) return;
       const scope = String(getWorkspace() || "");
       if (!scope) return;
       const selected = saved === null ? null : profile(saved, false), profileCurrent = () => selected === null || nativeSavedChoices(captured).some(row => JSON.stringify(profile(row, false)) === JSON.stringify(selected));
       if (!profileCurrent()) return;
       const sameView = () => picker === captured && current().view === captured.view && current().existing === false && String(getWorkspace() || "") === scope;
       const isCurrent = () => sameView() && nativeChoices(captured).some(row => row.agent === agent) && profileCurrent();
-      const changedNotice = "原生入口或所选配置已变化，没有继续应用或发送。已创建的会话会保留在列表，请先核对。";
-      captured.saving = captured.nativeAttempted = true; captured.error = ""; renderPicker();
+      const changedNotice = "原生入口或所选配置已变化，请重新选择。";
+      captured.saving = true; captured.error = ""; renderPicker();
       try {
         const ok = await onChooseNative(agent, captured.view, isCurrent, selected);
         if (!isCurrent()) { if (sameView()) captured.error = changedNotice; return; }
         if (ok === true) close(false);
-        else captured.error = "新建结果待核对，请到设置的 Agent 会话查看；这里没有重复创建或发送。";
+        else captured.error = "所选配置尚未采用，请重新选择。";
       } catch (error) {
-        if (error?.nativeCreationUnsent === true) captured.nativeAttempted = false;
-        if (sameView()) captured.error = isCurrent() ? readable(error, "新建结果待核对，请到设置的 Agent 会话查看；这里没有重复创建或发送。") : changedNotice;
+        if (sameView()) captured.error = isCurrent() ? readable(error, "所选配置尚未采用，请重新选择。") : changedNotice;
       } finally { captured.saving = false; if (picker === captured) renderPicker(); }
     }
     async function applyPicker(captured, newChat = false) {
       if (picker !== captured || current().busy || captured.saving) return;
       captured.saving = true; captured.error = ""; renderPicker();
-      try { const chosen = captured.kind === "memory" ? captured.selected === "none" ? "none" : getMemory(captured.selected) : get(captured.selected); if (!chosen) throw new Error("这份配置已变化，请重新读取。"); const ok = await onChoose(captured.kind, chosen, captured.view, { newChat }); if (picker !== captured) return; if (ok === false) { captured.error = "没有完成选择，原配置和草稿保留。"; return; } close(); }
+      try { const chosen = captured.kind === "memory" ? captured.selected === "none" ? "none" : getMemory(captured.selected) : get(captured.selected); if (!chosen) throw new Error("这份配置已变化，请重新读取。"); const ok = await onChoose(captured.kind, chosen, captured.view, { newChat, compatibility: captured.kind === "ai" }); if (picker !== captured) return; if (ok === false) { captured.error = "没有完成选择，原配置和草稿保留。"; return; } close(); }
       catch (error) { if (picker === captured) captured.error = readable(error, "没有完成选择，原配置和草稿保留。"); }
       finally { captured.saving = false; if (picker === captured) renderPicker(); }
     }
@@ -421,16 +484,20 @@
     const nativeConnectionKey = row => `${row.agent}:${row.chat_id}:${row.epoch}`;
     function nativeConnectionRows(value, scope) {
       const exact = (row, keys) => row && typeof row === "object" && !Array.isArray(row) && Object.keys(row).length === keys.length && keys.every(key => Object.hasOwn(row, key));
-      if (!exact(value, ["workspace_id", "connections"]) || value.workspace_id !== scope || !Array.isArray(value.connections) || value.connections.length > 5) throw Error("原生连接列表身份或格式不完整，请重新读取。");
-      const seen = new Set(), counts = { codex: 0, pi: 0, hermes: 0, claude: 0 };
-      return value.connections.map(row => {
-        if (!exact(row, ["agent", "chat_id", "title", "epoch"]) || typeof row.agent !== "string" || !Object.hasOwn(counts, row.agent)
-            || nativeSource(row.agent)?.enabled !== true || typeof row.chat_id !== "string" || row.chat_id.length !== 36 || !uuid.test(row.chat_id)
+      const names = ["codex", "pi", "hermes", "claude", "dsh"];
+      if (!exact(value, ["workspace_id", "connections", "agents"]) || value.workspace_id !== scope || !Array.isArray(value.connections) || value.connections.length > 6
+          || !exact(value.agents, names) || names.some(agent => !["observed", "unverified", "disabled"].includes(value.agents[agent]))) throw Error("原生连接列表身份或格式不完整，请重新读取。");
+      const seen = new Set(), counts = { codex: 0, pi: 0, hermes: 0, claude: 0, dsh: 0 };
+      const rows = value.connections.map(row => {
+        if (!exact(row, ["agent", "chat_id", "title", "epoch"]) || typeof row.agent !== "string" || !Object.hasOwn(counts, row.agent) || value.agents[row.agent] !== "observed"
+            || row.agent !== "dsh" && nativeSource(row.agent)?.enabled !== true || typeof row.chat_id !== "string" || row.chat_id.length !== 36 || !uuid.test(row.chat_id)
             || typeof row.epoch !== "string" || row.epoch.length !== 32 || !/^[a-f0-9]{32}$/.test(row.epoch)
             || typeof row.title !== "string" || !row.title.trim() || Array.from(row.title).length > 80 || /[\x00-\x1f\x7f\ud800-\udfff]/u.test(row.title)
             || seen.has(row.agent + ":" + row.chat_id) || ++counts[row.agent] > (row.agent === "codex" ? 2 : 1)) throw Error("原生连接列表身份或格式不完整，请重新读取。");
         seen.add(row.agent + ":" + row.chat_id); return { agent: row.agent, chat_id: row.chat_id, title: row.title, epoch: row.epoch };
       });
+      // DSH is a guide-only observation; it must not become an editable AI profile.
+      return rows.filter(row => row.agent !== "dsh");
     }
     function currentNativeRefresh(version, scope, host) {
       return sameWorkspace(scope) && nativeRefresh.version === version && manager === host && managerKind === "ai" && host?.isConnected !== false && nativeRefresh.open;
@@ -443,7 +510,8 @@
         const value = await api("/api/management/native-model-connections");
         if (!currentNativeRefresh(version, scope, host)) return;
         nativeRefresh.rows = nativeConnectionRows(value, scope); nativeRefresh.loaded = true;
-        nativeRefresh.notice = nativeRefresh.rows.length ? "请选择一段本次读到的连接，再更新模型目录。" : "本次没有读到可用连接；请先在原生对话连接，或稍后重新读取。";
+        const incomplete = Object.values(value.agents).includes("unverified");
+        nativeRefresh.notice = nativeRefresh.rows.length ? (incomplete ? "部分连接未核实；可选择已读到的连接。" : "请选择一段本次读到的连接，再更新模型目录。") : (incomplete ? "部分连接未核实，请稍后重新读取。" : "本次没有读到可用连接；请先在原生对话连接，或稍后重新读取。");
       } catch (error) {
         if (currentNativeRefresh(version, scope, host)) nativeRefresh.error = readable(error, "原生连接列表暂不可读；没有打开或创建会话。");
       } finally { if (currentNativeRefresh(version, scope, host)) { nativeRefresh.listing = false; renderManager(); } }
@@ -825,7 +893,7 @@
         if (!row.available) card.append(node("p", "profile-note", row.reason || "当前不可用；配置和草稿仍保留。"));
         const actions = humanControl(node("div", "profile-actions")); actions.append(action("编辑记忆配置", () => openMemoryEditor(row))); card.append(actions);
         const details = node("details", "profile-identifiers"); details.append(humanControl(node("summary", "", "更多")));
-        const secondary = humanControl(node("div", "profile-actions")); secondary.append(action("复制为新空库", () => openMemoryEditor(row, true))); details.append(secondary); card.append(details); cards.append(card);
+        const secondary = humanControl(node("div", "profile-actions")); secondary.append(action("复制为新空库", () => openMemoryEditor(row, true)), specialistAction("memory", row)); details.append(secondary); card.append(details); cards.append(card);
       }
       manager.append(cards);
     }
@@ -876,13 +944,29 @@
               node("p", "profile-note", `分析来源：Claude · ${report.analysis.source.model} · 无工具文字分析`));
           }
         }
-        const secondary = humanControl(node("div", "profile-actions")); const copyButton = action("从此配置开始新建配置", () => openEditor(row, true)); copyButton.disabled = !!pendingCreation || creationInvalid || creationBusy; secondary.append(copyButton);
+        const secondary = humanControl(node("div", "profile-actions")); const copyButton = action("从此配置开始新建配置", () => openEditor(row, true)); copyButton.disabled = !!pendingCreation || creationInvalid || creationBusy; secondary.append(copyButton, specialistAction("ai", row));
         details.append(secondary); card.append(details); cards.append(card);
       }
       if (!data) cards.append(aiControl(node("p", "profile-note", "正在读取已保存配置…")));
       else if (!data.ai_profiles.length) cards.append(aiControl(node("p", "profile-note", "还没有 AI 配置。接入可用 Agent 后，可以新建配置；已有聊天和草稿仍保留。")));
       manager.append(cards); if (editor?.kind === "ai") manager.append(editorPanel());
       if (nativeBackends.length) manager.append(nativeRefreshPanel());
+    }
+    function specialistAction(kind, row) {
+      const control = action("请专员调整", () => {
+        if (!canAskSpecialist()) return;
+        onAskSpecialist?.({ kind, profile: { id: row.id, revision: row.revision } });
+      }); control.disabled = !canAskSpecialist() || typeof onAskSpecialist !== "function"; return control;
+    }
+    function editNamed(kind, id, revision) {
+      syncWorkspace();
+      const row = kind === "memory" ? getMemory(id) : get(id);
+      if (!row || row.id === "none" || row.revision !== revision) throw Error("这份配置已变化，请刷新配置后再打开。");
+      if (editor && (editor.kind !== kind || editor.original?.id !== id || editor.original?.revision !== revision || editor.copy))
+        throw Error("请先保存或取消当前编辑，再打开另一份配置。");
+      if (editor) { renderManager(); manager?.querySelector("input")?.focus(); return true; }
+      if (kind === "memory") { openMemoryEditor(row); return editor?.original?.id === id; }
+      return openEditor(row);
     }
     function setInventory() { renderManager(); }
     function newFor(value) { if (!openEditor()) return; editor.value = { ...editor.value, ...value, device_id: "local", reasoning_effort: null }; renderManager(); }
@@ -892,11 +976,10 @@
       if (event.key === "Escape") { event.preventDefault(); close(); }
       if (event.key === "Tab") { const controls = [...root.querySelectorAll("button")].filter(control => !control.disabled); if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus(); } else if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus(); } }
     });
-    return { load, loadFresh, get, getMemory, open, close, renderManagement, setInventory, newFor, catalog: () => data, selectChanged: () => { if (picker) renderPicker(); renderManager(); } };
+    return { load, loadFresh, get, getMemory, open, close, renderManagement, setInventory, newFor, editNamed, catalog: () => data, selectChanged: () => { if (picker) renderPicker(); renderManager(); } };
   }
-  // One compact nameplate for all Agents. It only presents supplied metadata;
-  // activating it opens a guide, never changes configuration or performs I/O.
-  function renderStatus(root, { agent, device, model, effort, memory, status, observed, language = "zh-CN", onGuide = null } = {}) {
+  // One read-only nameplate for all Agents, using supplied metadata only.
+  function renderStatus(root, { agent, device, model, effort, memory, status, observed, language = "zh-CN" } = {}) {
     if (!root) return;
     const english = language === "en", text = (zh, en) => english ? en : zh;
     const value = v => typeof v === "string" && v.trim() ? v.trim().replace(/\s+/g, " ") : null;
@@ -910,7 +993,6 @@
       value(memory) && text("记忆：", "Memory: ") + value(memory),
       text("状态：", "Status: ") + (value(status) || text("待核对", "Unverified")),
       value(observed) && text("原生读回：", "Native report: ") + value(observed)].filter(Boolean).join("\n");
-    root._rabbitStatusOnGuide = typeof onGuide === "function" ? onGuide : null;
     const stamp = JSON.stringify([language, label, title]);
     if (root._rabbitStatusStamp === stamp) return;
     root._rabbitStatusStamp = stamp;
@@ -920,15 +1002,10 @@
     root.setAttribute("lang", language);
     let plate = root._rabbitNameplate;
     if (!plate || plate.parentNode !== root) {
-      plate = document.createElement("button"); plate.type = "button"; plate.className = "profile-nameplate";
+      plate = document.createElement("span"); plate.className = "profile-nameplate";
       plate.setAttribute("data-control-interface", "ai");
-      plate.addEventListener("click", event => {
-        if (!root._rabbitStatusOnGuide) return; // The host may delegate guide navigation.
-        event.preventDefault?.(); event.stopPropagation?.(); root._rabbitStatusOnGuide();
-      });
       root._rabbitNameplate = plate; root.replaceChildren(plate);
     }
-    plate.setAttribute("aria-label", text("切换大模型指南", "Open model-switching guide"));
     plate.setAttribute("title", title); plate.textContent = label;
   }
   // The backend owns a managed next-turn selection. This small state machine
@@ -1014,5 +1091,5 @@
       catalogStarted: () => { if (managed() && ready()) catalogKey = key(); }
     });
   }
-  window.RabbitProfiles = { create, profile, memoryProfile, memoryProgramLabel, nativeMemorySource, memoryRecall, memoryInfo, snapshot, sameSnapshot, selection, catalog, renderStatus, createNativeSelection, createNativeMemorySelection };
+  window.RabbitProfiles = { create, profile, memoryProfile, memoryProgramLabel, nativeMemorySource, memoryRecall, memoryInfo, snapshot, sameSnapshot, selection, catalog, nativeCapabilities, renderStatus, createNativeSelection, createNativeMemorySelection };
 })();

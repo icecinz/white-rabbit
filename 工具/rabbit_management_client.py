@@ -26,6 +26,7 @@ SETTINGS_OPTIONS = {'theme': ('dark', 'light', 'system'), 'density': ('comfortab
 HERMES_EFFORT_SOURCE = 'Hermes 原生 parse_reasoning_effort；原生请求强度，提供商可能映射。'
 NATIVE_CONNECTIONS = '/api/management/native-model-connections'
 WORK_STATUS = '/api/management/work-status'
+MANAGEMENT = '/api/management'
 EXTERNAL_WORK_STATUS = '/api/management/external-work'
 EXTERNAL_WORK_RESPONSE_BYTES = 4 * 1024 * 1024
 _EXTERNAL_REASONS = frozenset(('auth_required', 'connection_unavailable', 'http_error',
@@ -36,9 +37,14 @@ NATIVE_CATALOG = '/api/management/native-model-catalog'
 SPECIALIST_MODEL_CATALOG = '/api/management/specialist-model-catalog'
 NATIVE_MODEL_PREPARATION = '/api/management/native-model-preparation'
 _NATIVE_LIMITS = {'codex': 2, 'pi': 1, 'hermes': 1, 'claude': 1}
+_NATIVE_CATALOG_LIMITS = {**_NATIVE_LIMITS, 'dsh': 1}
 NATIVE_CHAT_NAMES = '/api/management/native-chat-names'
 NATIVE_CHAT_AGENTS = ('codex', 'pi', 'hermes', 'claude', 'dsh')
 NATIVE_CHAT_CONFIGURATION = '/api/management/native-chat-configuration'
+NATIVE_CHAT_LOCAL_CONFIGURATION = '/api/management/native-chat-local-configuration'
+HOME_CONFIGURATION = '/api/management/draft-configuration'
+HOME_CONFIGURATION_REASONS = frozenset(('target_changed', 'configuration_changed',
+    'handoff_started', 'storage_unavailable', 'unsupported', 'cancelled'))
 NATIVE_CHAT_MEMORY_CONFIGURATION = '/api/management/native-chat-memory-configuration'
 CHAT_CONFIGURATION_SUFFIX = '/profile-selection?metadata_only=1'
 NATIVE_TASKS = '/api/management/native-tasks'
@@ -65,12 +71,14 @@ MEMORY_OPERATIONS = '/api/management/memory-profile-operations'
 MEMORY_CREATIONS = '/api/management/memory-profile-creations/'
 MEMORY_CONNECTIONS = '/api/management/memory-connections/'
 MEMORY_DOCUMENTS = '/api/management/memory-documents'
+NATIVE_MEMORY = '/api/management/native-memory'
 MEMORY_FIELDS = ('name', 'description', 'habits', 'program', 'connection_id', 'mode')
 MEMORY_MUTABLE = ('name', 'description', 'habits', 'mode')
 MEMORY_COLUMNS = ('id', 'revision') + MEMORY_FIELDS + ('bank_ref', 'locked_mode', 'source_kind')
 MEMORY_RESPONSE_BYTES = 3 * 1024 * 1024  # 128 profiles, each up to 4000 Unicode code points.
 MARKDOWN_CHATS = '/api/markdown-chats'
 CONVERSATIONS = '/api/management/conversations'
+CHAT_MATERIALS = '/api/management/chat-materials'
 MARKDOWN_RESPONSE_BYTES = 3 * 1024 * 1024
 _MARKDOWN_STATES = ('prepared', 'publishing', 'verified', 'conflict', 'blocked')
 _MARKDOWN_UPDATE_ERRORS = frozenset((
@@ -325,6 +333,20 @@ def _markdown_move_target(value):
             or re.fullmatch(r'[0-9a-f]{64}', value['source_sha256']) is None):
         raise ValueError('Invalid Markdown move digest.')
     return target
+
+
+def validate_chat_materials_source(chat_id, kind='chat', agent=None):
+    """Keep common and native application identities explicit and separate."""
+    _uuid(chat_id)
+    if type(kind) is not str or kind not in ('chat', 'native'):
+        raise ValueError('Invalid material source kind.')
+    if kind == 'chat':
+        if agent is not None:
+            raise ValueError('Common material source cannot name a native Agent.')
+        return {'chat_id': chat_id}
+    if type(agent) is not str or agent not in NATIVE_CHAT_AGENTS:
+        raise ValueError('Native material source requires its exact Agent.')
+    return {'chat_id': chat_id, 'kind': kind, 'agent': agent}
 
 
 def validate_conversations_query(query='', agent='all', offset=0, limit=20):
@@ -951,6 +973,158 @@ def _native_chat_configuration(value, workspace, agent, chat_id):
     return value
 
 
+def validate_native_chat_local_configuration(value):
+    """Explicit complete parameters for one already selected Codex target."""
+    fields = ('agent', 'chat_id', 'expected_revision', 'base_profile_id',
+              'base_profile_revision', 'parameters', 'operation_id')
+    _fields(value, fields)
+    if value['agent'] != 'codex' or type(value['agent']) is not str:
+        raise ValueError('Local parameters are available for Codex only.')
+    for key in ('chat_id', 'base_profile_id', 'operation_id'):
+        _uuid(value[key])
+    _revision(value['expected_revision'])
+    _revision(value['base_profile_revision'])
+    if value['expected_revision'] == MAX_REVISION:
+        raise ValueError('Native selection reached its revision limit.')
+    parameters = value['parameters']
+    _fields(parameters, ('model_id', 'reasoning_effort'))
+    _profile_fields(dict(name='本对话设置', agent_instance_id='local/codex',
+                         device_id='local', **parameters))
+    return {**value, 'parameters': dict(parameters)}
+
+
+def native_local_configuration_sha256(value):
+    """Exact seven-field POST intent; workspace and CSRF are not its content."""
+    intent = validate_native_chat_local_configuration(value)
+    raw = json.dumps(intent, ensure_ascii=False, sort_keys=True,
+                     separators=(',', ':'), allow_nan=False).encode('utf-8')
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _native_chat_local_configuration(value, workspace, intent):
+    _fields(value, ('workspace_id', 'agent', 'chat_id', 'selection', 'profile',
+                    'profile_current', 'scope', 'inference_performed',
+                    'connection_checked', 'operation'))
+    if value['scope'] != 'native_local_configuration':
+        raise ValueError('Invalid local configuration scope.')
+    # Reuse the current selection codec. Its immutable profile shape is also
+    # used by native request freezing; this receipt does not assert execution.
+    current = {key: item for key, item in value.items() if key != 'operation'}
+    current['scope'] = 'native_next_turn_selection'
+    _native_chat_configuration(current, workspace, intent['agent'], intent['chat_id'])
+    operation = value['operation']
+    _fields(operation, ('id', 'request_sha256', 'replayed'))
+    if (operation['id'] != intent['operation_id']
+            or operation['request_sha256'] != native_local_configuration_sha256(intent)
+            or type(operation['replayed']) is not bool
+            or value['profile_current'] is not True
+            or value['selection']['revision'] != intent['expected_revision'] + 1):
+        raise ValueError('Invalid local configuration acknowledgement.')
+    profile = value['profile']
+    if (profile is None or profile['name'] != '本对话设置'
+            or profile['model_id'] != intent['parameters']['model_id']
+            or profile['reasoning_effort'] != intent['parameters']['reasoning_effort']
+            or profile['id'] == intent['base_profile_id']
+                and profile['revision'] != intent['base_profile_revision'] + 1):
+        raise ValueError('Local configuration parameters do not match the request.')
+    return value
+
+
+def _home_client_id(value):
+    if type(value) is not str or not value.startswith('specialist/ui/'):
+        raise ValueError('Invalid home configuration client.')
+    _uuid(value.removeprefix('specialist/ui/'))
+    return value
+
+
+def _home_parameters(value):
+    _fields(value, ('model_id', 'reasoning_effort'))
+    _profile_fields(dict(name='本对话设置', agent_instance_id='local/codex',
+                         device_id='local', **value))
+    return dict(value)
+
+
+def home_configuration_sha256(parameters):
+    raw = json.dumps(_home_parameters(parameters), ensure_ascii=False, sort_keys=True,
+                     separators=(',', ':'), allow_nan=False).encode('utf-8')
+    return hashlib.sha256(raw).hexdigest()
+
+
+def validate_home_configuration(value):
+    """Agent-side suggestions only; browser ownership never enters this API."""
+    if type(value) is not dict or value.get('operation') not in ('inspect', 'propose'):
+        raise ValueError('Invalid home configuration operation.')
+    required = ('operation', 'draft_id', 'configuration_revision')
+    if value['operation'] == 'propose':
+        required += ('client_id', 'parameters')
+    _fields(value, required, ('client_id',) if value['operation'] == 'inspect' else ())
+    _uuid(value['draft_id'])
+    _revision(value['configuration_revision'])
+    if 'client_id' in value:
+        _home_client_id(value['client_id'])
+    result = dict(value)
+    if value['operation'] == 'propose':
+        result['parameters'] = _home_parameters(value['parameters'])
+    return result
+
+
+def _home_configuration(value, workspace, intent):
+    _fields(value, ('workspace_id', 'scope', 'client_id', 'draft_id',
+        'configuration_revision', 'base_profile', 'parameters', 'proposal',
+        'state', 'application', 'native_turn'))
+    if (value['workspace_id'] != workspace or value['scope'] != 'home_configuration_proposal'
+            or value['draft_id'] != intent['draft_id']
+            or value['configuration_revision'] != intent['configuration_revision']
+            or 'client_id' in intent and value['client_id'] != intent['client_id']):
+        raise ValueError('Invalid home configuration target.')
+    _revision(value['configuration_revision'])
+    _home_client_id(value['client_id'])
+    base = value['base_profile']
+    _fields(base, ('id', 'revision') + PROFILE_FIELDS)
+    _uuid(base['id']); _revision(base['revision'])
+    fields = _profile_fields({key:base[key] for key in PROFILE_FIELDS})
+    if (base['id'] == value['draft_id'] or base['agent_instance_id'] != 'local/codex'
+            or any(base[key] != fields[key] for key in PROFILE_FIELDS)):
+        raise ValueError('Invalid home configuration base.')
+    _home_parameters(value['parameters'])
+    proposal = value['proposal']
+    if proposal is not None:
+        _fields(proposal, ('parameters', 'sha256'))
+        _home_parameters(proposal['parameters'])
+        if (proposal['sha256'] != home_configuration_sha256(proposal['parameters'])
+                or intent['operation'] == 'propose' and proposal['parameters'] != intent['parameters']):
+            raise ValueError('Invalid home configuration proposal.')
+    turn = value['native_turn']
+    if turn is not None:
+        _fields(turn, ('thread_id', 'turn_id'))
+        for token in turn.values():
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}', _text(token, 256)):
+                raise ValueError('Invalid home configuration native identity.')
+    state, application = value['state'], value['application']
+    if state == 'registered':
+        if (proposal is not None or application is not None or turn is not None
+                or intent['operation'] == 'propose'):
+            raise ValueError('Invalid unproposed home configuration.')
+    elif state == 'pending':
+        if proposal is None or application is not None or turn is None:
+            raise ValueError('Invalid pending home configuration.')
+    elif state in ('applied', 'rejected'):
+        _fields(application, ('result', 'applied_revision', 'reason'))
+        if proposal is None or application['result'] != state or turn is None:
+            raise ValueError('Invalid home configuration application.')
+        if state == 'applied':
+            _revision(application['applied_revision'])
+            if (application['applied_revision'] != value['configuration_revision'] + 1
+                    or application['reason'] is not None):
+                raise ValueError('Invalid applied home configuration.')
+        elif (application['applied_revision'] is not None
+                or application['reason'] not in HOME_CONFIGURATION_REASONS):
+            raise ValueError('Invalid rejected home configuration.')
+    else:
+        raise ValueError('Invalid home configuration state.')
+    return value
+
+
 def validate_native_chat_memory_configuration(value):
     """An ordinary native chat's additional read-only memory for its next turn."""
     if type(value) is not dict or type(value.get('operation')) is not str:
@@ -1026,7 +1200,7 @@ def validate_native_history_source(agent, session_id):
 
 
 def _native_identity(agent, chat_id, epoch):
-    if (type(agent) is not str or agent not in _NATIVE_LIMITS or type(epoch) is not str
+    if (type(agent) is not str or agent not in _NATIVE_CATALOG_LIMITS or type(epoch) is not str
             or not re.fullmatch(r'[a-f0-9]{32}', epoch)):
         raise ValueError('Invalid native connection.')
     return {'agent': agent, 'chat_id': _uuid(chat_id), 'epoch': epoch}
@@ -1349,7 +1523,8 @@ def _default(value):
 
 class ManagementClientError(RuntimeError):
     def __init__(self, code, outcome, *, current_profile=None, current_default_state=None, current_settings=None,
-                 current_chat=None, current_configuration=None, current_memory_configuration=None):
+                 current_chat=None, current_configuration=None, current_memory_configuration=None,
+                 operation_id=None):
         self.code, self.outcome = code, outcome
         self.current_profile = current_profile
         self.current_default_state = current_default_state
@@ -1357,6 +1532,7 @@ class ManagementClientError(RuntimeError):
         self.current_chat = current_chat
         self.current_configuration = current_configuration
         self.current_memory_configuration = current_memory_configuration
+        self.operation_id = operation_id
         super().__init__(code)
 
     def result(self):
@@ -1374,6 +1550,8 @@ class ManagementClientError(RuntimeError):
             value['current_configuration'] = self.current_configuration
         if self.current_memory_configuration is not None:
             value['current_memory_configuration'] = self.current_memory_configuration
+        if self.operation_id is not None:
+            value['operation_id'] = self.operation_id
         return value
 
 
@@ -1482,7 +1660,8 @@ class ManagementClient:
             headers.update({'Content-Type': 'application/json',
                 'Origin': 'http://127.0.0.1:' + str(self.port), 'X-OneAI-CSRF': csrf})
         timeout = 60 if (method == 'POST' and path == NATIVE_MODEL_PREPARATION
-            or path.split('?', 1)[0] == NATIVE_TASKS) else 10
+            or path.split('?', 1)[0] == NATIVE_TASKS) else 15 if (
+                method == 'POST' and path == HOME_CONFIGURATION and body.get('operation') == 'propose') else 10
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=timeout)
         try:
             connection.request(method, path, body=data, headers=headers)
@@ -1504,6 +1683,25 @@ class ManagementClient:
             if type(value) is not dict:
                 raise ValueError('Invalid local response.')
             if not 200 <= response.status < 300:
+                if path == HOME_CONFIGURATION:
+                    proposing = body.get('operation') == 'propose'
+                    outcome = 'unknown' if proposing else 'unavailable'
+                    if value.get('workspace_id') != self.workspace_id:
+                        raise ManagementClientError('workspace_changed', outcome)
+                    code = value.get('code')
+                    if code == 'draft_configuration_storage_unconfirmed' and response.status == 503:
+                        _fields(value, ('workspace_id', 'error', 'code'))
+                        if type(value['error']) is not str:
+                            raise ValueError('Invalid unconfirmed home configuration error.')
+                        raise ManagementClientError(code, outcome)
+                    _fields(value, ('workspace_id', 'error', 'code', 'accepted'))
+                    known = frozenset('draft_configuration_' + suffix for suffix in (
+                        'invalid', 'conflict', 'owner_mismatch', 'not_found',
+                        'active_turn_unconfirmed', 'corrupt', 'capacity'))
+                    if (type(value['error']) is not str or code not in known
+                            or value['accepted'] is not False or not 400 <= response.status < 500):
+                        raise ValueError('Invalid home configuration error.')
+                    raise ManagementClientError(code, 'rejected' if proposing else 'unavailable')
                 if path == EXTERNAL_WORK_STATUS:
                     outcome = 'unknown' if mutation else 'unavailable'
                     if 'workspace_id' in value and value['workspace_id'] != self.workspace_id:
@@ -1554,7 +1752,7 @@ class ManagementClient:
                     known = ('native_model_catalog_busy', 'native_model_catalog_changed', 'native_model_catalog_unavailable')
                     raise ManagementClientError(code if type(code) is str and code in known
                         else 'native_model_catalog_unavailable', 'unknown')
-                if path.split('?', 1)[0] == NATIVE_CHAT_CONFIGURATION:
+                if path.split('?', 1)[0] in (NATIVE_CHAT_CONFIGURATION, NATIVE_CHAT_LOCAL_CONFIGURATION):
                     outcome = 'unknown' if mutation else 'unavailable'
                     if value.get('workspace_id') != self.workspace_id:
                         raise ManagementClientError('workspace_changed', outcome)
@@ -1600,6 +1798,8 @@ class ManagementClient:
                         raise ValueError('Invalid native history error.')
                     known = ('native_history_invalid', 'native_history_busy', 'native_history_disabled',
                              'native_history_unavailable')
+                    if path == CODEX_HISTORY_PREVIEW:
+                        known += ('native_history_codex_dynamic_tools', 'native_history_codex_index_branch')
                     code = value['code']
                     if type(code) is not str or code not in known:
                         code = 'native_history_unavailable'
@@ -1778,6 +1978,61 @@ class ManagementClient:
         self._binding()
         return self._inventory(self._request('GET', '/api/management/ai-profiles'))
 
+    def management_read(self, refresh=False):
+        """Read the same bounded connector metadata as the management page."""
+        if type(refresh) is not bool:
+            raise ManagementClientError('invalid_management_arguments', 'not_sent')
+        self._binding()
+        value = self._request('GET', MANAGEMENT + ('?refresh=1' if refresh else ''))
+        if value.get('workspace_id') != self.workspace_id:
+            raise ManagementClientError('workspace_changed', 'unavailable')
+        try:
+            _fields(value, ('workspace_id', 'device', 'agents', 'models', 'notice', 'native_profile_capabilities'))
+            _text(value['notice'], 1000, empty=True)
+            device = value['device']
+            _fields(device, ('id', 'name', 'platform', 'online'))
+            if device['id'] != 'local' or type(device['online']) is not bool:
+                raise ValueError('Invalid local device.')
+            _text(device['name'], 120); _text(device['platform'], 80)
+            if type(value['agents']) is not list or len(value['agents']) > 5:
+                raise ValueError('Invalid registered agents.')
+            seen = set()
+            for row in value['agents']:
+                _fields(row, ('id', 'name', 'device_id', 'available', 'model', 'provider',
+                              'reason', 'connection', 'connection_label', 'check_scope'))
+                if (row['id'] not in NATIVE_CHAT_AGENTS or row['id'] in seen or row['device_id'] != 'local'
+                        or type(row['available']) is not bool or row['connection'] not in ('online', 'local', 'unknown')):
+                    raise ValueError('Invalid registered agent.')
+                seen.add(row['id'])
+                for key in ('name', 'reason', 'connection_label', 'check_scope'):
+                    _text(row[key], 512, empty=True)
+                for key in ('model', 'provider'):
+                    if row[key] is not None: _text(row[key], 512, empty=True)
+            if type(value['models']) is not list or len(value['models']) > 1000:
+                raise ValueError('Invalid registered models.')
+            seen = set()
+            for row in value['models']:
+                _fields(row, ('id', 'model', 'provider', 'name', 'agent_id', 'available', 'status', 'source',
+                    'is_default', 'detail', 'image_input', 'image_input_source', 'file_output', 'file_output_source',
+                    'supported_efforts', 'default_effort', 'explicit_effort_supported', 'effort_source'))
+                if (row['agent_id'] not in NATIVE_CHAT_AGENTS or type(row['id']) is not str
+                        or not row['id'].startswith('local/' + row['agent_id'] + '/') or row['id'] in seen
+                        or any(type(row[key]) is not bool for key in ('available', 'is_default', 'explicit_effort_supported'))
+                        or any(row[key] not in ('supported', 'unsupported', 'unknown') for key in ('image_input', 'file_output'))
+                        or type(row['supported_efforts']) is not list or len(row['supported_efforts']) > len(EFFORTS)
+                        or any(level not in EFFORTS for level in row['supported_efforts'])
+                        or row['default_effort'] is not None and row['default_effort'] not in EFFORTS):
+                    raise ValueError('Invalid registered model.')
+                seen.add(row['id'])
+                for key in ('id', 'model', 'provider', 'name', 'status', 'source', 'detail',
+                            'image_input_source', 'file_output_source', 'effort_source'):
+                    if row[key] is not None: _text(row[key], 1024, empty=True)
+            _native_capabilities(value['native_profile_capabilities'])
+        except (ValueError, TypeError, UnicodeError, AttributeError, KeyError):
+            raise ManagementClientError('invalid_management_inventory', 'unavailable') from None
+        return dict(value, scope='registered_connections', refresh_requested=refresh,
+                    inference_performed=False)
+
     def conversations_list(self, query='', agent='all', offset=0, limit=20):
         try:
             fields = validate_conversations_query(query, agent, offset, limit)
@@ -1795,6 +2050,99 @@ class ManagementClient:
             return _conversation_directory(value, self.workspace_id, fields)
         except (ValueError, TypeError, UnicodeError, KeyError, AttributeError):
             raise ManagementClientError('invalid_conversation_directory_response', 'unavailable') from None
+
+    def chat_materials(self, chat_id, kind='chat', agent=None):
+        """One known chat's recorded material metadata, never native history."""
+        try:
+            query = validate_chat_materials_source(chat_id, kind, agent)
+        except (ValueError, TypeError, AttributeError):
+            raise ManagementClientError('invalid_chat_materials_arguments', 'not_sent') from None
+        self._binding()
+        value = self._request('GET', CHAT_MATERIALS + '?' + urlencode(query))
+        if value.get('workspace_id') != self.workspace_id:
+            raise ManagementClientError('workspace_changed', 'unavailable')
+        try:
+            native = kind == 'native'
+            _fields(value, ('workspace_id', 'chat_id', 'scope', 'source_revision',
+                            'content_verification', 'complete', 'records') +
+                           (('agent', 'coverage', 'unrecorded_inputs_possible', 'unverified_client_ids') if native else ('file_revision',)))
+            if (value['chat_id'] != chat_id or value['scope'] != ('native_chat_materials' if native else 'common_chat_materials')
+                    or value['content_verification'] != 'not_performed' or type(value['complete']) is not bool):
+                raise ValueError('Invalid chat material scope.')
+            if native:
+                if (value['agent'] != agent or value['coverage'] != 'recorded_inputs_only'
+                        or value['unrecorded_inputs_possible'] is not True
+                        or type(value['source_revision']) is not str
+                        or re.fullmatch(r'[a-f0-9]{64}', value['source_revision']) is None):
+                    raise ValueError('Invalid native material coverage.')
+                unverified = value['unverified_client_ids']
+                if (type(unverified) is not list or len(unverified) > 512
+                        or any(type(token) is not str or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}', token) is None for token in unverified)
+                        or len(set(unverified)) != len(unverified)):
+                    raise ValueError('Invalid unverified material requests.')
+            else:
+                unverified = []
+                for key in ('source_revision', 'file_revision'):
+                    if type(value[key]) is not str or re.fullmatch(r'(?:0|[1-9][0-9]{0,19})', value[key]) is None:
+                        raise ValueError('Invalid chat material revision.')
+            if type(value['records']) is not list or len(value['records']) > 512:
+                raise ValueError('Invalid chat material records.')
+            messages, count, unavailable_count = set(), 0, 0
+            for row in value['records']:
+                if native:
+                    _fields(row, ('client_id', 'request_sha256', 'status', 'materials', 'unavailable'))
+                    identity = row['client_id']
+                    if (type(identity) is not str or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}', identity) is None
+                            or row['status'] not in ('submitted_unknown', 'accepted', 'rejected', 'completed', 'failed', 'interrupted')
+                            or type(row['request_sha256']) is not str or re.fullmatch(r'[a-f0-9]{64}', row['request_sha256']) is None):
+                        raise ValueError('Invalid native material record.')
+                else:
+                    _fields(row, ('message_id', 'role', 'run_id', 'materials', 'unavailable'))
+                    _uuid(row['message_id'])
+                    identity = row['message_id']
+                    if row['role'] not in ('user', 'assistant'):
+                        raise ValueError('Invalid chat material role.')
+                    if row['run_id'] is not None: _uuid(row['run_id'])
+                if identity in messages or identity in unverified:
+                    raise ValueError('Duplicate material record identity.')
+                messages.add(identity)
+                if (type(row['materials']) is not list or type(row['unavailable']) is not list
+                        or not row['materials'] and not row['unavailable']):
+                    raise ValueError('Invalid chat material entries.')
+                unavailable_count += len(row['unavailable'])
+                count += len(row['materials']) + len(row['unavailable'])
+                if count > 2048: raise ValueError('Too many chat material entries.')
+                refs = set()
+                for item in row['materials']:
+                    _fields(item, ('ref', 'name', 'size_bytes', 'origin'))
+                    ref = item['ref']
+                    # Reuse the existing native sender's closed reference codec.
+                    validate_native_task(dict(operation='send', agent='codex', chat_id=chat_id,
+                        client_id=chat_id, text='metadata', material_refs=[ref]))
+                    ref_key = json.dumps(ref, sort_keys=True, separators=(',', ':'))
+                    if ref_key in refs: raise ValueError('Duplicate chat material reference.')
+                    refs.add(ref_key)
+                    _text(item['name'], 255)
+                    if (type(item['size_bytes']) is not int or not 0 <= item['size_bytes'] <= MAX_REVISION
+                            or item['origin'] not in (('input',) if native else ('attachment',) if ref['kind'] == 'image' else ('input', 'output'))):
+                        raise ValueError('Invalid chat material metadata.')
+                for item in row['unavailable']:
+                    _fields(item, ('kind', 'id', 'origin', 'reason'))
+                    kind = item['kind']
+                    if (kind not in ('text', 'image')
+                            or item['origin'] not in (('input',) if native else ('attachment',) if kind == 'image' else ('input', 'output'))
+                            or item['reason'] not in (('metadata_unavailable', 'metadata_changed', 'source_incomplete') if native
+                                else ('metadata_unavailable', 'metadata_changed', 'not_saved', 'source_incomplete'))):
+                        raise ValueError('Invalid unavailable material.')
+                    if item['id'] is not None:
+                        if kind == 'text': _uuid(item['id'])
+                        elif type(item['id']) is not str or re.fullmatch(r'img_[a-f0-9]{32}', item['id']) is None:
+                            raise ValueError('Invalid unavailable image.')
+            if value['complete'] != (unavailable_count == 0 and not unverified):
+                raise ValueError('Contradictory chat material completeness.')
+        except (ValueError, TypeError, UnicodeError, AttributeError, KeyError):
+            raise ManagementClientError('invalid_chat_materials_response', 'unavailable') from None
+        return value
 
     def markdown_chats_list(self):
         self._binding()
@@ -2075,7 +2423,8 @@ class ManagementClient:
                         or row['pending_requests'] is not None and (type(row['pending_requests']) is not int
                             or not 0 <= row['pending_requests'] <= 129)):
                     raise ValueError('Invalid work observation.')
-                if (not row['complete'] and row['status'] != 'unknown'
+                if (not by_agent[agent]['complete'] and by_agent[agent]['reason'] != 'partial_observation'
+                        or not row['complete'] and row['status'] != 'unknown'
                         or not row['complete'] and by_agent[agent]['complete']
                         or row['status'] == 'idle' and (row['connection_state'] != 'ready'
                             or row['epoch'] is None or row['native_session_id'] is None
@@ -2084,6 +2433,11 @@ class ManagementClient:
                     raise ValueError('Unproven work state.')
             if value['complete'] != all(row['complete'] for row in agents):
                 raise ValueError('Invalid observation completeness.')
+            for agent, summary in by_agent.items():
+                if (summary['reason'] == 'partial_observation'
+                        and (summary['complete'] or not any(
+                            row['agent'] == agent and not row['complete'] for row in works))):
+                    raise ValueError('Invalid partial observation.')
         except (ValueError, TypeError, UnicodeError, KeyError, AttributeError):
             raise ManagementClientError('invalid_work_status_response', 'unavailable') from None
         return value
@@ -2094,15 +2448,22 @@ class ManagementClient:
         if value.get('workspace_id') != self.workspace_id:
             raise ManagementClientError('workspace_changed', 'unavailable')
         try:
-            _fields(value, ('workspace_id', 'connections'))
-            rows, seen, counts = value['connections'], set(), dict.fromkeys(_NATIVE_LIMITS, 0)
-            if type(rows) is not list or len(rows) > 4: raise ValueError('Invalid connection list.')
+            _fields(value, ('workspace_id', 'connections', 'agents'))
+            agents = value['agents']
+            _fields(agents, tuple(_NATIVE_CATALOG_LIMITS))
+            if any(type(status) is not str or status not in ('observed', 'disabled', 'unverified')
+                   for status in agents.values()):
+                raise ValueError('Invalid agent observation.')
+            rows, seen, counts = value['connections'], set(), dict.fromkeys(_NATIVE_CATALOG_LIMITS, 0)
+            if type(rows) is not list or len(rows) > sum(_NATIVE_CATALOG_LIMITS.values()):
+                raise ValueError('Invalid connection list.')
             for row in rows:
                 _fields(row, ('agent', 'chat_id', 'title', 'epoch'))
                 _native_identity(row['agent'], row['chat_id'], row['epoch']); _text(row['title'], 80)
                 key = row['agent'], row['chat_id']; counts[row['agent']] += 1
                 if (key in seen or row['title'] != row['title'].strip()
-                        or counts[row['agent']] > _NATIVE_LIMITS[row['agent']]): raise ValueError('Invalid connections.')
+                        or counts[row['agent']] > _NATIVE_CATALOG_LIMITS[row['agent']]
+                        or agents[row['agent']] != 'observed'): raise ValueError('Invalid connections.')
                 seen.add(key)
         except (ValueError, TypeError, UnicodeError, AttributeError):
             raise ManagementClientError('invalid_native_model_response', 'unavailable') from None
@@ -2182,6 +2543,65 @@ class ManagementClient:
         # This exact POST acknowledgement records the accepted selection only.
         # A later GET is mutable current state, never a receipt for a lost POST.
         return dict(value, ok=True, outcome='acknowledged', automatically_retried=False) if mutation else value
+
+    def save_native_chat_local_configuration(self, agent, chat_id, expected_revision,
+            base_profile_id, base_profile_revision, parameters, operation_id):
+        """Save and select one target's parameters; never retry a lost POST.
+
+        A caller may explicitly submit this exact intent and operation ID again
+        to reconcile the server's latest durable operation. No mutable GET is
+        accepted as a receipt, and no named profile is created by this client.
+        """
+        try:
+            intent = validate_native_chat_local_configuration(dict(agent=agent, chat_id=chat_id,
+                expected_revision=expected_revision, base_profile_id=base_profile_id,
+                base_profile_revision=base_profile_revision, parameters=parameters,
+                operation_id=operation_id))
+        except (ValueError, TypeError, UnicodeError, AttributeError):
+            raise ManagementClientError('invalid_native_local_configuration_arguments', 'not_sent') from None
+        try:
+            token = self._binding()
+        except ManagementClientError as error:
+            raise ManagementClientError(error.code, 'not_sent', operation_id=operation_id) from None
+        try:
+            value = self._request('POST', NATIVE_CHAT_LOCAL_CONFIGURATION, body=intent, csrf=token)
+        except ManagementClientError as error:
+            raise ManagementClientError(error.code, error.outcome,
+                current_configuration=error.current_configuration, operation_id=operation_id) from None
+        if value.get('workspace_id') != self.workspace_id:
+            raise ManagementClientError('workspace_changed', 'unknown', operation_id=operation_id)
+        try:
+            _native_chat_local_configuration(value, self.workspace_id, intent)
+        except (ValueError, TypeError, UnicodeError, AttributeError):
+            raise ManagementClientError('invalid_write_response', 'unknown', operation_id=operation_id) from None
+        return dict(value, ok=True, outcome='acknowledged', automatically_retried=False)
+
+    def home_configuration(self, operation, draft_id, configuration_revision, *, client_id=None,
+            parameters=None):
+        try:
+            raw = dict(operation=operation, draft_id=draft_id, configuration_revision=configuration_revision)
+            if client_id is not None:
+                raw['client_id'] = client_id
+            if parameters is not None:
+                raw['parameters'] = parameters
+            intent = validate_home_configuration(raw)
+        except (ValueError, TypeError, UnicodeError, AttributeError):
+            raise ManagementClientError('invalid_home_configuration_arguments', 'not_sent') from None
+        proposing = operation == 'propose'
+        try:
+            token = self._binding()
+        except ManagementClientError as error:
+            raise ManagementClientError(error.code, 'not_sent' if proposing else 'unavailable') from None
+        value = self._request('POST', HOME_CONFIGURATION, body=intent, csrf=token)
+        outcome = 'unknown' if proposing else 'unavailable'
+        if value.get('workspace_id') != self.workspace_id:
+            raise ManagementClientError('workspace_changed', outcome)
+        try:
+            _home_configuration(value, self.workspace_id, intent)
+        except (ValueError, TypeError, UnicodeError, AttributeError):
+            raise ManagementClientError('invalid_home_configuration_response', outcome) from None
+        return dict(value, ok=value['state'] != 'rejected', outcome=value['state'],
+                    automatically_retried=False) if proposing else value
 
     def native_chat_memory_configuration(self, operation, agent, chat_id, **selection):
         try:
@@ -2553,6 +2973,48 @@ class ManagementClient:
                 seen.add(profile['id'])
         except (ValueError, TypeError, UnicodeError, AttributeError):
             raise ManagementClientError('invalid_memory_management_response', 'unavailable') from None
+        return value
+
+    def native_memory(self, operation='list', source_ref=None):
+        """Observe fixed native metadata or explicitly link its read-only source."""
+        writing = operation == 'attach'
+        if (operation not in ('list', 'attach') or
+                (writing and (type(source_ref) is not str or re.fullmatch(r'nativesrc_[a-f0-9]{32}', source_ref) is None))
+                or not writing and source_ref is not None):
+            raise ManagementClientError('invalid_native_memory_arguments', 'not_sent')
+        token = self._binding()
+        value = self._request('POST', NATIVE_MEMORY, body={'source_ref': source_ref}, csrf=token) if writing else self._request('GET', NATIVE_MEMORY)
+        if value.get('workspace_id') != self.workspace_id:
+            raise ManagementClientError('workspace_changed', 'unknown' if writing else 'unavailable')
+        try:
+            common = ('workspace_id', 'scope', 'inference_performed', 'memory_read')
+            _fields(value, common + (('source_ref', 'profile', 'created') if writing else ('native_memory_sources',)))
+            if value['inference_performed'] is not False or value['memory_read'] is not False:
+                raise ValueError('Unexpected native memory activity.')
+            if writing:
+                profile = _memory_profile(value['profile'])
+                if (value['scope'] != 'native_memory_binding' or value['source_ref'] != source_ref
+                        or type(value['created']) is not bool or profile['locked_mode'] is not True
+                        or profile['source_kind'] != 'hermes_hindsight_readonly'
+                        or profile['program'] != 'hindsight' or profile['connection_id'] != 'local/hindsight'
+                        or profile['mode'] != 'read_only'):
+                    raise ValueError('Invalid native memory binding.')
+            else:
+                rows = value['native_memory_sources']
+                if value['scope'] != 'native_memory_metadata' or type(rows) is not list or len(rows) > 1:
+                    raise ValueError('Invalid native memory sources.')
+                for row in rows:
+                    _fields(row, ('id', 'name', 'source_ref', 'available', 'reason', 'linked_profile_id'))
+                    if row['id'] != 'hermes_hindsight_current' or type(row['available']) is not bool:
+                        raise ValueError('Invalid native memory source.')
+                    _text(row['name'], 80); _text(row['reason'], 512, empty=True)
+                    if row['source_ref'] is not None and (type(row['source_ref']) is not str or re.fullmatch(r'nativesrc_[a-f0-9]{32}', row['source_ref']) is None):
+                        raise ValueError('Invalid native memory source identity.')
+                    if row['linked_profile_id'] is not None: _uuid(row['linked_profile_id'])
+                    if row['source_ref'] is None and (row['available'] or row['linked_profile_id'] is not None):
+                        raise ValueError('Unverified native memory source identity.')
+        except (ValueError, TypeError, UnicodeError, KeyError, AttributeError):
+            raise ManagementClientError('invalid_native_memory_response', 'unknown' if writing else 'unavailable') from None
         return value
 
     def memory_document(self, operation, profile_id, name, *, text=None, expected_sha256=None):

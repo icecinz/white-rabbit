@@ -4,6 +4,12 @@
 
 White Rabbit aims to make several agents feel reachable from one place while keeping their identities, data, and capabilities understandable. Three requirements shape the design: preserve native work, let AI handle supported management, and make the parts independently reusable.
 
+## Warm paper, ink purple, moss green
+
+The current visual layer uses a warm paper background, clean panels, ink purple, and restrained moss-green accents. Headings use a system Song/serif face; body text and controls use a system sans-serif, while code stays monospaced. Fine borders, small corners, little shadow, and a bundled static paper texture keep the content readable. Dark mode uses a separate warm-gray/soft-purple palette.
+
+Theme tokens live in `原型/rabbit_ui/assets/soft_paper.css`. This style layer leaves the navigation, composing logic, and existing purple/neutral capability boundaries intact; green accents do not grant an AI operation or imply a healthy state.
+
 ## One entry, native work
 
 An agent is the program that executes a task; a model is one of the services it calls. An AI profile saves a supported combination, while a memory profile independently chooses extra long-term material. These are separate choices, not a promise that every model works with every agent.
@@ -11,6 +17,8 @@ An agent is the program that executes a task; a model is one of the services it 
 The entry should help people find the work already in progress, inspect its status, and continue the same native session where supported. History reading, saved-session recovery, and controlling a live external executor are tracked separately. The current host primarily controls its own connections; external desktop-work attachment remains incomplete.
 
 The device goal extends that entry to the places where work happens. Current phone access opens the same online Mac through IM.codes. Cross-computer task routing and wake-up remain later work, not hidden capabilities of the current UI.
+
+Codex, Hermes, and Pi now retain one composing path from home draft through native continuation. Codex ↔ Hermes handoff uses selected, fixed text/file/image snapshots, prepares without executing, and creates the target only on Send. Codex local tuning and specialist suggestions also wait for the originating page's versioned save receipt before claiming application. Claude/DSH composer consolidation remains later work for this release. These workflow changes do not establish a new physical-phone acceptance result.
 
 ## Fewer controls, a readable settings catalog
 

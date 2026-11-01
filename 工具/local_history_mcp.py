@@ -557,19 +557,20 @@ def save_native_attachments(connection, agent, session_id, message_id, role, whe
              phase[:40] if isinstance(phase, str) else "", len(attachments), unavailable, described["omitted_image_blocks"]))
 
 
-def ingest_codex(connection, codex_root, stats):
+def ingest_codex(connection, codex_root, stats, *, snapshot=None):
     root = Path(codex_root).expanduser()
     for subdirectory, archived in (("sessions", False), ("archived_sessions", True)):
         directory = root / subdirectory
-        if not directory.exists():
+        if snapshot is None and not directory.exists():
             continue
-        for path in sorted(directory.rglob("*.jsonl")):
-            if path.is_symlink() or not path.is_file():
+        paths = sorted(directory.rglob("*.jsonl")) if snapshot is None else [p for p in snapshot.files if directory in p.parents]
+        for path in paths:
+            if snapshot is None and (path.is_symlink() or not path.is_file()):
                 continue
             stats["codex_files"] += 1
             try:
                 session_id = None
-                with path.open("rb") as handle:
+                with (path.open("rb") if snapshot is None else snapshot.open(path)) as handle:
                     line_number = 0
                     while True:
                         line = handle.readline(MAX_SOURCE_LINE_BYTES + 1)
@@ -712,13 +713,13 @@ def ingest_hermes(connection, hermes_db, stats):
             source.close()
 
 
-def ingest_codex_titles(connection, codex_root, stats):
+def ingest_codex_titles(connection, codex_root, stats, *, snapshot=None):
     """Optional display metadata, not auth or message history; append-last title wins."""
     path = Path(codex_root).expanduser() / "session_index.jsonl"
-    if not path.is_file() or path.is_symlink():
+    if (snapshot is None and (not path.is_file() or path.is_symlink())) or (snapshot is not None and path not in snapshot.entries):
         return
     try:
-        with path.open("rb") as handle:
+        with (path.open("rb") if snapshot is None else snapshot.open(path)) as handle:
             while True:
                 line = handle.readline(MAX_REQUEST_BYTES + 1)
                 if not line:
@@ -751,7 +752,7 @@ def assert_local_index(path):
     return index
 
 
-def _refresh_index_unlocked(index, codex_root, hermes_db, additional_sources=()):
+def _refresh_index_unlocked(index, codex_root, hermes_db, additional_sources=(), *, codex_snapshot=None):
     index = assert_local_index(index)
     index.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     stats = {key: 0 for key in ("codex_files", "codex_title_records", "codex_messages_added", "hermes_messages_added",
@@ -771,9 +772,9 @@ def _refresh_index_unlocked(index, codex_root, hermes_db, additional_sources=())
     try:
         connection = sqlite3.connect(name)
         create_schema(connection)
-        ingest_codex(connection, codex_root, stats)
+        ingest_codex(connection, codex_root, stats, snapshot=codex_snapshot)
         ingest_hermes(connection, hermes_db, stats)
-        ingest_codex_titles(connection, codex_root, stats)
+        ingest_codex_titles(connection, codex_root, stats, snapshot=codex_snapshot)
         for ingest in additional_sources:
             ingest(connection, stats)
         if stats["source_errors"]:
@@ -821,8 +822,8 @@ def with_index_lock(index, callback):
         os.close(fd)
 
 
-def refresh_index(index, codex_root, hermes_db, *, additional_sources=()):
-    return with_index_lock(index, lambda path: _refresh_index_unlocked(path, codex_root, hermes_db, additional_sources))
+def refresh_index(index, codex_root, hermes_db, *, additional_sources=(), codex_snapshot=None):
+    return with_index_lock(index, lambda path: _refresh_index_unlocked(path, codex_root, hermes_db, additional_sources, codex_snapshot=codex_snapshot))
 
 
 def refresh_if_stale(index, codex_root, hermes_db, seconds):

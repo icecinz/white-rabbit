@@ -47,6 +47,11 @@
 /* The specialist's reference sheet mounts beside the conversation. */
 .rbs-guide-external,.rbs-guide-external *{box-sizing:border-box}.rbs-guide-external{margin:0;padding:24px 20px;color:var(--ink);font-family:inherit;font-size:13px;line-height:1.75;min-width:0;max-width:100%;overflow-wrap:anywhere}.rbs-guide-external .rbs-guide-sheet{padding:0;border:0;border-radius:0;background:transparent}.rbs-guide-external .rbs-guide-actions{gap:6px 12px}.rbs-guide-external .rbs-guide-label{flex-basis:100%}.rbs-guide-external .rbs-guide-list{grid-template-columns:minmax(70px,auto) minmax(0,1fr);gap:5px 10px}.rbs-guide-external .rbs-guide-table{width:100%;table-layout:fixed}.rbs-guide-external .rbs-guide-table th,.rbs-guide-external .rbs-guide-table td{padding-right:8px}
 .rbs-composer-external>.rbs-input:focus,.rbs-composer-external>.rbs-input:focus-visible{outline:none;box-shadow:none}
+.rbs-command-target{display:flex;align-items:center;gap:5px 8px;flex-wrap:wrap;min-width:0;font-size:11px;line-height:1.6;color:var(--ai-control)}
+.rbs-command-target-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rbs-command-target .rbs-command-target-action{padding:2px 4px;border:0;background:transparent;font-size:11px;flex:none}
+.rbs-command-target-conflict{flex-basis:100%;padding:9px 0;border-top:1px solid var(--border)}
+.rbs-command-target-conflict>p{margin:0 0 7px}.rbs-command-target-conflict>.rbs-button{font-size:11px;padding:4px 7px;margin-right:5px}
 @media(max-width:500px){.rbs-guide-external{padding:18px 14px}}
 
 /* Keep the transcript quiet; details and maintenance open only on request. */
@@ -60,6 +65,10 @@
 .rbs-submit{min-width:60px}.rbs-submit[data-composer-action="stop"]{border-color:var(--ai-control);background:var(--ai-control-soft);color:var(--ai-control)}
 .rbs-guide-check{position:relative;width:100%;margin-bottom:16px;border-color:var(--ai-control);color:var(--ai-control);background:var(--ai-control-soft);font-weight:550}
 .rbs-guide-check:not(:disabled):hover{background:var(--paper)}
-.rbs-guide-check::after{content:attr(data-tooltip);position:absolute;top:calc(100% + 6px);left:0;z-index:20;box-sizing:border-box;width:340px;max-width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--paper);color:var(--ai-control);box-shadow:0 6px 20px #0002;font-size:13px;font-weight:400;line-height:1.65;text-align:left;white-space:normal;pointer-events:none;visibility:hidden}
-.rbs-guide-check:hover::after,.rbs-guide-check:focus-visible::after{visibility:visible}
+.rbs-guide-model-check{position:relative;padding:4px 8px;border-color:var(--ai-control);color:var(--ai-control);background:var(--ai-control-soft)}
+.rbs-guide-model-check:not(:disabled):hover{background:var(--paper)}
+.rbs-guide-actions+.rbs-guide-source{color:var(--ai-control);margin:8px 0 0}
+.rbs-guide-check::after,.rbs-guide-model-check::after{content:attr(data-tooltip);position:absolute;top:calc(100% + 6px);left:0;z-index:20;box-sizing:border-box;width:340px;max-width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--paper);color:var(--ai-control);box-shadow:0 6px 20px #0002;font-size:13px;font-weight:400;line-height:1.65;text-align:left;white-space:normal;pointer-events:none;visibility:hidden}
+.rbs-guide-model-check::after{width:min(260px,70vw);max-width:none}
+.rbs-guide-check:hover::after,.rbs-guide-check:focus-visible::after,.rbs-guide-model-check:hover::after,.rbs-guide-model-check:focus-visible::after{visibility:visible}
 .rbs-operation-records>summary:focus-visible,.rbs-chat-more>summary:focus-visible{outline:2px solid var(--ai-control);outline-offset:3px}

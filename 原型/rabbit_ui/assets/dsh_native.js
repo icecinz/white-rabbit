@@ -441,6 +441,41 @@
       if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedMemory = previous.memory; draftRevision = previous.revision; throw Error("浏览器不能保存DSH原生草稿；原内容保留，尚未发送。"); }
       if (hasMemory) memoryVersion++; render(); return true;
     }
+    // Add a quote to this draft only. Existing text files remain attached;
+    // DSH does not accept new image or file references through this interface.
+    function captureQuoteDraft() {
+      if (!workspace || workspace !== String(getWorkspace() || "") || !enabled || destroyed || !visible || root.hidden || document.hidden
+          || !readable || !snapshot || snapshot.workspace_id !== workspace || snapshot.chat_id !== chatId
+          || !["not_open", "closed", "ready"].includes(snapshot.connection?.state) || snapshot.connection.problem
+          || snapshot.disconnect_unconfirmed === true || snapshot.activity?.state !== "idle" || ready() && !nativeId(snapshot.binding?.sessionId)
+          || filePicker?.busy() || reading || writing || posting || openingForSend || autoOpenBlocked || pending || storageInvalid
+          || unsettled() || pendingRequest() || Object.values(answerJournal).includes("submitted_unknown")
+          || !memorySelectionReady() || input.value !== draft) return null;
+      const refs = materialRefs(draftMaterials);
+      const stamp = canonical([workspace, chatId, generation, viewVersion, draftRevision, draft, refs, selectedMemory,
+        memoryVersion, memorySelection?.checkpoint(), snapshot.epoch, snapshot.binding,
+        snapshot.connection.state, snapshot.activity, snapshot.operation, snapshot.operations, snapshot.pending]);
+      return { stamp, text: draft, material_refs: refs };
+    }
+    function applyQuoteDraft(expected, value, material_refs, material_preview) {
+      try {
+        const current = captureQuoteDraft();
+        if (!current || !exact(expected, ["stamp", "text", "material_refs"]) || canonical(expected) !== canonical(current)
+            || !text(value) || !value.startsWith(current.text) || Array.from(value).length > 30000
+            || typeof TextEncoder !== "function" || new TextEncoder().encode(value).length > 128 * 1024) return false;
+        const refs = materialRefs(material_refs);
+        const before = current.material_refs;
+        if (refs.length < before.length || canonical(refs.slice(0, before.length)) !== canonical(before)
+            || refs.slice(before.length).some(ref => ref.kind !== "text")
+            || refs.length > before.length && (!materialsEnabled || !materialDraft || !nativeMaterials || material_preview === undefined)
+            || new TextEncoder().encode(encode({ ...sendBody("00000000-0000-4000-8000-000000000000", value, selectedMemory), ...(refs.length ? { material_refs: refs } : {}) })).length > 256 * 1024) return false;
+        if (refs.length > before.length) nativeMaterials.seed(refs, material_preview);
+        const previous = { draft, input: input.value, refs: draftMaterials, revision: draftRevision };
+        draft = value; input.value = value; draftMaterials = refs; draftRevision++;
+        if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; draftRevision = previous.revision; render(); return false; }
+        render(); return true;
+      } catch (_) { return false; }
+    }
     function answerable(record) {
       const payload = record?.request?.payload;
       return ready() && record?.state === "pending" && record.answerable === true && record.epoch === snapshot.epoch && payload?.sessionId === snapshot.binding?.sessionId && ["approval/requested", "question/requested"].includes(payload?.type);
@@ -714,7 +749,7 @@
       if (destroyed || !workspace || workspace !== String(getWorkspace() || "")) return null;
       return { agent_instance_id: "local/dsh", profile_id: null, profile_name: null, profile_revision: null, model_id: null, reasoning_effort: null };
     }
-    render(); return { show, showSettings, hide, destroy, refresh, setLanguage, setEnabled, setMaterialInputs, getConfigurationContext, putDraft, getTextSnapshot };
+    render(); return { sendDraft: send, show, showSettings, hide, destroy, refresh, setLanguage, setEnabled, setMaterialInputs, getConfigurationContext, putDraft, captureQuoteDraft, applyQuoteDraft, getTextSnapshot };
   }
   window.RabbitDshNative = Object.freeze({ create });
 })();

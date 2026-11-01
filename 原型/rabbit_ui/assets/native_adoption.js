@@ -32,8 +32,8 @@
   }
   function create({ root, api, getSource, onAdopted, onError = () => {} }) {
     if (!root || [api, getSource, onAdopted, onError].some(value => typeof value !== "function")) throw Error("原会话恢复入口尚未就绪。");
-    let generation = 0, captured = null, preview = null, reading = false, writing = false, notice = "";
-    let panel, title, directory, status, previewButton, adoptButton, closeButton, returnFocus, shell, wasInert;
+    let generation = 0, captured = null, preview = null, reading = false, writing = false, notice = "", blocked = false;
+    let panel, title, directory, status, originalLink, previewButton, adoptButton, closeButton, returnFocus, shell, wasInert;
     root.hidden = true;
     const button = (label, action) => { const value = node("button", "file-task-action", label); value.type = "button"; value.addEventListener("click", action); return value; };
     function current(stamp = generation) {
@@ -44,8 +44,8 @@
     function report(message) { onError(Error(message)); }
     function dismiss(restoreFocus) {
       const restore = restoreFocus && current() && root.contains?.(document.activeElement);
-      generation++; root.hidden = true; root.replaceChildren(); captured = preview = null; reading = false; notice = "";
-      panel = title = directory = status = previewButton = adoptButton = closeButton = null;
+      generation++; root.hidden = true; root.replaceChildren(); captured = preview = null; reading = false; notice = ""; blocked = false;
+      panel = title = directory = status = originalLink = previewButton = adoptButton = closeButton = null;
       if (shell) shell.inert = wasInert;
       shell = null;
       const previous = returnFocus; returnFocus = null;
@@ -64,6 +64,9 @@
       status.textContent = !same ? "历史、工作区或草稿已变化。请关闭后重新打开，原记录和草稿保留。"
         : notice || (reading ? "正在读取原会话的身份与工作目录，没有连接或发送。" : "核对目录后可登记并带入本轮草稿；进入原生对话后，第一次发送时自动连接。");
       status.setAttribute("role", notice || !same ? "alert" : "status");
+      const href = same && blocked && !reading && !writing ? window.RabbitAgents?.originalAppUrl?.(captured.agent, captured.session_id) : null;
+      originalLink.hidden = !href;
+      originalLink.href = href || "";
     }
     function makePanel() {
       panel = node("div", "file-task-preview");
@@ -84,24 +87,40 @@
       const actions = node("div", "file-task-actions"); previewButton = button("重新核对", check); adoptButton = button("登记原会话", adopt); actions.append(previewButton, adoptButton);
       previewButton.dataset.controlInterface = adoptButton.dataset.controlInterface = "ai";
       status = node("p", "file-task-note"); status.setAttribute("aria-live", "polite");
-      panel.append(header, title, node("p", "file-task-note", "原工作目录"), directory, boundary, ownership, actions, status);
+      originalLink = node("a", "text-button original-app-link", "在 Codex 打开原对话");
+      originalLink.dataset.controlInterface = "human";
+      originalLink.hidden = true;
+      originalLink.addEventListener("click", event => {
+        if (!current() || !blocked || reading || writing || window.RabbitAgents?.originalAppUrl?.(captured.agent, captured.session_id) !== originalLink.href) {
+          event.preventDefault(); render();
+        }
+      });
+      panel.append(header, title, node("p", "file-task-note", "原工作目录"), directory, boundary, ownership, actions, status, originalLink);
       root.replaceChildren(panel); render();
     }
     async function check() {
       if (!current() || reading || writing) return false;
-      const stamp = generation; preview = null; notice = ""; reading = true; render();
+      const stamp = generation; preview = null; notice = ""; blocked = false; reading = true; render();
       try {
         const value = await api(`/api/native-history/${captured.agent}/preview`, { method: "POST", body: JSON.stringify({ session_id: captured.session_id }) }, false);
         if (!current(stamp)) return false;
         preview = previewValue(value, captured); return true;
-      } catch (_) {
-        if (current(stamp)) { notice = "暂时无法核对原会话。原记录和草稿保留，可重新核对。"; report(notice); }
+      } catch (error) {
+        if (current(stamp)) {
+          blocked = captured.agent === "codex" && ["native_history_codex_dynamic_tools", "native_history_codex_index_branch"].includes(error?.code);
+          notice = captured.agent === "codex" && error?.code === "native_history_codex_dynamic_tools"
+            ? "这段原对话包含动态工具信息，暂不能完整恢复；可回原应用继续，或关闭后在更多里选文字副本接续。"
+            : captured.agent === "codex" && error?.code === "native_history_codex_index_branch"
+            ? "历史索引显示这是归档或分支，当前不能直接恢复；可更新历史后核对，或回原应用继续。"
+            : "暂时无法核对原会话。原记录和草稿保留，可重新核对。";
+          report(notice);
+        }
         return false;
       } finally { if (stamp === generation) { reading = false; render(); } }
     }
     async function adopt() {
       if (!current() || !preview || reading || writing) return false;
-      const stamp = generation, original = preview; writing = true; notice = ""; render();
+      const stamp = generation, original = preview; writing = true; notice = ""; blocked = false; render();
       let accepted = false;
       try {
         const value = await api(`/api/native-history/${captured.agent}/adopt`, { method: "POST", body: JSON.stringify({ session_id: captured.session_id, revision: original.revision }) }, false);
@@ -136,7 +155,7 @@
       if (root.hidden) return;
       if (event.key === "Escape") { event.preventDefault(); close(); return; }
       if (event.key !== "Tab" || !panel) return;
-      const choices = [...panel.querySelectorAll("button")].filter(value => !value.disabled && !value.hidden);
+      const choices = [...panel.querySelectorAll("button"), ...(originalLink && !originalLink.hidden ? [originalLink] : [])].filter(value => !value.disabled && !value.hidden);
       const first = choices[0], last = choices[choices.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }

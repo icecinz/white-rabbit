@@ -11,6 +11,15 @@ When asked to “install and configure White Rabbit,” the goal is **a repeatab
 - Locate one agent the person already uses, including its exact CLI, runtime, and data home. Reuse it; do not require all five agents.
 - Use the original agent's login-status interface without displaying keys or whole credential files. Ask only for the missing choice when environments, accounts, or data homes are ambiguous.
 
+Choose an absolute path to a stable Python 3.11 or newer. Do not use a temporary virtual environment that may be deleted: the login service will keep using this interpreter. Check candidates with `command -v python3.13`, `command -v python3.12`, `command -v python3.11`, and `command -v python3`, then run `"/absolute/path/to/python" --version` for each. The system `python3` can be older than 3.11; install a supported version if needed. Record the path and set it for this terminal (replace the example):
+
+```sh
+RABBIT_PYTHON="/absolute/path/to/python3.11"
+"$RABBIT_PYTHON" --version
+```
+
+Image support also needs Pillow in the service Python. Preflight reports `service_python.path` without executing it to check its version or image dependencies. Run that interpreter with `--version`, then `-c "from PIL import Image; print(Image.__version__)"` to verify both. If missing, install Pillow in the selected stable environment and check again; report image support as unavailable if only setting up text.
+
 ## 2. Choose one real route
 
 Use [native-agent setup](native-agents.md) to confirm this agent's paths and version requirements. Preserve its effective provider, model, tools, and permissions. For example, keep Claude Code's existing CC Switch configuration instead of replacing it with another default.
@@ -22,25 +31,31 @@ If login, API access, or dependencies are missing, name the missing requirement 
 From the repository root, run the read-only preflight first:
 
 ```sh
-python3 -B 原型/install_local.py check --source-dir "$PWD/原型"
+"$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型"
 ```
 
 Use [the native-connection JSON examples](native-agents.md#persistent-installation) to write verified absolute paths into `$HOME/.white-rabbit-connections.json`, outside the checkout. You prepare this file; the program does not discover the paths automatically. Do not put keys in it. Then run:
 
 ```sh
-python3 -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
-python3 -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+"$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+"$RABBIT_PYTHON" -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
 ```
 
-`check` verifies basic requirements and paths, not authentication, SDK versions, or real model replies. First installation needs at least one ordinary agent; an empty connection set or specialist alone is not configured chat.
+`check` verifies basic requirements, paths, and port 17860: `service` is `free`, `current_installation`, `other`, or `unknown`. Investigate another service or an unknown state first. This is one read-only observation; the installer still checks active work and maintenance state. It does not verify authentication, SDK versions, or real model replies. First installation needs at least one ordinary agent; an empty connection set or specialist alone is not configured chat.
 
-The installer keeps a private program copy and data under `$HOME/.imcodes/one-ai` and registers a per-user login service. The directory name does not require IM.codes. Later, double-click `打开小白兔.command` there, or run:
+The preflight's `visible_commands` can help locate commands on the current PATH. Verify each actual installation and the original agent's status; this is not a complete scan or proof that an agent works. Do not read or print credentials.
+
+The installer keeps a private program copy and data under `$HOME/.imcodes/one-ai` and registers a per-user login service. The directory name does not require IM.codes. Later, double-click `打开小白兔.command` there; no terminal variable needs to persist. Alternatively, use the absolute Python path chosen at installation (replace the example):
 
 ```sh
-python3 -B "$HOME/.imcodes/one-ai/manage.py" open
+"/absolute/path/to/python3.11" -B "$HOME/.imcodes/one-ai/manage.py" open
 ```
 
 On update, omitting `--native-config` preserves saved connections. An explicitly supplied `connections` object replaces the whole set; merge existing entries before adding another agent instead of supplying only the new one.
+
+For a data-format upgrade, make a consistent SQLite backup of the affected ledger while no work is active and retain it with the old program version. Do not copy only a running database's `.sqlite` file and omit its WAL. The installer's recovery snapshot includes the program, launch configuration, and control scripts, but no data databases. The Hermes/Pi result-retention update upgrades `hermes-native.sqlite`/`pi-native.sqlite` from v1 to v2; the old program cannot read v2 directly. `rollback` restores only the program. Before restoring a pre-upgrade ledger, preserve the current data and explain that newer records would be lost; let the user decide rather than overwriting automatically.
+
+Keep the source checkout for documentation and updates. An update retains the saved service Python even when the installer runs under another interpreter. If the saved path is unavailable, select a new stable Python 3.11+ and pass `--python "$RABBIT_PYTHON"` to both `check` and `install`; also verify its Pillow installation. Interpreter changes are never inferred automatically.
 
 Keep White Rabbit's data separate from the agent's original files and record selected environments with absolute paths. Check that the page, launcher, and data directory exist and that the opening method still works after this terminal closes.
 

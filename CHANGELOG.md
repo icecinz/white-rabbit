@@ -1,5 +1,33 @@
 # Public snapshots · 公开更新
 
+## 0.1.0-alpha.4 — 2026-11-01
+
+- Added the warm-paper, ink-purple, and moss-green visual layer with Song/serif headings, bundled static texture, and a separate dark palette; access-color semantics stay unchanged.
+- Refreshed the fictional-demo screenshots and restored its local simulated new-chat path; the preview needs no real agent or credentials.
+- Unified the Codex/Hermes/Pi composer from home draft through native conversation and refresh continuation. Pi retains a selected upload when typing continues, alongside existing draft text and files. Claude/DSH composer migration is not included.
+- Added bidirectional Codex ↔ Hermes continuation using selected text, complete registered files, original images, and fixed snapshots. Preparation does not execute; Send creates the target once, with source/return navigation and original-ID recovery for uncertain results.
+- Added Codex draft/conversation model and reasoning fine-tuning. Specialist draft suggestions complete only after the originating page's versioned save and application receipt, preserving draft material and avoiding global-default changes.
+- Save eligible Pi/Hermes complete task results after their first exact successful read, allowing later original-ID retrieval without treating saved evidence as a live connection.
+- Keep independently verified work visible when another connection of the same Agent is unknown; preserve the overall unknown status.
+- Check the Hermes source entry and the DeepSeek Harness CLI/package pairing before installation; path checks do not verify versions, credentials, or model replies.
+- Verify the running local service belongs to this installation before opening it. A different or unconfirmed workspace is left untouched.
+- Document how to retain a custom Hermes or DSH data directory in the login service.
+- Clarify persistent Python selection and login-service environment limits; provide Pi and Claude Code connection examples.
+
+### 中文
+
+- 增加暖纸、墨紫、苔绿的视觉层，采用宋体标题、随包静态纸纹与独立深色配色，原有操作颜色含义不变。
+- 更新虚构演示截图，并修复新首页的本地模拟新建路径；预览不需要真实 Agent 或凭据。
+- Codex／Hermes／Pi 从首页草稿到原生对话、刷新续聊统一输入路径；Pi 上传期间继续打字仍保留选入文件、原稿和已有材料。Claude／DSH 输入区改造不在本版范围。
+- Codex ↔ Hermes 双向接续使用选定文字、完整登记文件、原图和固定快照；准备不执行，按发送才创建目标，保留来源／返回及未知结果的原编号核对。
+- Codex 草稿／本对话支持模型与强度细调；专员草稿建议需原页面按版本保存并返回应用回执才完成，保留草稿材料，不改全局默认。
+- Pi／Hermes 的符合条件完整结果在首次按原编号成功读回后保存，之后可沿原编号取回，不把存储证据当成活连接。
+- 同一 Agent 的一个连接未知时，其他已核实的工作继续显示；整体状态仍标明未知。
+- 安装前核对 Hermes 原生入口和 DeepSeek Harness 的 CLI／包目录配对；路径检查不代表版本、认证或模型调用已通过。
+- 打开前确认本机服务属于当前安装；其他工作区或状态未知时保留原状。
+- 说明登录启动时怎样沿用 Hermes 或 DSH 的自定义资料目录。
+- 明确长期使用的 Python 选择和登录服务的环境变量限制，补充 Pi 与 Claude Code 的连接示例。
+
 ## 0.1.0-alpha.3 — 2026-10-28
 
 - Put real installation before the fictional demo; added a short root `AGENTS.md` and bilingual installation-agent checklists.

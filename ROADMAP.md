@@ -5,6 +5,7 @@ The direction is **one entry for native AI work, with devices becoming additiona
 | Track | Current foundation | Next work |
 | --- | --- | --- |
 | Existing native work | Five agent routes, saved-session recovery, status of White Rabbit-owned connections | Supported attachment to external ongoing work; do not substitute a newly started CLI for the original desktop executor |
+| Daily workflow | Unified Codex/Hermes/Pi composer; Codex local tuning; selected-material Codex ↔ Hermes continuation | Consolidate Claude/DSH composing, then extend per-conversation tuning and continuation only where supported; separately verify the updated phone workflow |
 | Work discovery | Manual HAPI Hub summaries and original-page links | Verify supported control paths separately; retain original approval and stopping behavior |
 | Specialist | Fixed native conversation, shared management interfaces, bounded task input/result paths | Reliable end-to-end results across more targets; keep connection/cache limits explicit |
 | Modules | Six installable cores, explicit inputs, shared rules | Reduce remaining host coupling when a reusable interface is clear; preserve transactions |
@@ -26,6 +27,6 @@ Windows, cloud synchronization, universal application control, and complete nati
 
 方向是**原生 AI 工作的统一入口，逐步把设备变成可以工作的出口**。先可靠连接原来就在做的工作，再扩展整理和协调；不拿另启一个 CLI 冒充接管原桌面应用。
 
-当前有五种原生通路、自有连接的工作状态、手动 HAPI 发现、固定专员、六个独立核心和明确的资料交接。接下来补外部存活工作的受支持连接、各目标的可靠交办结果、宿主装配边界和首次真实使用。Mem0 配置与真实读写、跨电脑调度及唤醒另行验证；HAPI 控制仍在其原页面。
+当前有五种原生通路、自有连接的工作状态、手动 HAPI 发现、固定专员和六个独立核心。日常主路已统一 Codex／Hermes／Pi 输入、Codex 局部细调和 Codex ↔ Hermes 选择材料接续；接着整理 Claude／DSH 输入区，再按支持范围扩展细调与接续，更新后的手机操作另行验收。外部存活工作的连接、可靠交办结果、宿主边界和首次真实安装继续打磨。Mem0 配置与真实读写、跨电脑调度及唤醒另行验证；HAPI 控制仍在其原页面。
 
 少按钮、共用接口和语义颜色贯穿开发。界面代操作、AI／混合接口、Windows、云同步与完整能力等价都没有当前版本交付承诺。

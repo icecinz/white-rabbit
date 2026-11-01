@@ -17,6 +17,8 @@ def _failure(code='native_history_unavailable', *, unknown=False):
         'native_history_busy': '原生入口正在处理操作，请稍后重新核对。',
         'native_history_disabled': '这台入口尚未启用此原生会话恢复。',
         'native_history_unavailable': '原会话来源、目录、待恢复任务或占用情况暂时无法核验；没有连接或发送。',
+        'native_history_codex_dynamic_tools': '原记录包含动态工具信息，暂不能保证完整接入；没有连接或发送。',
+        'native_history_codex_index_branch': '索引显示这是归档或分支对话；索引可能过期，暂不能接入。没有连接或发送。',
     }
     return SpecialistHTTPError(400 if code == 'native_history_invalid' else 409,
         code, messages[code], accepted=None if unknown else False, result_unknown=unknown)
@@ -48,9 +50,15 @@ class NativeHistoryService:
                 if action == 'preview':
                     return self.adoption.preview(fields['session_id'])
                 return self.adoption.adopt(fields['session_id'], fields['revision'])
-            except (ValueError, OSError, sqlite3.Error):
+            except (ValueError, OSError, sqlite3.Error) as error:
                 # A registration can publish across databases before a lost
                 # response. This boundary never retries or infers success.
+                if (action == 'preview' and getattr(getattr(self.adoption, 'catalogue', None), 'agent', None) == 'codex'
+                        and type(error) is getattr(type(self.adoption), '_preview_error_type', None)):
+                    code = {'header_dynamic_tools': 'native_history_codex_dynamic_tools',
+                            'index_branch': 'native_history_codex_index_branch'}.get(str(error))
+                    if code is not None:
+                        raise _failure(code) from None
                 raise _failure(unknown=action == 'adopt') from None
 
     def verify_open(self, identity):

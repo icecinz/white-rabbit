@@ -11,6 +11,15 @@
 - 找到用户平时使用的一个 Agent 及准确的 CLI、运行环境和资料目录。先复用它，不要求装齐 Codex、Hermes、Pi、Claude Code、DSH。
 - 用原 Agent 的登录状态入口核对认证，不打印密钥或整份凭据文件。不清楚使用哪个环境、账号或资料目录时，只问缺少的那一项。
 
+选择一个稳定的 Python 3.11 或更新版本的绝对路径；不要选会删除的临时虚拟环境，登录服务以后仍要用它。可依次检查 `command -v python3.13`、`command -v python3.12`、`command -v python3.11` 和 `command -v python3` 返回的路径，并对候选运行 `"/绝对路径/python" --version`。系统自带的 `python3` 可能低于 3.11；没有合适版本时需先安装。记录该路径，并在本次终端中设置（替换示例路径）：
+
+```sh
+RABBIT_PYTHON="/absolute/path/to/python3.11"
+"$RABBIT_PYTHON" --version
+```
+
+图片功能还需要服务 Python 的 Pillow。预检会给出 `service_python.path`，但不会执行它检查版本或图片依赖；先以该路径运行 `--version`，再运行 `-c "from PIL import Image; print(Image.__version__)"` 核对。缺少时，在用户选定的稳定环境中安装 Pillow，再核对；只安装文字通路时可如实说明图片暂不可用。
+
 ## 2. 选一个真实通路
 
 按[原生连接](native-agents.zh-CN.md)核对这一个 Agent 所需路径及版本。保留它正在生效的模型、提供商、工具和权限；例如 Claude Code 已由 CC Switch 管理时，不把它改回另一套默认配置。
@@ -22,25 +31,31 @@
 在仓库根目录先运行只读预检：
 
 ```sh
-python3 -B 原型/install_local.py check --source-dir "$PWD/原型"
+"$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型"
 ```
 
 按[原生连接的 JSON 示例](native-agents.zh-CN.md#持久安装)把查实的绝对路径写进仓库外的 `$HOME/.white-rabbit-connections.json`；由你配置，不是程序自动扫描。JSON 不放 Key。然后运行：
 
 ```sh
-python3 -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
-python3 -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+"$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+"$RABBIT_PYTHON" -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
 ```
 
-`check` 只核对基础环境及文件路径，不证明登录、SDK 版本或真实模型回复。首次安装需至少一个普通 Agent；只有专员或空连接不能算配置完成。
+`check` 核对基础环境、路径及 17860 端口：`service` 为 `free`、`current_installation`、`other` 或 `unknown`。其他服务占用或状态未知时先核对；这只是一次只读观察，安装器仍会检查活动任务和维护状态。它不证明登录、SDK 版本或真实模型回复。首次安装需至少一个普通 Agent；只有专员或空连接不能算配置完成。
 
-安装器保留私有程序副本与数据在 `$HOME/.imcodes/one-ai`，并注册当前用户的登录启动服务；此目录名不表示需要安装 IM.codes。以后双击其中的 `打开小白兔.command`，或运行：
+预检的 `visible_commands` 可帮助定位当前 PATH 中的程序，再逐一核对实际安装位置与原 Agent 的状态；它不是完整扫描，也不代表程序已经可用。不要读取或打印凭据。
+
+安装器保留私有程序副本与数据在 `$HOME/.imcodes/one-ai`，并注册当前用户的登录启动服务；此目录名不表示需要安装 IM.codes。以后双击其中的 `打开小白兔.command` 即可，无需保留终端变量。也可以用安装时选定的 Python 绝对路径运行（替换示例路径）：
 
 ```sh
-python3 -B "$HOME/.imcodes/one-ai/manage.py" open
+"/absolute/path/to/python3.11" -B "$HOME/.imcodes/one-ai/manage.py" open
 ```
 
 已有安装更新时，省略 `--native-config` 会保留连接配置。明确传入的 `connections` 是完整替换，不是增量添加；增加 Agent 前先合并原有条目，不能只写新 Agent。
+
+涉及数据格式升级时，在没有活动任务时为要迁移的账本做 SQLite 一致备份，并与旧程序版本一起保留；不要在服务运行时只复制 `.sqlite` 文件而漏掉 WAL。安装器的恢复副本只含程序、启动配置和控制脚本，不含数据数据库。Hermes／Pi 的结果保留更新会将各自的 `hermes-native.sqlite`／`pi-native.sqlite` 从 v1 升至 v2，旧程序不能直接读取 v2。`rollback` 只恢复程序；若需恢复迁移前账本，先保留当前数据并说明会失去升级后的新记录，由用户决定，不自动覆盖。
+
+保留源码目录，供查看项目文档及以后更新。更新默认沿用已保存的服务 Python，不会因调用安装器的环境不同而更换。如果旧路径不可用，先选定新的稳定 Python 3.11+，分别在 `check` 和 `install` 中加 `--python "$RABBIT_PYTHON"` 明确更换；同时核对它的 Pillow。不要假设会自动迁移解释器。
 
 把小白兔数据与 Agent 的原始资料分开保存，使用绝对路径记录所选环境。安装后确认页面、启动文件及数据目录实际存在；退出当前终端后仍能按上述方式打开。
 

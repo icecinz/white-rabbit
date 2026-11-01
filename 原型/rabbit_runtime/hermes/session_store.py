@@ -1,13 +1,16 @@
-"""Hermes metadata ownership and conservative receipts; no transcript copy.
+"""Hermes metadata ownership, conservative receipts and explicitly read results.
 
 The file/lease discipline follows the existing Pi ledger. Hermes owns state.db
 and messages. This independent database stores only a profile/cwd anchor,
-verified native keys and application receipts. Unknown sends never auto-replay.
+verified native keys, application receipts and exact already-observed task results.
+Unknown sends never auto-replay; old completions are never reconstructed.
 """
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import errno
 import fcntl
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -22,7 +25,9 @@ from ..native_session_store import (NativeSessionStoreError, open_directory as _
 
 
 APPLICATION_ID = 0x52484E53  # RHNS; separate from shared chat and Codex ledgers.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+MAX_RESULT_BYTES = 128 * 1024
+_MAX_SAVED_BYTES = MAX_RESULT_BYTES * 6 + 4096
 PENDING = frozenset(('submitted_unknown', 'accepted'))
 TERMINAL = frozenset(('completed', 'failed', 'interrupted'))
 STATUSES = PENDING | TERMINAL | {'rejected'}
@@ -69,7 +74,7 @@ def _stamp():
     return datetime.now(timezone.utc).isoformat(timespec='microseconds')
 
 
-_DDL = (
+_DDL_V1 = (
     '''CREATE TABLE hermes_bindings (
         chat_id TEXT PRIMARY KEY, cwd TEXT NOT NULL, cwd_device INTEGER NOT NULL, cwd_inode INTEGER NOT NULL,
         profile_home TEXT, home_device INTEGER, home_inode INTEGER, session_key TEXT UNIQUE,
@@ -87,23 +92,56 @@ _DDL = (
     '''CREATE UNIQUE INDEX hermes_one_pending ON hermes_operations(chat_id)
         WHERE status IN ('submitted_unknown','accepted')''',
 )
+_RESULT_DDL = ('ALTER TABLE hermes_operations ADD COLUMN result_json TEXT',
+               'ALTER TABLE hermes_operations ADD COLUMN result_sha256 TEXT')
+_DDL = _DDL_V1 + _RESULT_DDL
+_OPERATION_COLUMNS = 'client_id,chat_id,request_sha256,status,created_at,updated_at'
 
 
 def _schema(db):
     return tuple(tuple(row) for row in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name'))
 
 
-def _expected_schema():
+def _expected_schema(ddl):
     db = sqlite3.connect(':memory:')
     try:
-        for sql in _DDL:
+        for sql in ddl:
             db.execute(sql)
         return _schema(db)
     finally:
         db.close()
 
 
-_EXPECTED_SCHEMA = _expected_schema()
+_EXPECTED_SCHEMA_V1 = _expected_schema(_DDL_V1)
+_EXPECTED_SCHEMA = _expected_schema(_DDL)
+
+
+def _completion(receipt, value):
+    """Validate an exact observed gateway completion, not transcript text."""
+    try:
+        if (receipt['status'] != 'completed' or type(value) is not dict
+                or set(value) != {'state', 'reason', 'answer', 'source'}
+                or value['state'] != 'available' or value['reason'] != 'current_connection_result'):
+            raise ValueError
+        answer, source = value['answer'], value['source']
+        if (type(answer) is not dict or set(answer) != {'text', 'sha256', 'bytes'}
+                or type(source) is not dict or set(source) != {'kind', 'submission_id', 'runtime_sid',
+                    'connection_epoch', 'request_text_sha256', 'request_sha256', 'terminal_status'}
+                or source['kind'] != 'hermes_gateway_completion'
+                or source['submission_id'] != receipt['client_id']
+                or source['request_sha256'] != receipt['request_sha256']
+                or source['terminal_status'] != 'completed' or type(answer['text']) is not str
+                or type(source['connection_epoch']) is not str or not re.fullmatch(r'[a-f0-9]{32}', source['connection_epoch'])
+                or type(source['request_text_sha256']) is not str or not _SHA.fullmatch(source['request_text_sha256'])):
+            raise ValueError
+        validate_session_id(source['runtime_sid'])
+        raw = answer['text'].encode('utf-8')
+        if (not 0 < len(raw) <= MAX_RESULT_BYTES or type(answer['bytes']) is not int
+                or answer['bytes'] != len(raw) or answer['sha256'] != hashlib.sha256(raw).hexdigest()):
+            raise ValueError
+        return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
+    except (ValueError, KeyError, TypeError, UnicodeError, RecursionError):
+        raise HermesStoreError('invalid_arguments') from None
 
 
 class HermesNativeStore:
@@ -149,7 +187,7 @@ class HermesNativeStore:
             os.set_inheritable(self._file_fd, False)
             self._regular(os.fstat(self._file_fd))
             self._file_identity = _identity(os.fstat(self._file_fd))
-            with self._db(write=created, initialize=created):
+            with self._db(write=not readonly, initialize=created, migrate=not readonly):
                 pass
         except BaseException as error:
             self.close()
@@ -197,7 +235,7 @@ class HermesNativeStore:
                 raise HermesStoreError('scope_changed')
 
     @contextmanager
-    def _db(self, *, write=False, initialize=False):
+    def _db(self, *, write=False, initialize=False, migrate=False):
         with self.lock:
             if self._closed:
                 raise HermesStoreError('closed')
@@ -220,13 +258,22 @@ class HermesNativeStore:
                     db.execute('PRAGMA application_id=' + str(APPLICATION_ID))
                     db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
                 else:
+                    version = db.execute('PRAGMA user_version').fetchone()[0]
+                    expected = {1: _EXPECTED_SCHEMA_V1, 2: _EXPECTED_SCHEMA}.get(version)
                     if (db.execute('PRAGMA application_id').fetchone()[0] != APPLICATION_ID
-                            or db.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION
-                            or _schema(db) != _EXPECTED_SCHEMA):
+                            or expected is None or _schema(db) != expected):
                         raise HermesStoreError('invalid_schema')
                     if not write:
                         db.execute('PRAGMA query_only=ON')
                     db.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
+                    if version == 1 and write:
+                        if not migrate:
+                            raise HermesStoreError('invalid_schema')
+                        for sql in _RESULT_DDL:
+                            db.execute(sql)
+                        db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
+                        if _schema(db) != _EXPECTED_SCHEMA:
+                            raise HermesStoreError('invalid_schema')
                 yield db
                 self._check_path()
                 if write:
@@ -262,7 +309,7 @@ class HermesNativeStore:
 
     @staticmethod
     def _operation(db, client_id):
-        row = db.execute('SELECT * FROM hermes_operations WHERE client_id=?', (client_id,)).fetchone()
+        row = db.execute('SELECT ' + _OPERATION_COLUMNS + ' FROM hermes_operations WHERE client_id=?', (client_id,)).fetchone()
         if row is None:
             return None
         result = dict(row)
@@ -403,7 +450,7 @@ class HermesNativeStore:
             if db.execute("SELECT 1 FROM hermes_operations WHERE chat_id=? AND status IN ('submitted_unknown','accepted')", (chat_id,)).fetchone():
                 raise HermesStoreError('busy')
             now = _stamp()
-            db.execute("INSERT INTO hermes_operations VALUES(?,?,?,'submitted_unknown',?,?)", (client_id, chat_id, digest, now, now))
+            db.execute("INSERT INTO hermes_operations (" + _OPERATION_COLUMNS + ") VALUES(?,?,?,'submitted_unknown',?,?)", (client_id, chat_id, digest, now, now))
             return dict(self._operation(db, client_id), created=True)
 
     def operation(self, client_id):
@@ -413,6 +460,79 @@ class HermesNativeStore:
             raise HermesStoreError('invalid_arguments') from None
         with self._db() as db:
             return self._operation(db, client_id)
+
+    @staticmethod
+    def _saved_result(db, receipt):
+        if db.execute('PRAGMA user_version').fetchone()[0] == 1:
+            return None
+        row = db.execute('''SELECT result_sha256,length(CAST(result_json AS BLOB)) AS size,
+            CASE WHEN length(CAST(result_json AS BLOB))<=? THEN result_json END AS result_json
+            FROM hermes_operations WHERE client_id=?''', (_MAX_SAVED_BYTES, receipt['client_id'])).fetchone()
+        raw, digest, size = row['result_json'], row['result_sha256'], row['size']
+        if raw is None and digest is None and size is None:
+            return None
+        try:
+            if (type(raw) is not str or type(digest) is not str or not _SHA.fullmatch(digest)
+                    or not 0 < size <= _MAX_SAVED_BYTES or hashlib.sha256(raw.encode('utf-8')).hexdigest() != digest):
+                raise ValueError
+            value = json.loads(raw)
+            identity = value['identity']
+            if (type(value) is not dict or set(value) != {'identity', 'result'} or type(identity) is not dict
+                    or set(identity) != {'chat_id', 'client_id', 'request_sha256', 'session_key'}
+                    or any(identity[key] != receipt[key] for key in ('chat_id', 'client_id', 'request_sha256'))):
+                raise ValueError
+            validate_session_id(identity['session_key'])
+            key = db.execute('SELECT chat_id FROM hermes_keys WHERE session_key=?', (identity['session_key'],)).fetchone()
+            if key is None or key['chat_id'] != receipt['chat_id']:
+                raise ValueError
+            result = _completion(receipt, value['result'])
+            if result != value['result'] or json.dumps(value, ensure_ascii=False, sort_keys=True,
+                    separators=(',', ':'), allow_nan=False) != raw:
+                raise ValueError
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+            raise HermesStoreError('invalid_schema') from None
+        return raw, result
+
+    def remember_result(self, chat_id, client_id, result):
+        """Save only an already verified current completion; never rebuild history."""
+        chat_id = _uuid(chat_id)
+        try: client_id = _token(client_id)
+        except NativeSessionStoreError: raise HermesStoreError('invalid_arguments') from None
+        with self._db(write=True) as db:
+            receipt = self._operation(db, client_id)
+            if receipt is None or receipt['chat_id'] != chat_id:
+                raise HermesStoreError('conflict')
+            binding = self._binding(db, chat_id)
+            if binding is None or binding['session_key'] is None:
+                raise HermesStoreError('conflict')
+            value = _completion(receipt, result)
+            saved = self._saved_result(db, receipt)
+            if saved is not None:
+                if saved[1] != value:
+                    raise HermesStoreError('conflict')
+                return
+            identity = {key: receipt[key] for key in ('chat_id', 'client_id', 'request_sha256')}
+            identity['session_key'] = binding['session_key']
+            raw = json.dumps({'identity': identity, 'result': value}, ensure_ascii=False,
+                             sort_keys=True, separators=(',', ':'), allow_nan=False)
+            db.execute('UPDATE hermes_operations SET result_json=?,result_sha256=? WHERE client_id=?',
+                       (raw, hashlib.sha256(raw.encode('utf-8')).hexdigest(), client_id))
+
+    def completed_result(self, chat_id, client_id):
+        """Read a prior exact observation without constructing or querying Hermes."""
+        chat_id = _uuid(chat_id)
+        try: client_id = _token(client_id)
+        except NativeSessionStoreError: raise HermesStoreError('invalid_arguments') from None
+        with self._db() as db:
+            receipt = self._operation(db, client_id)
+            if receipt is None:
+                return None
+            if receipt['chat_id'] != chat_id:
+                raise HermesStoreError('conflict')
+            if self._binding(db, chat_id) is None:
+                raise HermesStoreError('conflict')
+            saved = self._saved_result(db, receipt)
+            return None if saved is None else {'receipt': receipt, 'result': saved[1]}
 
     def pending(self, chat_id):
         return self._operations(chat_id, pending=True)

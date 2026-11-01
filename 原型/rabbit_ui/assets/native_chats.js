@@ -8,7 +8,7 @@
     && !/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value);
   const object = value => value && typeof value === "object" && !Array.isArray(value);
   const node = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
-  function create({ root, api, getWorkspace = () => "", onError = () => {}, openDocument = null, onManageProfiles = null, descriptor = null, materialImages = null, materialFiles = null, onTextHandoff = null, onOrganize = null, canOrganize = () => false, settingsRoot = null }) {
+  function create({ root, api, getWorkspace = () => "", onError = () => {}, openDocument = null, onManageProfiles = null, descriptor = null, materialImages = null, materialFiles = null, onTextHandoff = null, onResumeHandoff = null, onQuoteHistory = null, onOrganize = null, canOrganize = () => false, settingsRoot = null, onChooseConfiguration = null, getSendShortcut = () => "enter", getModelLabel = () => null }) {
     const agent = descriptor === null ? "codex" : descriptor.agent;
     const apiRoot = descriptor === null ? "/api/native-chats" : descriptor.apiRoot;
     const storageNamespace = descriptor === null ? "rabbit.native-chats.page.v1." : descriptor.storageNamespace;
@@ -28,6 +28,7 @@
     const nameButton = node("button", "rbs-button rbw-button"), nameBox = node("div", "rbn-create"), nameInput = node("input", "rbs-control"), nameSave = node("button", "rbs-button rbw-button"), nameCancel = node("button", "rbs-button"), nameNote = node("p", "rbs-note"), nameError = node("p", "rbs-error");
     const missingNotice = node("p", "rbs-page rbs-note rbn-selection-notice");
     const quoteButton = node("button", "rbs-button"); quoteButton.type = "button";
+    const quoteHistoryButton = node("button", "rbs-button"); quoteHistoryButton.type = "button";
     const organizeButton = node("button", "rbs-button rbw-button"); organizeButton.type = "button";
     organizeButton.setAttribute("data-control-interface", "ai");
     refreshButton.type = createButton.type = "button"; titleInput.type = "text"; titleInput.maxLength = 160;
@@ -35,11 +36,12 @@
     for (const control of [nameButton, nameSave]) control.setAttribute("data-control-interface", "ai");
     for (const item of [refreshButton, createButton, note, errorNode, nameNote, nameError, aboutBody, missingNotice]) item.setAttribute("data-control-interface", "ai");
     pickerLabel.append(pickerText, picker); toolbar.append(refreshButton, nameButton); createBox.append(titleInput, createButton); nameBox.append(nameInput, nameSave, nameCancel); about.append(aboutTitle, aboutBody); controls.append(pickerLabel, toolbar, nameBox, nameNote, nameError, createBox, note, errorNode, about); panel.append(controls, missingNotice, chatRoot); root.append(panel); root.hidden = true;
-    toolbar.append(quoteButton, organizeButton);
+    toolbar.append(quoteHistoryButton, quoteButton, organizeButton);
     const rendererSettings = settingsRoot ? node("div", "rbn-renderer-settings") : null;
+    let chatActions = null;
     if (settingsRoot) {
       settingsRoot.append(controls, rendererSettings);
-      const chatActions = node("div", "rbs-actions rbn-chat-actions"); chatActions.append(quoteButton, organizeButton);
+      chatActions = node("div", "rbs-actions rbn-chat-actions"); chatActions.append(quoteHistoryButton, quoteButton, organizeButton);
       panel.append(chatActions, missingNotice, chatRoot);
     }
     const text = (zh, en) => language === "en" ? en : zh;
@@ -82,8 +84,11 @@
       for (const row of rows) { const option = node("option", "", row.title); option.value = row.id; picker.append(option); }
       picker.value = selected || ""; picker.disabled = !enabled || reading || !catalogReadable;
       refreshButton.textContent = text("更新列表", "Refresh list"); refreshButton.disabled = !enabled || reading || !!nameRead || nameSaves.size > 0;
-      quoteButton.textContent = text("交给其他 AI", "Continue with another AI"); quoteButton.hidden = typeof onTextHandoff !== "function";
+      quoteButton.textContent = text(["codex", "hermes"].includes(agent) ? "换 AI 接着聊" : "交给其他 AI", "Continue with another AI"); quoteButton.hidden = typeof onTextHandoff !== "function";
       quoteButton.disabled = !enabled || !visible || !catalogReadable || reading || creating || !selectedRow;
+      quoteHistoryButton.textContent = text("引用其他对话", "Quote another chat");
+      quoteHistoryButton.hidden = !["codex", "pi", "hermes", "claude", "dsh"].includes(agent) || typeof onQuoteHistory !== "function";
+      quoteHistoryButton.disabled = !enabled || !visible || settingsVisible || !catalogReadable || reading || creating || !selectedRow;
       organizeButton.textContent = text("整理到文件夹", "Organize in folders");
       organizeButton.hidden = typeof onOrganize !== "function" || !canOrganize();
       organizeButton.disabled = !enabled || !visible || !catalogReadable || reading || creating || !selectedRow;
@@ -108,15 +113,17 @@
       aboutBody.textContent = text(agentLabel + " 原生记录；最多同时连接 " + maxConnections + " 段。切换页面不会断开，需在已结束的对话中明确断开。统一列表目前只搜索原生对话名称，不搜索正文。", agentLabel + " native records; up to " + maxConnections + " connections. Navigation does not disconnect. Disconnect an idle chat explicitly. Unified search currently searches native chat titles, not message bodies.");
       errorNode.textContent = errorText; errorNode.hidden = !errorText; chatRoot.hidden = !selectedRow;
     }
-    async function mount() {
+    async function mount(options = {}) {
       if (!selected || !rows.some(row => row.id === selected)) { unmount(); return; }
       if (rendererId !== selected) {
         unmount(); rendererId = selected;
-        renderer = createRenderer({ root: chatRoot, api, getWorkspace, onError, openDocument, onManageProfiles, session: { id: selected }, ...(rendererSettings ? { settingsRoot: rendererSettings } : {}), ...(supportsMaterials ? { materialImages, materialFiles, materialInputs } : {}) });
+        renderer = createRenderer({ root: chatRoot, api, getWorkspace, onError, openDocument, onManageProfiles, session: { id: selected }, ...(["codex", "hermes", "pi"].includes(agent) ? { onChooseConfiguration, getSendShortcut, getModelLabel, extraActions: [quoteHistoryButton, quoteButton, organizeButton] } : {}), ...(rendererSettings ? { settingsRoot: rendererSettings } : {}), ...(supportsMaterials ? { materialImages, materialFiles, materialInputs } : {}) });
+        if (chatActions) chatActions.hidden = chatActions.children.length === 0;
         renderer.setLanguage(language);
       }
       if (supportsMaterials) renderer.setMaterialInputs?.(materialInputs);
-      if (visible && enabled) await (settingsVisible && renderer.showSettings ? renderer.showSettings() : renderer.show());
+      if (options.deferShow === true) renderer.hide();
+      else if (visible && enabled) await (settingsVisible && renderer.showSettings ? renderer.showSettings() : renderer.show(agent === "codex" ? { restoreHistory: true } : {}));
     }
     async function choose(id) {
       syncWorkspace(); if (destroyed || !enabled || reading || !catalogReadable || !rows.some(row => row.id === id)) return;
@@ -162,10 +169,10 @@
       } catch (error) { if (!current()) return false; errorText = message(error); render(); throw error; }
       finally { if (stamp === generation && request === catalogueVersion && !destroyed) { reading = false; render(); } }
     }
-    async function putDraft(value, isCurrent = () => true) {
+    async function putDraft(value, isCurrent = () => true, isPositionCurrent = isCurrent) {
       syncWorkspace();
       if (!object(value) || value.workspace_id !== workspace || !workspace || !uuid(value.chat_id)
-          || destroyed || !enabled || reading || creating || pending || typeof isCurrent !== "function" || !isCurrent()) throw Error("原生对话目录正在处理请求、来源或工作区已变化；没有放入草稿。");
+          || destroyed || !enabled || reading || creating || pending || typeof isCurrent !== "function" || typeof isPositionCurrent !== "function" || !isCurrent() || !isPositionCurrent()) throw Error("原生对话目录正在处理请求、来源或工作区已变化；没有放入草稿。");
       if (value.material_refs !== undefined && (!Array.isArray(value.material_refs) || value.material_refs.length && !supportsMaterials)) throw Error("此 Agent 仍仅支持文字交接；材料没有放入草稿。");
       if (agent === "claude" && value.material_refs?.some(ref => !object(ref) || ref.kind !== "text")) throw Error("Claude当前只开放文本文件接力；原图未放入草稿。");
       const hasMemory = Object.hasOwn(value, "memory_profile");
@@ -175,13 +182,17 @@
         memory = value.memory_profile === null ? null : window.RabbitNativeMemory.choice(value.memory_profile, { readOnly: true });
       }
       const stamp = generation, target = value.chat_id, sourceWorkspace = value.workspace_id, text = value.text;
-      if (await refresh({ deferMount: true }) !== true || !isCurrent() || destroyed || !enabled || stamp !== generation
+      if (await refresh({ deferMount: true }) !== true || !isCurrent() || !isPositionCurrent() || destroyed || !enabled || stamp !== generation
           || workspace !== sourceWorkspace || workspace !== String(getWorkspace() || "") || !catalogReadable
           || !rows.some(row => row.id === target)) throw Error("原生对话目录未能确认这段对话；没有放入草稿。");
-      const previous = selected; selected = target; if (previous !== target) selectionVersion++;
+      const navigation = navigationVersion, previous = selected; selected = target; if (previous !== target) selectionVersion++;
+      const selection = selectionVersion;
       if (!save()) { selected = previous; render(); throw Error("浏览器不能保存原生对话选择；没有放入草稿。"); }
       render(); await mount();
-      if (!isCurrent() || destroyed || !enabled || stamp !== generation || workspace !== sourceWorkspace || workspace !== String(getWorkspace() || "")
+      // Selecting the destination intentionally changes a same-Agent source.
+      // After that transition, only its captured UI position may authorize the
+      // commit; the exact target and both local navigation versions still hold.
+      if (!isPositionCurrent() || navigation !== navigationVersion || selection !== selectionVersion || destroyed || !enabled || stamp !== generation || workspace !== sourceWorkspace || workspace !== String(getWorkspace() || "")
           || selected !== target || rendererId !== target || !renderer || typeof renderer.putDraft !== "function") throw Error("目标原生对话已变化或没有草稿接口；没有放入草稿。");
       if (value.material_refs?.length && !materialInputs) throw Error("此入口尚未启用原生材料；整份未放入。");
       if (renderer.putDraft({ workspace_id: sourceWorkspace, chat_id: target, text, ...(value.material_refs?.length ? { material_refs: value.material_refs, ...(value.material_preview === undefined ? {} : { material_preview: value.material_preview }) } : {}), ...(hasMemory ? { memory_profile: memory } : {}) }) !== true) throw Error("目标原生对话尚未确认保存草稿；没有发送。");
@@ -246,11 +257,12 @@
           : text("保存结果尚未确认，草稿保留；请先核对当前名称，没有自动重试。", "The save is unconfirmed. Draft kept. Check the current name; no automatic retry."); save(); onError(error); }
       } finally { if (nameSaves.get(token.id) === token) nameSaves.delete(token.id); if (!destroyed && token.generation === generation) render(); }
     }
-    async function createChat({ isCurrent = () => true, throwKnownFailure = false } = {}) {
+    async function createChat({ isCurrent = () => true, throwKnownFailure = false, fixedClient = null, onCreated = null } = {}) {
       syncWorkspace(); if (typeof isCurrent !== "function" || !isCurrent() || destroyed || !enabled || reading || creating || nameRead || nameSaves.size || !catalogReadable || !workspace || !pending && (!titleValid(title) || rows.length >= 128)) return;
+      if (fixedClient !== null && (!uuid(fixedClient) || pending && pending.client_id !== fixedClient) || onCreated !== null && typeof onCreated !== "function") throw Error("原创建编号尚未核实；没有另建对话。");
       const stamp = generation;
       if (!pending) {
-        const client = window.crypto && window.crypto.randomUUID && window.crypto.randomUUID();
+        const client = fixedClient || window.crypto && window.crypto.randomUUID && window.crypto.randomUUID();
         if (!uuid(client)) { errorText = text("当前浏览器不能生成稳定的创建编号，尚未创建。", "This browser cannot generate a stable creation ID. Nothing was created."); render(); return; }
         pending = { client_id: client, title: cleanTitle(title) };
       }
@@ -258,8 +270,9 @@
       const submitted = { ...pending }; creating = true; errorText = ""; render();
       try {
         const row = await api(apiRoot, { method: "POST", body: JSON.stringify(submitted) });
-        if (destroyed || stamp !== generation || workspace !== String(getWorkspace() || "")) return;
         if (!rowValid(row) || row.title !== submitted.title) throw Error("创建结果格式不匹配，请保留原请求核对。");
+        if (onCreated && onCreated(row.id) !== true) throw createdError(row.id, "对话已创建，但首页交接尚未保存；原编号保留，没有放入或发送。");
+        if (destroyed || stamp !== generation || workspace !== String(getWorkspace() || "")) return;
         // Create acknowledgements are immutable snapshots, including on replay.
         // The catalogue owns the current display name after any later rename.
         const current = isCurrent(), previousSelected = selected;
@@ -269,7 +282,7 @@
           selected = previousSelected; pending = submitted; title = submitted.title; titleInput.value = title;
           throw createdError(row.id, "对话已创建，但浏览器尚不能保存确认；原创建编号保留，请核对这段对话。");
         }
-        render(); if (current) await refresh(); return row.id;
+        render(); if (current) await refresh(onCreated ? { deferMount: true } : {}); return row.id;
       } catch (error) {
         if (!destroyed && stamp === generation && workspace === String(getWorkspace() || "")) { errorText = message(error); onError(error); }
         if (throwKnownFailure && uuid(error.createdChatId)) throw error;
@@ -297,11 +310,43 @@
       const context = getQuoteContext();
       return context ? { ...context, ...renderer.getConfigurationContext?.() } : null;
     }
+    function getTextSnapshot() {
+      const context = getQuoteContext();
+      if (!context || typeof renderer?.getTextSnapshot !== "function") throw Error("请先读取这段原生对话，原草稿保留。");
+      return { ...context, ...renderer.getTextSnapshot() };
+    }
+    async function readTextSnapshot() {
+      const context = getQuoteContext(), original = renderer;
+      if (!context || typeof original?.refresh !== "function") throw Error("请先读取当前对话，原草稿保留。");
+      // An explicit quote reads a complete page; streamed display fragments
+      // alone are not evidence of complete source text.
+      const refreshed = await original.refresh();
+      const current = getQuoteContext();
+      if (renderer !== original || current?.workspace_id !== context.workspace_id || current.agent !== context.agent || current.chat_id !== context.chat_id) throw Error("来源已切换；没有引用另一段对话。");
+      if (["codex", "hermes"].includes(agent) && refreshed !== true) throw Error("当前对话尚未完整读取，请稍后再试；没有使用旧文字。");
+      return getTextSnapshot();
+    }
+    function captureQuoteDraft() {
+      const context = getQuoteContext();
+      if (!["codex", "pi", "hermes", "claude", "dsh"].includes(agent) || !context || typeof renderer.captureQuoteDraft !== "function") return null;
+      const value = renderer.captureQuoteDraft();
+      return value ? { ...value, workspace_id: context.workspace_id, chat_id: context.chat_id, agent, title: context.title } : null;
+    }
+    function applyQuoteDraft(expected, value, refs, preview) {
+      const context = getQuoteContext();
+      if (!context || !["codex", "pi", "hermes", "claude", "dsh"].includes(agent) || !expected || context.workspace_id !== expected.workspace_id || context.chat_id !== expected.chat_id || expected.agent !== agent || typeof renderer.applyQuoteDraft !== "function") return false;
+      return renderer.applyQuoteDraft({ stamp: expected.stamp, text: expected.text, material_refs: expected.material_refs }, value, refs, preview) === true;
+    }
+    quoteHistoryButton.addEventListener("click", () => {
+      try { if (!captureQuoteDraft() || typeof onQuoteHistory !== "function") throw Error(text("当前原生草稿暂不能引用，请稍后重试。", "This native draft is not ready for quoting.")); onQuoteHistory(); }
+      catch (error) { onError(error); }
+    });
     quoteButton.addEventListener("click", async () => {
       try {
+        if (typeof onTextHandoff !== "function") return;
         const context = getQuoteContext();
-        if (!context || typeof renderer.getTextSnapshot !== "function" || typeof onTextHandoff !== "function") throw Error(text("请先连接并读取这段原生对话的文字。", "Connect and read this native chat first."));
-        await onTextHandoff({ ...context, ...renderer.getTextSnapshot() });
+        if (context && typeof onResumeHandoff === "function" && onResumeHandoff(context) === true) return;
+        await onTextHandoff(await readTextSnapshot());
       } catch (error) { onError(error); }
     });
     organizeButton.addEventListener("click", async () => {
@@ -312,6 +357,16 @@
       } catch (error) { onError(error); }
     });
     function createdError(id, note) { const error = Error(note); error.createdChatId = id; return error; }
+    async function readCreation(creationId) {
+      const sourceWorkspace = String(getWorkspace() || "");
+      if (!["codex", "hermes"].includes(agent) || destroyed || !enabled || !sourceWorkspace || !uuid(creationId)) throw Error("原创建查询对象尚未核实。");
+      const found = await api(apiRoot + "/creations/" + encodeURIComponent(creationId));
+      if (destroyed || !enabled || sourceWorkspace !== String(getWorkspace() || "") || !object(found) || Object.keys(found).length !== 4
+          || found.workspace_id !== sourceWorkspace || found.agent !== agent || found.creation_id !== creationId
+          || found.chat !== null && !rowValid(found.chat)) throw Error("原创建结果未能核实；没有另建对话。");
+      return { workspace_id: sourceWorkspace, agent, creation_id: creationId,
+        chat: found.chat === null ? null : Object.fromEntries(["id", "title", "agent", "role", "created_at"].map(key => [key, found.chat[key]])) };
+    }
     function creationDraft(value, saved) {
       if (!object(value) || Object.keys(value).some(key => !["text", "material_refs", "material_preview", "memory_profile"].includes(key))
           || typeof value.text !== "string" || /[\ud800-\udfff]/u.test(value.text) || typeof TextEncoder !== "function"
@@ -331,27 +386,76 @@
       return { text: value.text, ...(value.material_refs === undefined ? {} : { material_refs: refs }),
         ...(preview === undefined ? {} : { material_preview: preview }), ...(memory === undefined ? {} : { memory_profile: memory }) };
     }
-    async function createNew(initialProfile = null, isCurrent = () => true, initialDraft = null) {
+    async function createNew(initialProfile = null, isCurrent = () => true, initialDraft = null, preparation = null, continuationPlan = null) {
       syncWorkspace();
       if (!isCurrent()) return null;
-      const saved = initialProfile === null ? null : window.RabbitProfiles?.profile(initialProfile, false);
-      if (initialProfile !== null && (!saved || !["codex", "pi", "hermes", "claude"].includes(agent) || saved.agent_instance_id !== "local/" + agent)) throw Error("这份配置没有可用的原生选择接口，尚未创建对话。");
+      if (preparation !== null && (agent !== "codex" || !object(preparation) || Object.keys(preparation).length !== 8
+          || !["creation_id", "created_chat_id", "base_profile", "parameters", "base_selection", "local_request", "local_result", "onProgress"].every(key => Object.hasOwn(preparation, key))
+          || !uuid(preparation.creation_id) || preparation.created_chat_id !== null && !uuid(preparation.created_chat_id) || typeof preparation.onProgress !== "function")) throw Error("首页配置交接不完整；没有创建或发送。");
+      if (preparation) preparation = { ...JSON.parse(JSON.stringify(preparation)), onProgress: preparation.onProgress };
+      if (continuationPlan !== null && (preparation || !["codex", "hermes"].includes(agent) || !object(continuationPlan)
+          || Object.keys(continuationPlan).length !== 4 || !["creation_id", "created_chat_id", "onProgress", "beforePlace"].every(key => Object.hasOwn(continuationPlan, key))
+          || !uuid(continuationPlan.creation_id) || continuationPlan.created_chat_id !== null && !uuid(continuationPlan.created_chat_id)
+          || typeof continuationPlan.onProgress !== "function" || typeof continuationPlan.beforePlace !== "function")) throw Error("接续创建记录不完整；没有创建或发送。");
+      const plan = preparation || (continuationPlan && { ...continuationPlan });
+      const saved = preparation !== null ? window.RabbitProfiles?.profile(preparation.base_profile, false) : initialProfile === null ? null : window.RabbitProfiles?.profile(initialProfile, false);
+      if (preparation && (!saved || !object(preparation.parameters) || Object.keys(preparation.parameters).length !== 2
+          || !Object.hasOwn(preparation.parameters, "model_id") || !Object.hasOwn(preparation.parameters, "reasoning_effort"))) throw Error("首页模型与强度参数不完整；尚未创建。");
+      if (preparation) window.RabbitProfiles.profile({ ...saved, ...preparation.parameters }, false);
+      if ((initialProfile !== null || preparation) && (!saved || !["codex", "pi", "hermes", "claude"].includes(agent) || saved.agent_instance_id !== "local/" + agent)) throw Error("这份配置没有可用的原生选择接口，尚未创建对话。");
       const draft = initialDraft === null ? null : creationDraft(initialDraft, saved);
-      if (pending || creating) throw Error(text("先在设置中核对上次新建结果。", "Check the previous creation in settings first."));
+      if (creating || pending && (!plan || pending.client_id !== plan.creation_id)) throw Error(text("先在设置中核对上次新建结果。", "Check the previous creation in settings first."));
       if (reading) throw Error(text("对话目录正在读取，请稍后再新建。", "The catalogue is loading; try creating afterward."));
       const stamp = generation, sourceWorkspace = workspace;
       const current = () => !destroyed && enabled && stamp === generation && sourceWorkspace === workspace && workspace === String(getWorkspace() || "") && isCurrent();
       if (await refresh({ deferMount: true }) !== true || !current()) return null;
       if (draft?.material_refs?.length && !materialInputs) throw Error("此入口尚未启用原生材料；尚未创建。");
-      title = text("新对话", "New chat"); titleInput.value = title;
-      const id = await createChat({ isCurrent: current, throwKnownFailure: true });
+      const rememberCreated = id => {
+        try { if (plan.onProgress({ created_chat_id: id }) !== true) return false; }
+        catch (_) { throw createdError(id, "原对话已创建，但首页交接尚未保存；原编号保留，没有放入或发送。"); }
+        plan.created_chat_id = id; return true;
+      };
+      let id = plan?.created_chat_id || null;
+      if (plan && !id) {
+        const found = await readCreation(plan.creation_id);
+        if (found.chat) {
+          id = found.chat.id;
+          if (!rememberCreated(id)) throw createdError(id, "原对话已找到，但首页交接尚未保存；没有放入或发送。");
+        }
+        if (!current()) return null;
+      }
+      if (!id) {
+        title = pending?.title || text("新对话", "New chat"); titleInput.value = title;
+        id = await createChat({ isCurrent: current, throwKnownFailure: true, ...(plan ? { fixedClient: plan.creation_id, onCreated: rememberCreated } : {}) });
+      } else if (plan) {
+        if (!rows.some(row => row.id === id)) throw createdError(id, "原创建对话暂不在目录中；没有另建对话。");
+        selected = id; selectionVersion++;
+        if (pending?.client_id === plan.creation_id) pending = null;
+        if (!save()) throw createdError(id, "原对话选择尚未保存；没有放入或发送。");
+        render();
+      }
       if (!id) return null;
       if (!current()) { if (draft) throw createdError(id, "对话已创建，但来源草稿或入口已变化；没有放入，请核对该对话。"); return null; }
-      if (draft || saved) {
+      if (continuationPlan) {
+        try {
+          if (await plan.beforePlace(id, current) !== true || !current()) throw Error("原目标已创建，接续来源或当前草稿尚未核对；没有放入或发送。");
+          await mount({ deferShow: true });
+          if (!current() || selected !== id || rendererId !== id) throw Error("原目标已创建，当前页面已变化；没有放入或发送。");
+        } catch (error) { throw createdError(id, message(error)); }
+      }
+      if (preparation) {
+        try {
+          await mount({ deferShow: true });
+          if (selected !== id || rendererId !== id || typeof renderer?.prepareInitialLocalConfiguration !== "function"
+              || !await renderer.prepareInitialLocalConfiguration(preparation, current)) throw Error("原目标的首页配置尚未准备完成。");
+        } catch (error) { throw createdError(id, message(error)); }
+        if (!current()) return null;
+      }
+      if (draft || saved && !preparation) {
         let placed = false;
         try {
           if (selected === id && rendererId === id && current()) placed = draft
-            ? typeof renderer?.putDraft === "function" && renderer.putDraft({ ...draft, workspace_id: sourceWorkspace, chat_id: id, ...(saved ? { ai_profile: saved } : {}) }) === true
+            ? typeof renderer?.putDraft === "function" && renderer.putDraft({ ...draft, workspace_id: sourceWorkspace, chat_id: id, ...(saved && !preparation ? { ai_profile: saved } : {}) }) === true
             : typeof renderer?.selectSavedProfile === "function" && renderer.selectSavedProfile({ workspace_id: sourceWorkspace, chat_id: id, profile: saved }) === true;
         } catch (_) { /* The exact created ID remains known even if local staging fails. */ }
         if (!placed) throw createdError(id, draft ? "对话已创建，但草稿尚未保存。请从列表核对该对话；没有连接或发送。" : "对话已创建，但配置尚未保存。请从列表核对该对话；没有连接或发送。");
@@ -359,7 +463,15 @@
       return id;
     }
 
-    render(); return { show, showSettings, hide, refresh, setEnabled, setLanguage, destroy, putDraft, getQuoteContext, getConfigurationContext, selectExisting, createNew };
+    async function sendDraft(id) {
+      if (destroyed || !enabled || !visible || settingsVisible || workspace !== String(getWorkspace() || "") || id !== selected || id !== rendererId) return;
+      return renderer?.sendDraft?.();
+    }
+    const getComposerView = () => visible && !settingsVisible && rendererId === selected ? renderer?.getComposerView?.() || null : null;
+    const saveLocalConfiguration = (parameters, view, retry) => getComposerView()?.view === view ? renderer?.saveLocalConfiguration?.(parameters, view, retry) ?? false : false;
+    const chooseConfiguration = (kind, row, view) => getComposerView()?.view === view ? renderer.chooseConfiguration(kind, row, view) : false;
+    const applyConfigurationReadback = value => visible && !settingsVisible && rendererId === selected && workspace === String(getWorkspace() || "") && renderer?.applyConfigurationReadback?.(value) === true;
+    render(); return { applyConfigurationReadback, getTextSnapshot, readTextSnapshot, getComposerView, chooseConfiguration, saveLocalConfiguration, sendDraft, show, showSettings, hide, refresh, setEnabled, setLanguage, destroy, putDraft, getQuoteContext, getConfigurationContext, captureQuoteDraft, applyQuoteDraft, selectExisting, readCreation, createNew };
   }
   window.RabbitNativeChats = Object.freeze({ create });
 })();

@@ -4,6 +4,7 @@ Refreshes stage a full index; bootstrap copies a read-only legacy snapshot once.
 No credential settings, source transcripts, or legacy indexes are modified here.
 """
 import datetime as dt
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -12,6 +13,7 @@ from pathlib import Path
 import sqlite3
 import stat
 import tempfile
+import time
 from functools import partial
 from urllib.parse import quote
 
@@ -21,6 +23,161 @@ from pi_history import ingest_pi, META_KEY as PI_META_KEY
 
 class HistorySourceError(ValueError):
     pass
+
+
+_SOURCE_SIGNATURE_KEY = 'source_signature_v1'
+_SOURCE_INCOMPLETE_KEY = 'source_incomplete_v1'
+
+
+class _LimitedReader:
+    def __init__(self, file, limit, *, digest=True):
+        self.file, self.remaining = file, limit
+        self.digest = hashlib.sha256() if digest else None
+
+    def readline(self, size=-1):
+        if self.remaining <= 0:
+            return b''
+        data = self.file.readline(min(size, self.remaining) if size >= 0 else self.remaining)
+        self.remaining -= len(data)
+        if self.digest is not None:
+            self.digest.update(data)
+        return data
+
+
+class _CodexSnapshot:
+    """Bounded original-file reads, checked again before publishing.
+
+    The capture is per file, not a globally atomic point in time. Only the
+    captured file set and complete lines are indexed; no source is modified.
+    """
+    def __init__(self, root, source_state):
+        self.root, self.files, self.entries = root, [], {}
+        self.incomplete = False
+        now = time.time_ns()
+        for relative, signature in source_state or ():
+            if not (relative == 'session_index.jsonl' or
+                    (relative.startswith(('sessions/', 'archived_sessions/')) and relative.endswith('.jsonl'))):
+                continue
+            if not signature:
+                continue
+            path = root / relative
+            # Older files must stay entirely unchanged. A recent or future
+            # timestamp may be an active writer and receives a prior digest.
+            entry = {'identity': signature[:2], 'size': signature[2], 'signature': signature,
+                     'active': now - signature[3] <= 300 * 1_000_000_000}
+            with self._open(path, entry) as file:
+                digest = self._hash(file, entry['size']) if entry['active'] else None
+                last = os.pread(file.fileno(), 1, entry['size'] - 1) if entry['size'] else b'\n'
+                limit = entry['size']
+                if last != b'\n':
+                    self.incomplete = True
+                    while limit:
+                        start = max(0, limit - 65536)
+                        block = os.pread(file.fileno(), limit - start, start)
+                        if len(block) != limit - start:
+                            raise HistorySourceError('Codex来源读取不完整，现有索引保留。')
+                        pos = block.rfind(b'\n')
+                        if pos >= 0:
+                            limit = start + pos + 1
+                            break
+                        limit = start
+                entry.update(digest=digest, limit=limit, seen=False)
+            self.entries[path] = entry
+            if relative != 'session_index.jsonl':
+                self.files.append(path)
+
+    @contextlib.contextmanager
+    def _open(self, path, entry):
+        parent = _directory(path.parent)
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != entry['identity'] or st.st_size < entry['size']:
+                    raise HistorySourceError('Codex来源已替换或截断，现有索引保留。')
+                if not entry['active'] and _signature(st) != entry['signature']:
+                    raise HistorySourceError('Codex来源原有内容已变化，现有索引保留。')
+                with os.fdopen(fd, 'rb') as file:
+                    fd = None
+                    yield file
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        finally:
+            os.close(parent)
+
+    @staticmethod
+    def _hash(file, size):
+        file.seek(0); digest = hashlib.sha256(); remaining = size
+        while remaining:
+            data = file.read(min(1024 * 1024, remaining))
+            if not data:
+                raise HistorySourceError('Codex来源已截断，现有索引保留。')
+            digest.update(data); remaining -= len(data)
+        return digest.hexdigest()
+
+    @contextlib.contextmanager
+    def open(self, path):
+        entry = self.entries[path]
+        with self._open(path, entry) as file:
+            # Inactive files must keep their complete original metadata;
+            # verify rejects any change before consulting a digest. Hashing
+            # their bytes would therefore never affect the result.
+            reader = _LimitedReader(file, entry['limit'], digest=entry['active'])
+            yield reader
+            if reader.remaining:
+                raise HistorySourceError('Codex来源原有内容已变化，现有索引保留。')
+            remaining = entry['size'] - entry['limit']
+            while remaining:
+                data = file.read(min(1024 * 1024, remaining))
+                if not data:
+                    raise HistorySourceError('Codex来源已截断，现有索引保留。')
+                if reader.digest is not None:
+                    reader.digest.update(data)
+                remaining -= len(data)
+            parsed = reader.digest.hexdigest() if reader.digest is not None else None
+            if entry['digest'] is not None and parsed != entry['digest']:
+                raise HistorySourceError('Codex来源原有内容已变化，现有索引保留。')
+            entry.update(digest=parsed, seen=True)
+
+    def verify(self):
+        for path, entry in self.entries.items():
+            with self._open(path, entry) as file:
+                current = _signature(os.fstat(file.fileno()))
+                if not entry['seen'] or current[2] == entry['size'] and current != entry['signature']:
+                    raise HistorySourceError('Codex来源原有内容已变化，现有索引保留。')
+                if current != entry['signature'] and self._hash(file, entry['size']) != entry['digest']:
+                    raise HistorySourceError('Codex来源原有内容已变化，现有索引保留。')
+                entry['verified_signature'] = current
+
+    def verify_paths(self, before, after):
+        if before is None:
+            return
+        if after is None:
+            raise HistorySourceError('Codex来源目录已变化，现有索引保留。')
+        new = dict(after)
+        for name, old in before:
+            if old is None:
+                continue
+            current = new.get(name)
+            if current is None or old[:2] != current[:2]:
+                raise HistorySourceError('Codex来源已替换或删除，现有索引保留。')
+            entry = self.entries.get(self.root / name)
+            if entry and (current[2] < old[2] or current[2] == old[2] and current != old
+                          or not entry['active'] and current != old):
+                raise HistorySourceError('Codex来源原有内容已变化，现有索引保留。')
+            if entry and current != entry['verified_signature']:
+                with self._open(self.root / name, entry) as file:
+                    if (_signature(os.fstat(file.fileno())) != current or
+                            self._hash(file, entry['size']) != entry['digest'] or
+                            _signature(os.fstat(file.fileno())) != current):
+                        raise HistorySourceError('Codex来源核对期间变化，现有索引保留。')
+
+
+def _source_signature(sources):
+    # Paths and names contribute to identity but only the digest is stored.
+    raw = [(str(path), tree, branches, state) for path, tree, branches, state in sources]
+    return hashlib.sha256(json.dumps(raw, ensure_ascii=True, separators=(',', ':')).encode('ascii')).hexdigest()
 
 
 def _path(value):
@@ -328,16 +485,32 @@ class HistorySources:
     def _refresh_locked(self, parent):
         previous = _file_state(parent, self.index_path.name)
         sources = self._sources()
+        codex = _CodexSnapshot(self.codex_root, sources[0][3])
         stage, lock_identity = self._stage(parent)
         try:
             try:
                 stats = self.indexer.refresh_index(stage, self.codex_root, self.hermes_db,
-                                                   additional_sources=tuple(self._callbacks()))
+                                                   additional_sources=tuple(self._callbacks()), codex_snapshot=codex)
             except RuntimeError:
                 raise HistorySourceError('来源未完整读取，现有App历史索引保留。') from None
             if stats.get('source_errors'):
                 raise HistorySourceError('来源未完整读取，现有App历史索引保留。')
-            self._check_sources(sources)
+            # Non-Codex sources retain the original strict stability rule.
+            # Codex may append, but every captured original prefix must still
+            # match, including after the other sources have been read.
+            codex.verify()
+            self._check_sources(sources[1:])
+            after = _source_state(*sources[0][:3])
+            codex.verify_paths(sources[0][3], after)
+            stats['source_pending'] = bool(codex.incomplete or after != sources[0][3])
+            # A signature belongs only to a fresh scan, never to an
+            # inherited index. It describes metadata, not transcript content.
+            with sqlite3.connect(stage) as connection:
+                connection.execute('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',
+                                   (_SOURCE_SIGNATURE_KEY, _source_signature(sources)))
+                connection.execute('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',
+                                   (_SOURCE_INCOMPLETE_KEY, '1' if codex.incomplete else '0'))
+                connection.execute("UPDATE meta SET value=? WHERE key='stats'", (json.dumps(stats, sort_keys=True),))
             if not self._publish(parent, stage, previous):
                 raise HistorySourceError('App历史索引已经建立；此次新发布没有覆盖它。')
             return stats
@@ -346,6 +519,51 @@ class HistorySources:
 
     def refresh(self):
         return self._locked(self._refresh_locked)
+
+    def source_changes(self):
+        """Compare metadata with the last complete scan, without updating it.
+
+        A changing/unreadable index or source is unknown. The result makes no
+        claim about changes made after the observation or unindexed data types.
+        """
+        parent = descriptor = None
+        try:
+            parent = _directory(self.index_path.parent)
+            before = _file_state(parent, self.index_path.name)
+            if before is None:
+                return 'unknown'
+            for suffix in ('-wal', '-shm', '-journal'):
+                sidecar = _file_state(parent, self.index_path.name + suffix)
+                if sidecar is not None and sidecar[2]:
+                    return 'unknown'
+            descriptor = os.open(self.index_path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            if _signature(os.fstat(descriptor)) != before:
+                return 'unknown'
+            connection = sqlite3.connect('file:' + quote('/dev/fd/' + str(descriptor), safe='/') + '?mode=ro&immutable=1', uri=True)
+            try:
+                connection.execute('PRAGMA query_only=ON')
+                row = connection.execute('SELECT value FROM meta WHERE key=?', (_SOURCE_SIGNATURE_KEY,)).fetchone()
+                incomplete = connection.execute('SELECT value FROM meta WHERE key=?', (_SOURCE_INCOMPLETE_KEY,)).fetchone()
+            finally:
+                connection.close()
+            if not row or type(row[0]) is not str or len(row[0]) != 64 or any(c not in '0123456789abcdef' for c in row[0]):
+                return 'unknown'
+            sources = self._sources()
+            self._check_sources(sources)
+            if (_signature(os.fstat(descriptor)) != before or _file_state(parent, self.index_path.name) != before
+                    or any((state := _file_state(parent, self.index_path.name + suffix)) is not None and state[2]
+                           for suffix in ('-wal', '-shm', '-journal'))):
+                return 'unknown'
+            if _source_signature(sources) != row[0]:
+                return 'changed'
+            return 'unknown' if incomplete and incomplete[0] == '1' else 'unchanged'
+        except (OSError, sqlite3.Error, HistorySourceError, ValueError, TypeError):
+            return 'unknown'
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if parent is not None:
+                os.close(parent)
 
     def _bootstrap_stats(self, connection, deltas, *, extension=False):
         row = connection.execute("SELECT value FROM meta WHERE key='stats'").fetchone()
@@ -464,6 +682,8 @@ class HistorySources:
                 if (originals != _digest_rows(destination, tables, mutable, agents) or
                         schema != destination.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name').fetchall()):
                     raise HistorySourceError('原历史记录或表结构核对不一致，未发布副本。')
+                # A copied or extended index was not a complete source scan.
+                destination.execute('DELETE FROM meta WHERE key=?', (_SOURCE_SIGNATURE_KEY,))
                 destination.commit()
                 if destination.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise HistorySourceError('新历史库完整性检查未通过。')

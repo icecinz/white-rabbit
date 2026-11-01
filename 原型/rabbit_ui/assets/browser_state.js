@@ -2,7 +2,7 @@
   "use strict";
   const VERSION = 1, MAX_ITEMS = 100, MAX_TEXT = 30000, MAX_CHARACTERS = 512 * 1024;
   const MAX_RAW = 2 * 1024 * 1024, MAX_LANES = 8, RETENTION = 30 * 86400000;
-  const agents = window.RabbitAgents, pages = new Set(["conversations", "management", "settings", "specialist", "native-chats"]);
+  const agents = window.RabbitAgents, pages = new Set(["conversations", "management", "settings", "specialist", "native-chats", "continuation"]);
   const forbidden = new Set(["__proto__", "prototype", "constructor"]);
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   function invalid() { throw new Error("invalid-browser-snapshot"); }
@@ -77,6 +77,149 @@
     return result;
   }
   function sharedRevision(value) { if (!Number.isSafeInteger(value) || value < 1) invalid(); return value; }
+  function exact(value, fields) { object(value); if (Object.keys(value).length !== fields.length || fields.some(key => !own(value, key))) invalid(); return value; }
+  function homeIdentity(value) {
+    exact(value, ["draft_id", "revision"]);
+    return { draft_id: sharedId(value.draft_id), revision: sharedRevision(value.revision) };
+  }
+  function continuation(value, workspaceId, budget = null) {
+    exact(value, ["id", "revision", "source_view", "snapshot", "material_refs", "task", "target", "creation"]);
+    const sha = value => { if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) invalid(); return value; };
+    const nativeAgent = value => { if (!["codex", "hermes"].includes(value)) invalid(); return value; };
+    const nativeText = (value, maximum, empty = false) => { const result = text(value, maximum, empty); if (/[\ud800-\udfff]/u.test(result)) invalid(); return result; };
+    sha(workspaceId);
+    const view = exact(value.source_view, ["workspace_id", "agent", "chat_id", "title"]);
+    if (view.workspace_id !== workspaceId) invalid();
+    const sourceView = { workspace_id: workspaceId, agent: nativeAgent(view.agent), chat_id: sharedId(view.chat_id), title: nativeText(view.title, 160) };
+    if (!sourceView.title.trim() || Array.from(sourceView.title).length > 80 || /[\x00-\x1f\x7f]/.test(sourceView.title)) invalid();
+    const raw = object(value.snapshot), hasMaterials = own(raw, "material_candidates") || own(raw, "material_inventory");
+    exact(raw, ["workspace_id", "source", "records", "max_records", "max_bytes", "incomplete", "snapshot_kind", ...(hasMaterials ? ["material_candidates", "material_inventory"] : [])]);
+    const source = exact(raw.source, ["chat_id", "title", "agent", "native_identity", "revision"]);
+    if (raw.workspace_id !== workspaceId || source.chat_id !== sourceView.chat_id || source.agent !== sourceView.agent || source.title !== sourceView.title
+        || raw.max_records !== 50 || raw.max_bytes !== 131072 || raw.snapshot_kind !== "native_text" || typeof raw.incomplete !== "boolean"
+        || !Array.isArray(raw.records) || raw.records.length > 50) invalid();
+    const messages = new Set(), records = raw.records.map(row => {
+      exact(row, ["message_id", "role", "content", "source_ai", "source_kind", "excluded_images", "excluded_files", "image_count_unknown"]);
+      const messageId = nativeText(row.message_id, 16384), content = bodyText(nativeText(row.content, MAX_TEXT * 2));
+      if (messages.has(messageId) || !["user", "assistant"].includes(row.role) || row.source_ai !== sourceView.agent || row.source_kind !== "native_text_snapshot"
+          || row.excluded_images !== 0 || row.excluded_files !== 0 || row.image_count_unknown !== true) invalid();
+      messages.add(messageId); return { message_id: messageId, role: row.role, content, source_ai: row.source_ai,
+        source_kind: "native_text_snapshot", excluded_images: 0, excluded_files: 0, image_count_unknown: true };
+    });
+    const snapshot = { workspace_id: workspaceId, source: { chat_id: sourceView.chat_id, title: sourceView.title, agent: sourceView.agent,
+      native_identity: nativeText(source.native_identity, 16384), revision: sha(source.revision) }, records,
+      max_records: 50, max_bytes: 131072, incomplete: raw.incomplete, snapshot_kind: "native_text" };
+    if (typeof window.RabbitNativeMaterials?.refs !== "function") invalid();
+    const refs = window.RabbitNativeMaterials.refs(value.material_refs);
+    if (!records.length && !refs.length || refs.length && !hasMaterials) invalid();
+    if (hasMaterials) {
+      const inventory = exact(raw.material_inventory, ["revision", "complete", "unavailable_count", "unverified_count"]);
+      if (typeof inventory.complete !== "boolean" || !Array.isArray(raw.material_candidates) || raw.material_candidates.length !== refs.length) invalid();
+      const key = item => item.kind + ":" + item.id, expected = new Map(refs.map(item => [key(item), item])), seen = new Set();
+      snapshot.material_candidates = raw.material_candidates.map(item => {
+        exact(item, ["kind", "id", "name", "sha256", ...(own(object(item), "source_chat_id") ? ["source_chat_id"] : [])]);
+        const checked = window.RabbitNativeMaterials.candidate(item), ref = expected.get(key(checked));
+        if (!ref || seen.has(key(checked)) || checked.sha256 !== ref.sha256 || checked.source_chat_id !== ref.source_chat_id) invalid();
+        seen.add(key(checked)); return checked;
+      });
+      snapshot.material_inventory = { revision: sha(inventory.revision), complete: inventory.complete,
+        unavailable_count: integer(inventory.unavailable_count, Number.MAX_SAFE_INTEGER), unverified_count: integer(inventory.unverified_count, Number.MAX_SAFE_INTEGER) };
+    }
+    if (new TextEncoder().encode(JSON.stringify(snapshot)).length > 131072) invalid();
+    const target = exact(value.target, ["agent", "ai_profile", "memory_profile"]), targetAgent = nativeAgent(target.agent);
+    let ai = null, memory = null;
+    if (target.ai_profile !== null) {
+      exact(target.ai_profile, ["id", "revision", "name", "agent_instance_id", "device_id", "model_id", "reasoning_effort"]);
+      ai = profileSnapshot({ schema_version: 2, ai_profile: target.ai_profile, memory_profile: { id: "none" }, used_memory_references: [] }).ai_profile;
+      if (ai.agent_instance_id !== "local/" + targetAgent) invalid();
+    }
+    if (target.memory_profile !== null) {
+      if (typeof window.RabbitNativeMemory?.choice !== "function") invalid();
+      memory = window.RabbitNativeMemory.choice(target.memory_profile, { readOnly: true });
+    }
+    let creation = null;
+    if (value.creation !== null) {
+      exact(value.creation, ["creation_id", "created_chat_id", "source_hash", "handoff_started"]);
+      if (typeof value.creation.handoff_started !== "boolean" || value.creation.handoff_started && value.creation.created_chat_id === null) invalid();
+      creation = { creation_id: sharedId(value.creation.creation_id), created_chat_id: value.creation.created_chat_id === null ? null : sharedId(value.creation.created_chat_id),
+        source_hash: sha(value.creation.source_hash), handoff_started: value.creation.handoff_started };
+    }
+    const result = { id: sharedId(value.id), revision: sharedRevision(value.revision), source_view: sourceView, snapshot, material_refs: refs,
+      task: bodyText(nativeText(value.task, MAX_TEXT * 2, true)), target: { agent: targetAgent, ai_profile: ai, memory_profile: memory }, creation };
+    const characters = JSON.stringify(result).length;
+    if (characters > MAX_CHARACTERS) invalid();
+    if (budget) { budget.characters += characters; if (budget.characters > MAX_CHARACTERS) invalid(); }
+    return result;
+  }
+  function homeProfile(value) {
+    exact(value, ["id", "revision", "name", "agent_instance_id", "device_id", "model_id", "reasoning_effort"]);
+    const result = profileSnapshot({ schema_version: 2, ai_profile: value, memory_profile: { id: "none" }, used_memory_references: [] }).ai_profile;
+    if (result.agent_instance_id !== "local/codex") invalid();
+    return result;
+  }
+  function homeParameters(value) {
+    exact(value, ["model_id", "reasoning_effort"]);
+    const model = modelId(value.model_id, "codex"), effort = value.reasoning_effort;
+    if (effort !== null && !["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) invalid();
+    return { model_id: model, reasoning_effort: effort };
+  }
+  function homeConfigurationReceipt(value) {
+    exact(value, ["client_id", "draft_id", "configuration_revision", "proposal_sha256", "result", "applied_revision", "reason"]);
+    if (!/^specialist\/ui\/[A-Za-z0-9_.-]{1,100}$/.test(value.client_id) || !/^[a-f0-9]{64}$/.test(value.proposal_sha256)
+        || !["applied", "rejected"].includes(value.result)) invalid();
+    const result = { client_id: value.client_id, draft_id: sharedId(value.draft_id), configuration_revision: sharedRevision(value.configuration_revision),
+      proposal_sha256: value.proposal_sha256, result: value.result, applied_revision: value.applied_revision, reason: value.reason };
+    if (result.result === "applied" ? result.applied_revision !== result.configuration_revision + 1 || result.reason !== null
+        : result.applied_revision !== null || !["target_changed", "configuration_changed", "handoff_started", "storage_unavailable", "unsupported", "cancelled"].includes(result.reason)) invalid();
+    return result;
+  }
+  function homeHandoff(value) {
+    exact(value, ["draft_id", "configuration_revision", "creation_id", "created_chat_id", "base_profile", "parameters", "base_selection", "local_request", "local_result", "source_hash"]);
+    const result = { draft_id: sharedId(value.draft_id), configuration_revision: sharedRevision(value.configuration_revision), creation_id: sharedId(value.creation_id),
+      created_chat_id: value.created_chat_id === null ? null : sharedId(value.created_chat_id), base_profile: homeProfile(value.base_profile), parameters: homeParameters(value.parameters),
+      base_selection: null, local_request: null, local_result: null, source_hash: text(value.source_hash, 64, false) };
+    if (!/^[a-f0-9]{64}$/.test(result.source_hash) || result.base_profile.id === result.draft_id) invalid();
+    const selection = (dto, allowUnselected = false) => {
+      exact(dto, ["workspace_id", "agent", "chat_id", "selection", "profile", "profile_current"]);
+      exact(dto.selection, ["revision", "ai_profile_id", "ai_profile_revision"]);
+      if (!result.created_chat_id || dto.chat_id !== result.created_chat_id || dto.agent !== "codex" || !/^[a-f0-9]{64}$/.test(dto.workspace_id)
+          || dto.profile_current !== true) invalid();
+      if (allowUnselected && dto.selection.revision === 0 && dto.selection.ai_profile_id === null && dto.selection.ai_profile_revision === null && dto.profile === null)
+        return { workspace_id: dto.workspace_id, agent: "codex", chat_id: dto.chat_id, selection: { revision: 0, ai_profile_id: null, ai_profile_revision: null }, profile: null, profile_current: true };
+      const profile = homeProfile(dto.profile);
+      if (dto.selection.ai_profile_id !== profile.id || dto.selection.ai_profile_revision !== profile.revision) invalid();
+      return { workspace_id: dto.workspace_id, agent: "codex", chat_id: dto.chat_id,
+        selection: { revision: sharedRevision(dto.selection.revision), ai_profile_id: profile.id, ai_profile_revision: profile.revision }, profile, profile_current: true };
+    };
+    if (value.base_selection !== null) {
+      result.base_selection = selection(value.base_selection, true);
+      if (result.base_selection.profile && JSON.stringify(result.base_selection.profile) !== JSON.stringify(result.base_profile)) invalid();
+    }
+    if (value.local_request !== null) {
+      exact(value.local_request, ["body_json", "request_sha256"]);
+      const raw = text(value.local_request.body_json, 4096, false), digest = text(value.local_request.request_sha256, 64, false);
+      let body; try { body = JSON.parse(raw); } catch (_) { invalid(); }
+      exact(body, ["agent", "chat_id", "expected_revision", "base_profile_id", "base_profile_revision", "parameters", "operation_id"]);
+      const parameters = homeParameters(body.parameters);
+      if (!result.base_selection?.profile || body.agent !== "codex" || body.chat_id !== result.created_chat_id || body.expected_revision !== result.base_selection.selection.revision
+          || body.base_profile_id !== result.base_profile.id || body.base_profile_revision !== result.base_profile.revision
+          || JSON.stringify(parameters) !== JSON.stringify(result.parameters) || !/^[a-f0-9]{64}$/.test(digest)) invalid();
+      sharedId(body.operation_id); result.local_request = { body_json: raw, request_sha256: digest };
+    }
+    if (value.local_result !== null) {
+      const dto = exact(value.local_result, ["workspace_id", "agent", "chat_id", "selection", "profile", "profile_current", "scope", "inference_performed", "connection_checked", "operation"]);
+      if (!result.local_request) invalid();
+      const clean = selection(Object.fromEntries(["workspace_id", "agent", "chat_id", "selection", "profile", "profile_current"].map(key => [key, dto[key]]))), body = JSON.parse(result.local_request.body_json);
+      exact(dto.operation, ["id", "request_sha256", "replayed"]);
+      if (dto.scope !== "native_local_configuration" || dto.inference_performed !== false || dto.connection_checked !== false || typeof dto.operation.replayed !== "boolean"
+          || dto.operation.id !== body.operation_id || dto.operation.request_sha256 !== result.local_request.request_sha256
+          || clean.workspace_id !== result.base_selection.workspace_id || clean.selection.revision !== body.expected_revision + 1
+          || clean.profile.id === result.base_profile.id || clean.profile.id === result.draft_id
+          || clean.profile.model_id !== result.parameters.model_id || clean.profile.reasoning_effort !== result.parameters.reasoning_effort) invalid();
+      result.local_result = { ...clean, scope: dto.scope, inference_performed: false, connection_checked: false, operation: { ...dto.operation } };
+    }
+    return result;
+  }
   function sharedTopic(value) {
     const result = text(value, 540, false);
     if (result.startsWith("new:")) sharedId(result.slice(4));
@@ -150,9 +293,9 @@
       return [key, result];
     });
   }
-  function sanitize(input) {
+  function sanitize(input, workspaceId) {
     object(input);
-    const result = { selection: { type: "new", id: null }, page: "conversations", backend: "codex", model_id: "", query: "", historyAgent: "all", historyOffset: 0, historyMatch: null, scrollTop: 0, drafts: [], draftAttachments: [], taskIntents: [], profileChoices: { version: 1, entries: [] }, historyChoices: { version: 1, entries: [] }, memoryChatCreation: { version: 1, pending: null }, newCreationId: null, historyCreationIds: [], historyBackendChoices: [], historyModelChoices: [], historyContinuationIds: [], pendingSubmissions: [], sourceImagePending: { version: 1, entries: [] } };
+    const result = { selection: { type: "new", id: null }, page: "conversations", backend: "codex", model_id: "", query: "", historyAgent: "all", historyOffset: 0, historyMatch: null, scrollTop: 0, drafts: [], draftAttachments: [], taskIntents: [], profileChoices: { version: 1, entries: [] }, historyChoices: { version: 1, entries: [] }, memoryChatCreation: { version: 1, pending: null }, newCreationId: null, historyCreationIds: [], historyBackendChoices: [], historyModelChoices: [], historyContinuationIds: [], pendingSubmissions: [], sourceImagePending: { version: 1, entries: [] }, continuations: [], currentContinuation: null };
     const budget = { characters: 0 };
     if (own(input, "selection")) {
       const selected = object(input.selection); if (!own(selected, "type")) invalid();
@@ -164,6 +307,20 @@
       } else invalid();
     }
     if (own(input, "page")) { if (!pages.has(input.page)) invalid(); result.page = input.page; }
+    if (own(input, "continuations")) {
+      if (!Array.isArray(input.continuations) || input.continuations.length > MAX_ITEMS) invalid();
+      const ids = new Set(), sources = new Set();
+      result.continuations = input.continuations.map(value => {
+        const item = continuation(value, workspaceId, budget), source = item.source_view.agent + ":" + item.source_view.chat_id;
+        if (ids.has(item.id) || sources.has(source)) invalid();
+        ids.add(item.id); sources.add(source); return item;
+      });
+    }
+    if (input.currentContinuation != null) {
+      result.currentContinuation = sharedId(input.currentContinuation);
+      if (!result.continuations.some(item => item.id === result.currentContinuation)) invalid();
+    }
+    if (result.page === "continuation" && result.currentContinuation === null) invalid();
     if (own(input, "backend")) result.backend = backend(input.backend);
     result.model_id = modelId(input.model_id, result.backend);
     if (own(input, "query")) result.query = text(input.query, 400);
@@ -190,6 +347,24 @@
     if (own(input, "profileChoices")) {
       const choices = object(input.profileChoices); if (choices.version !== 1) invalid();
       result.profileChoices.entries = mapEntries(choices.entries, profileDraftKey, value => profileSnapshot(value, budget));
+    }
+    if (input.homeNativeChoice != null) {
+      const choice = object(input.homeNativeChoice), agent = backend(choice.agent);
+      const profile = choice.profile == null ? null : profileSnapshot({ schema_version: 2, ai_profile: choice.profile, memory_profile: { id: "none" }, used_memory_references: [] }, budget).ai_profile;
+      if (profile && profile.agent_instance_id !== "local/" + agent) invalid();
+      result.homeNativeChoice = { agent, profile, memory: memoryProfile(choice.memory) };
+      if (own(choice, "local_base")) {
+        const base = homeProfile(choice.local_base), identity = homeIdentity(input.homeConfiguration);
+        if (agent !== "codex" || !profile || profile.id !== identity.draft_id || profile.revision !== identity.revision || profile.name !== "本草稿设置" || profile.id === base.id) invalid();
+        result.homeNativeChoice.local_base = base;
+      }
+    }
+    if (input.homeConfiguration != null) result.homeConfiguration = homeIdentity(input.homeConfiguration);
+    if (input.homeConfigurationReceipt != null) result.homeConfigurationReceipt = homeConfigurationReceipt(input.homeConfigurationReceipt);
+    if (input.homeNativeHandoff != null) result.homeNativeHandoff = homeHandoff(input.homeNativeHandoff);
+    if (own(input, "homeTextCompatibility")) {
+      if (typeof input.homeTextCompatibility !== "boolean" || input.homeTextCompatibility && result.homeNativeChoice) invalid();
+      result.homeTextCompatibility = input.homeTextCompatibility;
     }
     if (own(input, "memoryChatCreation")) {
       const journal = object(input.memoryChatCreation); if (journal.version !== 1) invalid();
@@ -273,7 +448,7 @@
       const value = object(JSON.parse(raw));
       if (value.version !== VERSION || !Number.isSafeInteger(value.saved_at) || value.saved_at <= 0 || value.saved_at > Date.now() + 300000) invalid();
       if (Date.now() - value.saved_at > RETENTION) return null;
-      return { saved_at: value.saved_at, data: sanitize(value.data), retired: retiredFields.some(key => own(value.data, key)) };
+      return { saved_at: value.saved_at, data: sanitize(value.data, options.workspaceId), retired: retiredFields.some(key => own(value.data, key)) };
     }
     function preserveRetired() {
       if (!retirement) return true;
@@ -334,7 +509,7 @@
       if (!valid) return false;
       if (retirement) return false;
       let raw;
-      try { raw = JSON.stringify({ version: VERSION, saved_at: Date.now(), data: sanitize(snapshot) }); if (raw.length > MAX_RAW) invalid(); }
+      try { raw = JSON.stringify({ version: VERSION, saved_at: Date.now(), data: sanitize(snapshot, options.workspaceId) }); if (raw.length > MAX_RAW) invalid(); }
       catch (_) { report("这次页面状态超过恢复范围或格式不正确，未写入恢复副本；聊天仍可继续。"); return false; }
       let sessionSaved = false, localSaved = false;
       if (session) try { session.setItem(sessionKey, raw); sessionSaved = true; sessionAccessible = true; } catch (_) { sessionAccessible = false; }
@@ -353,5 +528,5 @@
     }
     return { load, save, status };
   }
-  window.RabbitBrowserState = { create };
+  window.RabbitBrowserState = { create, homeHandoff, homeConfigurationReceipt, continuation };
 })();

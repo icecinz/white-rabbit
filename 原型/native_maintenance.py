@@ -205,6 +205,10 @@ def observe_work(holder, kind, *, catalogue_identity=None):
                 busy |= native['running']
             if pending: return dict(result, complete=True, reason=None, status='needs_user')
             if configuration_pending: return dict(result, complete=True, reason='configuration_pending')
+            if kind in ('pi', 'hermes') and holder._active is not None and holder._terminal is not None:
+                continuing = (holder._continuations or native['pendingMessageCount']) if kind == 'pi' else native.get('queued')
+                if not continuing:
+                    return dict(result, complete=True, reason='completion_unverified')
             return dict(result, complete=True, reason=None, status='running' if busy else 'idle')
     except Exception:
         return result

@@ -99,20 +99,19 @@ def _observe(agent, manager, entries, specialist):
         if agent == 'codex':
             with try_locks(owner.lock) as acquired:
                 if not acquired:
-                    raise _Incomplete('lock_busy')
-                value = _raw(holder.observe_work())
+                    value = {'complete': False, 'reason': 'lock_busy', 'status': 'unknown',
+                             'connection_state': 'unknown', 'epoch': None,
+                             'native_session_id': None, 'pending_requests': None}
+                else:
+                    value = _raw(holder.observe_work())
         else:
             options = ({'catalogue_identity': manager._maintenance_catalogue_identity}
                        if agent == 'hermes' else {})
             value = _raw(native_maintenance.observe_work(holder, agent, **options))
-        if not value['complete']:
-            raise _Incomplete(value['reason'] or 'observation_unavailable')
         rows.append(dict(agent=agent, role='chat', chat_id=identity, owner='rabbit', **value))
     if specialist is not None:
         value = _raw(specialist.observe_work())
         if value['connection_state'] != 'not_open':
-            if not value['complete']:
-                raise _Incomplete(value['reason'] or 'observation_unavailable')
             rows.append(dict(agent=agent, role='specialist', chat_id=None, owner='rabbit', **value))
     return rows
 
@@ -131,11 +130,20 @@ def snapshot(service):
             # No private holder fields are inspected here. A different epoch or
             # native identity invalidates the whole Agent's earlier observation.
             if (len(first) != len(current) or any(
-                    a['epoch'] != b['epoch'] or a['native_session_id'] != b['native_session_id']
-                    for a, b in zip(first, current))):
+                    (a['complete'] and b['complete'] or a[key] is not None and b[key] is not None)
+                    and a[key] != b[key]
+                    for a, b in zip(first, current) for key in ('epoch', 'native_session_id'))):
                 raise _Incomplete('connection_changed')
             _same(before, _capture(service, agent, attribute, limit))
-            works.extend(current)
+            # An unavailable slot must not hide another independently observed
+            # one. A slot that was unknown in the first read stays unknown until
+            # a later snapshot can observe it twice; missing identity is not a
+            # positive assertion that the identity has changed.
+            rows = [a if not a['complete'] and b['complete'] else b
+                    for a, b in zip(first, current)]
+            if any(not row['complete'] for row in rows):
+                reason = 'partial_observation'
+            works.extend(rows)
         except _Incomplete as error:
             reason = str(error)
         except Exception:
