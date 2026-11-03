@@ -16,7 +16,7 @@ White Rabbit brings agents, models, conversations, materials, and memory into a 
 
 **Early development release · macOS/POSIX · Python 3.11+**. The interface is still mainly Chinese; English covers basic navigation, management, and settings labels. Documentation is available in both languages.
 
-**Installing for the first time?** Give [this repository](https://github.com/icecinz/white-rabbit) to your agent and ask it to follow the [installation checklist](docs/install-agent.md). The root [AGENTS.md](AGENTS.md) points to the same checklist. The fictional demo below is a separate interface preview.
+**Installing for the first time?** Start with the [beginner guide](docs/getting-started.md). You can download the source ZIP and ask an assistant with local file and command access to help. There is no double-click app installer yet. You need a Mac, Python 3.11+, and one already configured native agent; a web-only chat cannot perform local installation. The fictional demo is a separate interface preview.
 
 ![My AI overview in the running application](assets/home.png)
 
@@ -32,7 +32,7 @@ White Rabbit brings agents, models, conversations, materials, and memory into a 
 - **Ask the Rabbit specialist:** enable one management conversation and choose Codex or DSH as its core. Both use the application's supported management interfaces; ordinary-agent support and specialist-core support are tracked separately.
 - **Reuse the parts:** take an independently packaged core into another Python application without adopting the entire White Rabbit host.
 
-Each route retains its own sending, approval, and recovery protocol. Codex supports per-draft/per-conversation model and reasoning adjustments; a specialist suggestion counts as applied only after the originating browser saves it and returns a receipt. Claude selects models without overriding native reasoning; DSH model changes remain unavailable, while its read-only memory selection is supported. [Daily workflow](docs/native-agents.md#daily-workflow)
+Each route retains its own sending, approval, and recovery protocol. Codex supports per-draft/per-conversation model and reasoning adjustments; a specialist draft-adjustment suggestion counts as applied only after the originating browser saves it and returns a receipt. Other management changes use the corresponding interface result and readback. Claude selects models without overriding native reasoning; DSH model changes remain unavailable, while its read-only memory selection is supported. [Daily workflow](docs/native-agents.md#daily-workflow)
 
 ## The idea and the current scope
 
@@ -101,29 +101,11 @@ Color describes an available interface. It grants no additional permission and d
 
 ## Install with a real agent
 
-You can tell Codex, Hermes, or DSH:
+Follow the [beginner guide](docs/getting-started.md) for downloading the ZIP, asking a local assistant to install it, checking real chat, and opening it later. The [installation checklist](docs/install-agent.md) and root [AGENTS.md](AGENTS.md) are for the assistant or a command-line user. The specialist and extra memory services are optional.
 
-> Install https://github.com/icecinz/white-rabbit following AGENTS.md and the installation checklist. Connect one agent I already use, preserve its model, provider, and login settings, verify a real reply and continuation after refresh, and tell me how to open it next time.
+After installation, open Finder, press **Command + Shift + G**, enter `~/.imcodes/one-ai`, and double-click **打开小白兔.command**. Your installing assistant can create a desktop alias; the installer does not create one automatically. The legacy directory name does not require IM.codes.
 
-The installing agent checks macOS, Python 3.11+, any existing installation, and the selected agent's dependencies; creates a connection file containing local paths only; then runs the bundled installer. Running `demo.py` or opening a page with no native connection does not complete installation. Follow the [checklist](docs/install-agent.md) to find a stable absolute Python 3.11+ path; replace the example below.
-
-```sh
-git clone https://github.com/icecinz/white-rabbit.git
-cd white-rabbit
-RABBIT_PYTHON="/absolute/path/to/python3.11"
-"$RABBIT_PYTHON" --version
-"$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型"
-```
-
-A fresh check normally asks for a connection configuration. Follow the [checklist](docs/install-agent.md) and [connection examples](docs/native-agents.md) to configure one agent, check, install, and open. The existing local installer provides login startup, a private runtime copy, persistent data, and a reusable entry. **The specialist and extra memory services are optional later steps.**
-
-Next time, double-click `~/.imcodes/one-ai/打开小白兔.command`; no terminal variable needs to persist. Alternatively use the Python absolute path selected at installation (replace the example):
-
-```sh
-"/absolute/path/to/python3.11" -B "$HOME/.imcodes/one-ai/manage.py" open
-```
-
-Data lives in `~/.imcodes/one-ai`; this legacy directory name does not require IM.codes. Preserve existing settings and records during updates, and identify an existing service before resolving port conflicts. Persistent installation currently supports macOS; other POSIX systems have only the manual foreground route. Windows is unsupported.
+White Rabbit's program and data live in that directory. Keep the source folder for documentation and updates, and preserve saved connections and conversations. Persistent installation supports macOS; other POSIX systems have only a manual foreground route. Windows is unsupported.
 
 ## Interface preview only: fictional demo
 

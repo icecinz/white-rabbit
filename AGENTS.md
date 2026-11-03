@@ -1,13 +1,14 @@
 # Installing White Rabbit for a user
 
-For “install and configure White Rabbit,” follow [the installation checklist](docs/install-agent.md) ([中文](docs/install-agent.zh-CN.md)). Start with real-agent mode. `demo.py` is an optional temporary, fictional demo; it is not an installed AI assistant.
+For “install and configure White Rabbit,” follow [the installation checklist](docs/install-agent.md) ([中文](docs/install-agent.zh-CN.md)). The [beginner guide](docs/getting-started.md) ([中文](docs/getting-started.zh-CN.md)) is for the user. Source ZIP extraction works without Git; place it in a permanent folder before setup. Start with real-agent mode. `demo.py` is an optional temporary, fictional demo; it is not an installed AI assistant.
 
 - Inspect the OS, Python, existing installation, and the user's installed agents first. Use one agent they already use; do not install all five.
 - Keep the original agent's credentials, provider routing, model settings, tools, and approvals. Preserve CC Switch and custom agent homes. Ask about ambiguous paths or accounts rather than choosing a different configuration.
 - The persistent connection JSON supports `home` only for Hermes and DSH. The login service does not automatically save terminal `CODEX_HOME` or `CLAUDE_CONFIG_DIR`. If the original account and routing environment cannot be confirmed, pause that route or use another already verified existing agent; do not fall back to defaults or migrate credentials.
 - Check login availability without displaying credential files or copying secrets into chat, command arguments, this checkout, or a report. Missing login or API access is unfinished setup for the user to complete locally.
 - Establish a persistent data directory and a repeatable opening method. Use the installer's maintenance guards; do not interrupt active work, answer native approvals, or delete user data to get past an installation error.
-- Use `原型/install_local.py check` before `install`. Prepare the finite native JSON from verified paths; it contains no keys. `check` does not verify authentication or real replies. On updates, omit `--native-config` to preserve saved connections, or merge the complete intended set before explicitly replacing it.
+- Use `原型/install_local.py check` before `install`; proceed after `status` is `ready_for_installation`, not `needs_configuration`. Prepare the finite native JSON from verified paths; it contains no keys. `check` does not verify authentication or real replies. On updates, omit `--native-config` to preserve saved connections, or merge the complete intended set before explicitly replacing it.
+- After a successful install, explicitly run the installed `manage.py open`; installation itself does not open the browser. Show Finder → Command+Shift+G → `~/.imcodes/one-ai` → `打开小白兔.command`, and create a desktop alias if requested.
 - Verify a real native reply, reload, and continue that same conversation. A running HTTP server, indexed history, model catalog, offline tests, or simulated reply does not prove real chat works.
 - Deliver the opening method, data location, chosen agent/model, verified result, and remaining work. Distinguish unknown values from confirmed ones. Do not claim complete installation when only the demo or page works.
 

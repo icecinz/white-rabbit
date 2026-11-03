@@ -4,6 +4,8 @@
 
 When asked to “install and configure White Rabbit,” the goal is **a repeatable opening method and a continuing conversation with at least one real agent**. Running `demo.py` or loading a page is not completion.
 
+This checklist is for the installing assistant or a command-line user. New users can start with the [beginner guide](getting-started.md). Clone the repository or [download the source ZIP](https://github.com/icecinz/white-rabbit/archive/refs/heads/main.zip) and extract it; ZIP setup does not require Git. Move the source to a folder the user will keep, then work from its root, containing `AGENTS.md`, `demo.py`, and `原型/install_local.py`, regardless of the extracted folder name. A source ZIP is not a preconfigured application installer. Do not install from a temporary directory or ZIP preview.
+
 ## 1. Inspect the existing environment
 
 - Check the OS and Python. Python 3.11+ is required; use the macOS route for persistent local installation. Windows is not supported.
@@ -36,18 +38,29 @@ From the repository root, run the read-only preflight first:
 "$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型"
 ```
 
-Use [the native-connection JSON examples](native-agents.md#persistent-installation) to write verified absolute paths into `$HOME/.white-rabbit-connections.json`, outside the checkout. You prepare this file; the program does not discover the paths automatically. Do not put keys in it. Then run:
+Use [the native-connection JSON examples](native-agents.md#persistent-installation) to write verified absolute paths into `$HOME/.white-rabbit-connections.json`, outside the checkout. You prepare this file; the program does not discover the paths automatically. Do not put keys in it. Run the configured preflight first:
 
 ```sh
 "$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
+```
+
+Continue only after `status` is `ready_for_installation`. Then install and open:
+
+```sh
 "$RABBIT_PYTHON" -B 原型/install_local.py install --source-dir "$PWD/原型" --native-config "$HOME/.white-rabbit-connections.json"
 ```
 
-`check` verifies basic requirements, paths, and port 17860: `service` is `free`, `current_installation`, `other`, or `unknown`. Investigate another service or an unknown state first. This is one read-only observation; the installer still checks active work and maintenance state. It does not verify authentication, SDK versions, or real model replies. First installation needs at least one ordinary agent; an empty connection set or specialist alone is not configured chat.
+After installation succeeds, open the page:
+
+```sh
+"$RABBIT_PYTHON" -B "$HOME/.imcodes/one-ai/manage.py" open
+```
+
+`check` verifies basic requirements, paths, and port 17860: `service` is `free`, `current_installation`, `other`, or `unknown`. Investigate another service or an unknown state first. This is one read-only observation; the installer still checks active work and maintenance state. It does not verify authentication, SDK versions, or real model replies. First installation needs at least one ordinary agent; an empty connection set or specialist alone is not configured chat. An empty connection set reports `needs_configuration`; resolve it before installing. `install` deploys and activates the service but does not open a browser. Run `open` only after installation succeeds.
 
 The preflight's `visible_commands` can help locate commands on the current PATH. Verify each actual installation and the original agent's status; this is not a complete scan or proof that an agent works. Do not read or print credentials.
 
-The installer keeps a private program copy and data under `$HOME/.imcodes/one-ai` and registers a per-user login service. The directory name does not require IM.codes. Later, double-click `打开小白兔.command` there; no terminal variable needs to persist. Alternatively, use the absolute Python path chosen at installation (replace the example):
+The installer keeps a private program copy and data under `$HOME/.imcodes/one-ai` and registers a per-user login service. The directory name does not require IM.codes. Later, open Finder, press **Command + Shift + G**, enter `~/.imcodes/one-ai`, and double-click **打开小白兔.command**. This folder is hidden by default. The installer does not create a desktop shortcut; create an alias if the user wants one and keep the original launcher in place. No terminal variable needs to persist. Alternatively, use the absolute Python path chosen at installation (replace the example):
 
 ```sh
 "/absolute/path/to/python3.11" -B "$HOME/.imcodes/one-ai/manage.py" open
@@ -57,7 +70,7 @@ On update, omitting `--native-config` preserves saved connections. An explicitly
 
 For a data-format upgrade, make a consistent SQLite backup of the affected ledger while no work is active and retain it with the old program version. Do not copy only a running database's `.sqlite` file and omit its WAL. The installer's recovery snapshot includes the program, launch configuration, and control scripts, but no data databases. The Hermes/Pi result-retention update upgrades `hermes-native.sqlite`/`pi-native.sqlite` from v1 to v2; the old program cannot read v2 directly. `rollback` restores only the program. Before restoring a pre-upgrade ledger, preserve the current data and explain that newer records would be lost; let the user decide rather than overwriting automatically.
 
-Keep the source checkout for documentation and updates. An update retains the saved service Python even when the installer runs under another interpreter. If the saved path is unavailable, select a new stable Python 3.11+ and pass `--python "$RABBIT_PYTHON"` to both `check` and `install`; also verify its Pillow installation. Interpreter changes are never inferred automatically.
+Keep the extracted or cloned source directory for documentation and updates; runtime data remains separate under `$HOME/.imcodes/one-ai`. An update retains the saved service Python even when the installer runs under another interpreter. If the saved path is unavailable, select a new stable Python 3.11+ and pass `--python "$RABBIT_PYTHON"` to both `check` and `install`; also verify its Pillow installation. Interpreter changes are never inferred automatically.
 
 Keep White Rabbit's data separate from the agent's original files and record selected environments with absolute paths. Check that the page, launcher, and data directory exist and that the opening method still works after this terminal closes.
 
@@ -67,10 +80,14 @@ Configure only the chosen ordinary agent first. Memory, an explicitly configured
 
 A fresh configuration prefers an explicitly enabled native entry whose default parameters can be checked. Select one explicitly when none qualifies. Preserve an existing user's saved default; Codex is not an installation prerequisite.
 
-1. Open the installed application, select the configured real native agent, and create a new acceptance conversation.
+1. Open the installed entry at `http://127.0.0.1:17860/`, select the configured real native agent, and create a new acceptance conversation.
 2. Send a short request with a random code, such as “This acceptance code is paperboat7318. Briefly confirm it; do not use tools.” Confirm an actual reply from the original agent. Record its reported model information; do not guess an unreported model or reasoning level.
-3. Reload the page and open the same conversation. Confirm the exchange remains, then ask “What was the acceptance code?” Check the continuing answer in the same native session.
-4. Reopen using the method you will give the user, without reconstructing a long command. If the service itself was not restarted, report page-reload verification rather than claiming restart recovery.
+3. **Page refresh:** reload and open the same conversation. Confirm the exchange remains, then ask “What was the acceptance code?” Check the continuing answer in the same native session.
+4. **Page close/reopen:** close the browser page and the installation terminal, then use the saved `打开小白兔.command` or `manage.py open` method to return. Confirm the same conversation and saved content can be found without sending again. Closing a page or terminal does not stop the background service, so this proves reopening only.
+5. **Service restart:** record this separately only after a normal service restart was actually performed with no active work and through the existing maintenance guards. Reopen with the saved method and check the same conversation and content. If a normal restart cannot be performed or confirmed, mark this step unverified; do not substitute page reopening.
+6. **Logout/login startup:** record this separately only after an actual logout and login to the same macOS account, checking that the login service starts and the same data remains available. If logout/login is not available, mark this step unverified; an isolated directory or the existing current-user session does not replace it.
+
+Record the outcome and evidence for steps 3–6 separately. Do not require a new account or another Mac when unavailable, and do not borrow or copy credentials to present an existing environment as a fresh-user acceptance.
 
 If a reopened Hermes conversation shows “Restore original session,” explain that native recovery may also continue unfinished work. Let the user explicitly restore it, then check the existing content; do not resend a question to make history appear.
 
