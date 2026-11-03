@@ -323,7 +323,7 @@ class InstalledPayloadTests(unittest.TestCase):
         originals = installer.source_files(source)
         expected = {name: hashlib.sha256(path.read_bytes()).hexdigest()
                     for name, path in originals.items()}
-        with tempfile.TemporaryDirectory(prefix='rabbit-installed-payload-', dir='/private/tmp') as temporary:
+        with tempfile.TemporaryDirectory(prefix='rabbit-installed-payload-', dir=Path(tempfile.gettempdir()).resolve()) as temporary:
             root = Path(temporary)
             layout = installer.Layout(root / 'isolated-home')
             with patch.object(installer, 'python_executable', return_value=sys.executable), \
