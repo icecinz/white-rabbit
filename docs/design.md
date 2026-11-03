@@ -4,6 +4,25 @@
 
 White Rabbit aims to make several agents feel reachable from one place while keeping their identities, data, and capabilities understandable. Three requirements shape the design: preserve native work, let AI handle supported management, and make the parts independently reusable.
 
+The 0.2.0-alpha.1 early source snapshot implements the following paths. Native connection requirements and capabilities remain explicit rather than inferred from the page layout.
+
+## Four places, one application
+
+| Place | Purpose | Action boundary |
+| --- | --- | --- |
+| My AI | Summarize agents, discovered models, memory profiles, and recent work | Enter the same resource's management detail or the exact work item; New conversation opens the composer, and the rabbit icon returns here |
+| Conversations | Start, search, read, or continue work | Sending starts work; choosing a configuration stays on the same page, and refresh retains the page and browser-local draft |
+| Management and settings | Inspect resource details and maintain supported configuration | Sources and observation times belong in details; zero connections has a Connect your first agent action |
+| Rabbit specialist | Give management instructions without leaving the current work | The upper-left input stays available; its title opens the continuous history and guide |
+
+Opening or polling **My AI** reads saved directories, indexes, and cached execution facts. It does not start an agent, probe a model, or read memory content. Discovered models stay labeled as discovered; stale or unknown execution observations are not upgraded to running or idle. Only an explicit **Check and update** begins the separate report pipeline.
+
+![My AI at a narrow width](../assets/home-narrow.png)
+
+*Running application with invented resources and work, not a design mockup. Configure and verify it in your own environment.*
+
+The specialist's **core selector** belongs in settings and currently uses the human-facing neutral style. Codex and DSH retain separate native sessions behind one application history. Only a successful switch adds one boundary; missing prose is supplied on the next turn, while historical tool calls are never replayed. The shared interface does not make every tool, approval, or recovery path interchangeable.
+
 ## Warm paper, ink purple, moss green
 
 The current visual layer uses a warm paper background, clean panels, ink purple, and restrained moss-green accents. Headings use a system Song/serif face; body text and controls use a system sans-serif, while code stays monospaced. Fine borders, small corners, little shadow, and a bundled static paper texture keep the content readable. Dark mode uses a separate warm-gray/soft-purple palette.
@@ -16,9 +35,13 @@ An agent is the program that executes a task; a model is one of the services it 
 
 The entry should help people find the work already in progress, inspect its status, and continue the same native session where supported. History reading, saved-session recovery, and controlling a live external executor are tracked separately. The current host primarily controls its own connections; external desktop-work attachment remains incomplete.
 
-The device goal extends that entry to the places where work happens. Current phone access opens the same online Mac through IM.codes. Cross-computer task routing and wake-up remain later work, not hidden capabilities of the current UI.
+The source snapshot removes device categories, wake-up placeholders, phone-preview entries, and IM.codes-specific compatibility. It keeps the local web service, access checks, local record identity, and browser drafts; separately installed user software is untouched. Historical phone access and the unfinished cross-device idea are documented separately. **About → A letter from White Rabbit** reads one bundled text; the public history export uses that same source, rather than a second editable letter.
 
-Codex, Hermes, and Pi now retain one composing path from home draft through native continuation. Codex ↔ Hermes handoff uses selected, fixed text/file/image snapshots, prepares without executing, and creates the target only on Send. Codex local tuning and specialist suggestions also wait for the originating page's versioned save receipt before claiming application. Claude/DSH composer consolidation remains later work for this release. These workflow changes do not establish a new physical-phone acceptance result.
+Codex, Hermes, Pi, Claude Code, and DSH retain one basic composing path from the new-conversation draft through native continuation, while preserving their own sending, approval, and recovery protocols. Codex ↔ Hermes handoff uses selected, fixed text/file/image snapshots, prepares without executing, and creates the target only on Send. Codex local tuning and specialist suggestions also wait for the originating page's versioned save receipt before claiming application. Conversation identity, native protocol, and supported material still belong to the selected agent.
+
+An unavailable native conversation can still open its exactly bound saved text in the same entry. This read-only path supports paging, refresh, source selection, and return while preserving the original draft. Hermes source segments remain separate, and source changes require an explicit reread. Reading stored text does not start, restore, or take over an agent; live text without a reliable message mapping retains the search excerpt only.
+
+Original-application navigation is another separate action. Local Codex can provide its exact thread link, with the installed target and system handoff verified per environment. Other agents have no universal external-opening guarantee. A link to the right place does not grant control of a task already running there.
 
 ## Fewer controls, a readable settings catalog
 

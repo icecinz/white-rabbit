@@ -29,9 +29,11 @@ else:
 
 ## 对话输入区
 
-`composer_shell.js`与`composer_shell.css`只负责布局。`RabbitComposerShell.mount({root, status, choices, input, materials, support, send, hint, label?})`接收原DOM节点，把铭牌、选择框、输入、材料和底部操作排成统一输入区。首页、Codex、Hermes与Pi共用该部件；各自控制器继续持有原输入节点、草稿、材料、原生编号和回执，不在部件里保存或发送内容。
+`composer_shell.js`与`composer_shell.css`只负责布局。`RabbitComposerShell.mount({root, status, choices, input, materials, support, send, hint, label?})`接收原DOM节点，把铭牌、选择框、输入、材料和底部操作排成统一输入区。首页与五种现有原生Agent共用该部件；各自控制器继续持有原输入节点、草稿、材料、原生编号和回执，不在部件里保存或发送内容。
 
 Pi的同家AI与只读记忆选择继续使用既有配置接口，不提供局部细调或跨Agent接续。宿主通过`getModelLabel`从已经验证的模型目录缓存解析展示名称；没有准确映射时不猜测，不为铭牌另开Agent或查询模型。
+
+Claude与DSH也由各自控制器提供`getComposerView`、`chooseConfiguration`和`applyConfigurationReadback`。Claude不覆盖原生强度；DSH仅接记忆选择，AI配置明确不可修改，读回中的`configuration_selection`为`null`。宿主共用选择弹层及快捷键回调，不新建一层执行器。未知、审批和保存失败继续沿原请求处理。
 
 首页配置与当前对话配置分开持有。专员建议可在首页隐藏时更新原草稿选择，配置和应用回执写入同一份浏览器快照；不移动正文、材料或当前页面。读取建议复用专员现有刷新，不增加轮询器。页面凭证仅在会话存储，普通恢复快照只保留不含凭证的应用回执。
 

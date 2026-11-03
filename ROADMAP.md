@@ -1,17 +1,18 @@
 # Roadmap · 近期路线
 
-The direction is **one entry for native AI work, with devices becoming additional places to act**. The current priority is to connect existing work reliably, then improve organization and coordination around it. This is a direction, not a delivery schedule.
+The direction is **all your AI, in one place**. Blueprint 2.0 first helps one person see their resources, find existing work, and avoid repeated material transfer and setup. This is a direction, not universal agent/model compatibility or a delivery schedule.
 
 | Track | Current foundation | Next work |
 | --- | --- | --- |
 | Existing native work | Five agent routes, saved-session recovery, status of White Rabbit-owned connections | Supported attachment to external ongoing work; do not substitute a newly started CLI for the original desktop executor |
-| Daily workflow | Unified Codex/Hermes/Pi composer; Codex local tuning; selected-material Codex ↔ Hermes continuation | Consolidate Claude/DSH composing, then extend per-conversation tuning and continuation only where supported; separately verify the updated phone workflow |
+| Daily workflow | My AI overview from saved/cached facts; exact recent-work navigation; five-agent composer, Codex tuning, Codex ↔ Hermes selected-material continuation, and saved-text reading | Make installation, clear capability boundaries, and everyday continuation easier for another person |
 | Work discovery | Manual HAPI Hub summaries and original-page links | Verify supported control paths separately; retain original approval and stopping behavior |
-| Specialist | Fixed native conversation, shared management interfaces, bounded task input/result paths | Reliable end-to-end results across more targets; keep connection/cache limits explicit |
+| Specialist | One application history with Codex/DSH native cores and shared bounded management interfaces | Extend tools and recovery only around a concrete need, preserving approvals and unknown states. DSH specialist shared memory is unconnected; Hermes is a later option |
 | Modules | Six installable cores, explicit inputs, shared rules | Reduce remaining host coupling when a reusable interface is clear; preserve transactions |
 | Materials and memory | Explicit handoffs, Hindsight, separate Hermes document memory | Improve source/version checks; complete optional Mem0 configuration and real retrieval/write validation before claiming full support |
-| Devices | One Mac, external IM.codes phone access | Deliberate multi-computer routing and device lifecycle/wake-up, after the local route is reliable |
+| Local product scope | Source removes remote entries and special preview compatibility; historical phone work and one-source About letter are retained separately | Verify the installed update preserves local startup, records, drafts, and files. Cross-device takeover/wake-up are outside this batch |
 | Language and onboarding | English/Chinese documentation, basic English UI labels | Expand translations and improve another person's first real task |
+| AI updates | No daily intelligence feature in this snapshot | Later, consider short dated/source-linked reports from existing skills, focused on the AI the user already uses |
 
 ## Design requirements throughout
 
@@ -25,8 +26,10 @@ Windows, cloud synchronization, universal application control, and complete nati
 
 ## 中文
 
-方向是**原生 AI 工作的统一入口，逐步把设备变成可以工作的出口**。先可靠连接原来就在做的工作，再扩展整理和协调；不拿另启一个 CLI 冒充接管原桌面应用。
+方向是**一站式使用所有 AI**。蓝图 2.0 先帮助个人看清资源、找到原有工作，少搬资料、少做重复配置；不是所有 Agent／模型都自由互换的承诺，也不拿另启一个 CLI 冒充接管原桌面应用。
 
-当前有五种原生通路、自有连接的工作状态、手动 HAPI 发现、固定专员和六个独立核心。日常主路已统一 Codex／Hermes／Pi 输入、Codex 局部细调和 Codex ↔ Hermes 选择材料接续；接着整理 Claude／DSH 输入区，再按支持范围扩展细调与接续，更新后的手机操作另行验收。外部存活工作的连接、可靠交办结果、宿主边界和首次真实安装继续打磨。Mem0 配置与真实读写、跨电脑调度及唤醒另行验证；HAPI 控制仍在其原页面。
+当前源码已有“我的 AI”只读目录总览、同一工作条目导航和 Codex／DSH 共用专员应用历史。原有五种基本输入、局部调参、选材接续、只读阅读和六个核心继续保留；下一步围绕具体日常断点改善安装说明、能力边界与续聊。DSH 专员共享记忆未接通，Hermes 专员后置。Mem0 真实配置与读写、更多交办及宿主边界按具体需要扩展，HAPI 控制仍在原页面。
+
+远程入口与专用兼容已从源码撤下，历史手机访问与同源旧信单独保留；跨设备接管和唤醒不属于本批。每日 AI 情报尚未实现，后续再考虑从已有 Skill 提供带日期与来源的短报。
 
 少按钮、共用接口和语义颜色贯穿开发。界面代操作、AI／混合接口、Windows、云同步与完整能力等价都没有当前版本交付承诺。

@@ -2,7 +2,7 @@
 
 [English](native-agents.md) · [简体中文](native-agents.zh-CN.md) · [Home](../README.md)
 
-Start with **one agent you already use**. White Rabbit's native routes call the agent's own CLI, SDK, or protocol; they do not include a replacement agent or a model account. This snapshot targets macOS/POSIX and Python 3.11+.
+Start with **one agent you already use**. White Rabbit's native routes call the agent's own CLI, SDK, or protocol; they do not include a replacement agent or a model account. This snapshot targets macOS/POSIX and Python 3.11+. This is the 0.2.0-alpha.1 early source snapshot; verify authentication and a real same-session exchange in your own environment.
 
 These routes create or recover supported native sessions managed by White Rabbit. They do not automatically attach to a task already running in Codex desktop, WorkBuddy, or any other window. Reading history, recovering a saved session, and controlling a live external executor are separate capabilities.
 
@@ -151,22 +151,34 @@ All three arguments are required together. This snapshot's default package-versi
 
 ### Management assistant (optional)
 
-The separate management assistant needs an existing Python environment with the `mcp` SDK and an authenticated Codex CLI:
+Enable the separate management assistant with an existing Python environment containing the `mcp` SDK. The Codex core uses an authenticated Codex CLI; the DSH core reuses the configured native DSH route. This example enables Codex:
 
 ```sh
 --specialist-mcp-python "/absolute/path/to/mcp-venv/bin/python" \
 --specialist-codex-cli "/absolute/path/to/codex"
 ```
 
-It keeps a separate fixed native conversation and calls the same supported application-management interfaces as the UI. Its current role requests a fixed model/reasoning configuration, so availability also depends on the native account. The optional work-document mode requires separately supplied project role documents and is not needed for this starting path. See [what the specialist can do](specialist.md).
+To offer both cores, also configure the native DSH arguments above, preserving its existing account, provider, and profile. Select an available core in **Settings → Rabbit specialist**. Both use the same management MCP and one application history, with separate native sessions; this is not the ordinary composer's AI-profile selection. A supported MCP operation can list a profile, rename its exact ID/current version, and reread the saved result. Check each configured core's real connection and permissions; an ordinary DSH chat route does not automatically configure its specialist role. The optional work-document mode still needs explicit role documents. See [core switching and its limits](specialist.md#switch-the-specialist-core).
 
-The manual **Check and update** report has a separate analysis dependency: an available, already configured Claude text adapter with tools and native session persistence disabled. It analyzes only the four program-supplied metadata facts, records its requested/connection-reported model source, and does not acquire the Codex specialist's management tools. If this optional route is missing, facts can still be saved while the explanation remains incomplete. Refreshing a saved report does not trigger another analysis or change settings. See the [report pipeline](specialist.md#manual-status-report); configuring this route is not required for the first real-agent installation.
+The manual **Check and update** report has a separate analysis dependency: an available, already configured Claude text adapter with tools and native session persistence disabled. It analyzes only the four program-supplied metadata facts, records its requested/connection-reported model source, and does not acquire the selected specialist core's management tools. The current report's tool fact observes the Codex-side holder, not all DSH tools. If this optional route is missing, facts can still be saved while the explanation remains incomplete. Refreshing a saved report does not trigger another analysis or change settings. See the [report pipeline](specialist.md#manual-status-report); configuring this route is not required for the first real-agent installation.
 
 ## Daily workflow
 
-**Codex, Hermes, and Pi** share the composer path from the home draft into the native conversation. AI profile, read-only memory, interface choice, status badge, and file entry stay together. While an answer is running, the corner button stays Stop; newly typed text remains a draft rather than being queued. Refresh continues the same conversation. File selection is retained when you keep typing during an upload, alongside existing text and materials.
+**Codex, Hermes, Pi, Claude Code, and DSH** share the composer layout from the new-conversation draft into the native conversation. AI profile, read-only memory, interface choice, status badge, and file entry stay together. While an answer is running, the corner button stays Stop; newly typed text remains a draft rather than being queued. Refresh continues the same conversation. File selection is retained when you keep typing during an upload, alongside existing text and materials.
 
-Codex additionally supports model/reasoning adjustments for the unsent home draft and for one existing conversation. These update the same local setting rather than creating more named profiles or changing the global default. See [draft settings and specialist receipts](specialist.md#codex-draft-and-conversation-settings). Hermes/Pi retain saved-profile selection; their local fine-tuning is later work. **Claude Code and DSH keep their existing native entries; their unified-composer migration is not part of this release.**
+Codex additionally supports model/reasoning adjustments for the unsent new-conversation draft and for one existing conversation. These update the same local setting rather than creating more named profiles or changing the global default. See [draft settings and specialist receipts](specialist.md#codex-draft-and-conversation-settings). Hermes/Pi retain saved-profile selection; their local fine-tuning is later work. Claude can select a saved model configuration without overriding native reasoning. DSH retains native model settings and supports read-only memory selection; its model-writing interface remains unavailable.
+
+Start from **My AI**: open an agent/model/memory summary to manage that same resource, or select a recent-work action. **New conversation** opens the existing composer; the rabbit icon returns to the overview. With no connections, use **Connect your first agent**. Opening or polling the overview reads saved directories and caches, without starting an agent, probing a model, or reading memory content. Use **Check and update** explicitly for a new report. Select existing conversations from the sidebar. Rename and connection maintenance are in the current conversation’s **More** menu; **Settings → Connection and recovery** keeps the low-frequency recovery entry. An uncertain creation retains its original ID for explicit checking; it does not resend a message. Search opens the matched item itself. If an indexed match cannot locate the current native text, its excerpt stays in that item’s **More → Search match**, without redirecting to another conversation.
+
+### Read, continue, or open the original
+
+These actions are distinct: **Continue** uses a supported native-session binding; **Read** opens exactly bound saved text without starting an agent; **Open in Codex** uses a link to the original local Codex thread. The installed application and system handoff need environment-specific verification. An original-app link is navigation, not takeover of its running task, and other agents have no universal external-opening guarantee.
+
+The read-only view keeps paging, source identity, explicit rereading after a source change, and return to the original draft. Hermes sources stay separate; an unmapped live message retains its search excerpt rather than inventing a full-body association.
+
+![Read-only history in the running application](../assets/history-readonly.png)
+
+*Running application with invented resources and work, not a design mockup. Configure and verify it in your own environment.*
 
 ### Continue between Codex and Hermes
 
@@ -175,7 +187,7 @@ Codex additionally supports model/reasoning adjustments for the unsent home draf
 3. Review the AI and memory profiles in that draft. **Send** creates the new native conversation and submits the selected versions. Unselected material, native tool state, approvals, and long-term memory are not silently copied; any selected memory is handled separately.
 4. Use the source/return entry to go back to the exact original conversation. Browser-local preparation and the source's unsent draft are retained across navigation and refresh.
 
-This new bidirectional workflow currently covers **Codex ↔ Hermes**. It preserves provenance and complete selected file/image versions, not a shared native identity or complete internal-state migration. If creation or sending is uncertain, retain and check the original ID/target; do not create a replacement conversation or resend. Other agents keep their existing handoff routes. The new workflow has not had a fresh physical-iPhone acceptance test.
+This new bidirectional workflow currently covers **Codex ↔ Hermes**. It preserves provenance and complete selected file/image versions, not a shared native identity or complete internal-state migration. If creation or sending is uncertain, retain and check the original ID/target; do not create a replacement conversation or resend. Other agents keep their existing handoff routes. Phone-preview compatibility is historical and is not part of this snapshot's supported workflow.
 
 ## What to expect
 
@@ -183,7 +195,7 @@ Text conversations, compatible full-text materials, and session continuation hav
 
 | Route | Saved next-turn settings | Material / result boundary |
 | --- | --- | --- |
-| Codex | Model/reasoning adjustment for a home draft or one conversation; saved profiles remain available | Full text; original images only for supported configurations; new continuation with Hermes |
+| Codex | Model/reasoning adjustment for an unsent draft or one conversation; saved profiles remain available | Full text; original images only for supported configurations; new continuation with Hermes |
 | Hermes | Model and supported reasoning level through saved profiles | Full text and compatible images; new continuation with Codex; complete exact results can be saved after first successful retrieval |
 | Pi | Model and supported reasoning level through saved profiles | Full text; image use needs a verified vision-capable model and route; complete exact results can be saved after first successful retrieval |
 | Claude Code | Model selection; reasoning retains native settings | Full text; images are not enabled here; eligible final SDK results can be read from bounded local receipts after disconnect |
@@ -199,7 +211,7 @@ Pi/Hermes also save an eligible complete result **after its first exact successf
 
 Agents preserve their own transcripts, tools, permissions, and configurations. A selected text/material handoff does not migrate complete internal state. Offline tests, a successful connection, and a finished real task are different evidence; this release does not promise every tool, extension, approval shape, or recovery case.
 
-The server binds to loopback. External mobile access currently depends on your separately configured IM.codes connection to the same online Mac. Do not treat it as a public hosted service or cross-computer scheduler.
+The server binds to loopback and keeps its local access checks. Device/wake-up/phone-preview entries and IM.codes-specific compatibility have been removed from this source snapshot. It is not a public hosted service or cross-computer scheduler; separately installed user software and old records are not deleted.
 
 ## Observe current work and HAPI (optional)
 

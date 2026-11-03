@@ -106,11 +106,9 @@ def maintenance_http(handler):
         body = json.loads(handler._read_body(8192), object_pairs_hook=_pairs,
                           parse_constant=_invalid_constant, parse_float=_invalid_constant)
         keys = {'instance_id', 'maintenance_id', 'token', 'generation'}
-        if type(body) is not dict or body.keys() - (keys | {'_one_ai_csrf'}) or not keys <= body.keys():
+        if type(body) is not dict or body.keys() != keys:
             raise ValueError('Invalid maintenance fields.')
-        if '_one_ai_csrf' in body and type(body['_one_ai_csrf']) is not str:
-            raise ValueError('Invalid maintenance nonce.')
-        if not handler._allowed(mutate=True, nonce=body.get('_one_ai_csrf')):
+        if not handler._allowed(mutate=True):
             handler._reply(403, {'error': '维护消息校验未通过。', 'code': 'maintenance_denied'})
             return True
         instance_id = body['instance_id']

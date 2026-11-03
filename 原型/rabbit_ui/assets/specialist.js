@@ -48,6 +48,66 @@
   Object.assign(en, { "命令": "Command", "命令执行中": "Command running", "命令失败": "Command failed", "已拒绝": "Declined", "命令完成": "Command completed", "命令已结束": "Command ended", "状态未返回": "Status not returned", "退出码": "Exit code", "未返回退出码": "Exit code not returned", "退出码格式不受支持": "Unsupported exit-code format", "工作目录": "Working directory", "命令输出": "Command output", "原始命令结果": "Original command result", "修改中": "Changing files", "修改已完成": "File changes completed", "修改失败": "File changes failed" });
   Object.assign(en, { "消息已由原生 Agent 接收，正在等待本轮结束；原草稿暂时保留。": "The native Agent has received the message. Waiting for this turn to end; the original draft is kept for now.", "正在发送；原始消息与配置已保存。": "Sending; the original message and configuration have been saved.", "上次发送尚未确认；保留原始回执，不会自动再次发送。": "The previous send is unconfirmed; its original receipt is kept, and it will not be sent again automatically." });
   function node(tag, cls, text) { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = String(text); if (["button", "input", "select", "textarea", "summary"].includes(tag)) n.setAttribute("data-control-interface", "human"); return n; }
+  // This is the application's continuous transcript, never a native tool replay.
+  function coreConversation(value) {
+    const cores = new Set(["codex", "dsh"]), labels = { codex: "Codex", dsh: "DSH" };
+    if (!object(value) || value.id !== "specialist" || !cores.has(value.current_core)
+        || !Number.isSafeInteger(value.revision) || value.revision < 0
+        || !Array.isArray(value.entries) || value.entries.length > 20000
+        || !object(value.cores) || ![...cores].every(core => object(value.cores[core]))
+        || !Array.isArray(value.available_cores) || value.available_cores.some(core => !cores.has(core))
+        || new Set(value.available_cores).size !== value.available_cores.length
+        || !Number.isSafeInteger(value.context_capacity_bytes) || value.context_capacity_bytes <= 0) throw Error("专员核心及连续记录没有读完整，原稿保留。");
+    let previous = 0, bytes = 0; const switches = new Set();
+    for (const entry of value.entries) {
+      if (!object(entry) || !Number.isSafeInteger(entry.seq) || entry.seq <= previous || !cores.has(entry.core)
+          || !validText(entry.text)) throw Error("专员连续记录身份不完整，原稿保留。");
+      previous = entry.seq; bytes += entry.text.length;
+      if (bytes > 8 * 1024 * 1024) throw Error("专员记录超过本页完整显示容量；没有截断后继续。");
+      if (entry.kind === "core_switch") {
+        if (!profileUuid.test(entry.operation_id) || switches.has(entry.operation_id) || entry.text !== "核心已切换为 " + labels[entry.core]) throw Error("专员切换记录无法核对。");
+        switches.add(entry.operation_id);
+      } else if (entry.kind !== "message" || !["user", "assistant"].includes(entry.role) || typeof entry.source_id !== "string" || !entry.source_id) throw Error("专员正文记录无法核对。");
+    }
+    for (const core of cores) {
+      const state = value.cores[core];
+      if (!(state.session_id === null || nativeToken(state.session_id)) || !Number.isSafeInteger(state.received_seq) || state.received_seq < 0) throw Error("专员核心位置无法核对。");
+    }
+    return copy(value);
+  }
+  function projectSpecialistCore(value) {
+    if (!object(value) || value.conversation === undefined) return value;
+    const conversation = coreConversation(value.conversation);
+    if (conversation.current_core === "codex" && value.core_unavailable !== undefined) {
+      if (!validText(value.core_unavailable) || !value.core_unavailable.trim() || value.core_unavailable.length > 600) throw Error("原专员核心不可用说明不完整。");
+      // A removed executor must not hide the application's preserved prose or
+      // fabricate a new native identity. Every execution control stays blocked.
+      const next = { ...value, conversation, connection: { state: "failed", epoch: null },
+        binding: { session_key: "specialist/codex", thread_id: conversation.cores.codex.session_id },
+        history_page: { data: [], nextCursor: null }, turns_page: { data: [], nextCursor: null }, live_items: [],
+        requests: [], requests_available: false, answers: [], receipts: Array.isArray(value.receipts) ? value.receipts : [],
+        turn_state: null, items_included: true, last_seq: null, live_cache_incomplete: false };
+      for (const key of ["memory_intents", "memory_intents_has_more", "requested_model_policy"]) delete next[key];
+      return next;
+    }
+    if (conversation.current_core !== "dsh") return { ...value, conversation };
+    const native = value.native_core_view;
+    if (!object(native) || !object(native.connection) || !object(native.binding) || !object(native.activity)
+        || !["not_open", "opening", "ready", "failed", "closed"].includes(native.connection.state)
+        || !["idle", "running", "unknown"].includes(native.activity.state)
+        || !Array.isArray(native.pending) || !Array.isArray(native.operations)
+        || !(native.binding.sessionId === null || nativeToken(native.binding.sessionId))) throw Error("DSH 专员原生状态尚未完整读回。");
+    // UI-only projection. The raw DSH view and its approvals keep their own protocol.
+    const next = { ...value, conversation, connection: { state: native.connection.state, epoch: native.epoch },
+      binding: { session_key: "specialist/dsh", thread_id: native.binding.sessionId },
+      requests: native.pending.filter(row => ["pending", "unknown"].includes(row.state)),
+      requests_available: native.connection.state === "ready" && native.activity.state !== "unknown",
+      turn_state: native.activity.state === "running" && nativeToken(native.activity.client_id) ? { turn_id: native.activity.client_id, status: "running" } : null,
+      history_page: { data: [], nextCursor: null }, turns_page: { data: [], nextCursor: null }, live_items: [], items_included: true,
+      last_seq: null, live_cache_incomplete: false };
+    for (const key of ["memory_intents", "memory_intents_has_more", "requested_model_policy"]) delete next[key];
+    return next;
+  }
   // DSH directory is reference-only; never pass this through profile selection.
   function dshCatalogue(value) {
     const exact = (row, fields) => row && typeof row === "object" && !Array.isArray(row) && Object.keys(row).length === fields.length && fields.every(key => Object.hasOwn(row, key));
@@ -83,12 +143,12 @@
     if ([composerMount, titleMount, settingsMount, guideMount].some(value => value !== null && typeof value.append !== "function")) throw Error("专员布局入口不完整。");
     const disconnectFeedback = { "zh-CN": "连接已断开，原生记录仍保留；后台工具是否退出未核实。", en: "Disconnected; native records remain. Background-tool exit has not been verified." };
     const commandReadbackError = "专员结果已返回，配置读回仍待核对。";
-    let settingsVisible = false, visible = false, enabled = true, destroyed = false, language = "zh-CN", timer = null, generation = 0, reading = false, mutating = false, writeVersion = 0, preparing = false, openingForSend = false, guideCheckReading = false, modelCheckReading = false, modelCheckResult = null, draftEdits = 0, viewVersion = 0;
+    let settingsVisible = false, visible = false, enabled = true, passive = false, destroyed = false, language = "zh-CN", timer = null, generation = 0, reading = false, mutating = false, writeVersion = 0, preparing = false, openingForSend = false, guideCheckReading = false, modelCheckReading = false, modelCheckResult = null, draftEdits = 0, viewVersion = 0;
     const lane = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
     const laneCreated = Date.now();
     let workspace = "", storageKey = "", sessionKey = "", draft = "", draftMaterials = [], pending = null, draftStorageInvalid = false, snapshot = null, epoch = null, seq = null, nextCursor = null, historyAvailable = null, feedback = "", errorText = "";
     const history = new Map(), live = new Map(), itemNodes = new Map(), requestNodes = new Map(), burned = new Set(), loadedCursors = new Set();
-    let pendingCommand = null;
+    let pendingCommand = null, pendingDraftRevision = null, bindingChoiceVersion = 0, draftTransferToken = null, draftTransferKey = null;
     let draftBinding = null, proposedBinding = null, lastCommand = null, draftFrame8 = false, commandReadbackReading = null, commandObservation = null;
     const handoffView = window.RabbitHandoffView?.create();
     const nativeMaterials = chatId !== null && window.RabbitNativeMaterials ? window.RabbitNativeMaterials.create({ api, images: materialImages, files: materialFiles, getWorkspace, onError }) : null;
@@ -117,6 +177,13 @@
     const originals = node("details", "rbs-item rbs-originals"), originalsSummary = node("summary"), originalsText = node("pre", "rbs-native"); originals.append(originalsSummary, originalsText);
     const composerStatus = composerMount ? node("p", "rbs-status rbs-composer-status sr-only") : null;
     const settingsPanel = settingsMount ? node("section", "rbs-settings") : null, settingsActions = settingsPanel ? node("div", "rbs-actions") : null;
+    const coreBox = chatId === null && settingsPanel ? node("div", "rbs-field rbs-core-settings") : null;
+    const coreLabel = coreBox && node("label", "rbs-field"), coreSelect = coreBox && node("select", "rbs-control"), coreNote = coreBox && node("p", "rbs-note");
+    if (coreBox) {
+      coreSelect.setAttribute("aria-label", "专员核心"); coreSelect.setAttribute("data-control-interface", "human");
+      coreLabel.append(node("span", "", "专员核心"), coreSelect); coreBox.append(coreLabel, coreNote); settingsPanel.append(coreBox);
+      coreSelect.addEventListener("change", () => switchCore(coreSelect.value));
+    }
     const maintenance = settingsPanel && chatId === null ? node("details", "rbs-setting-details") : null, maintenanceLabel = maintenance ? node("summary") : null;
     if (settingsPanel) {
       settingsPanel.setAttribute("data-control-interface", "ai");
@@ -259,7 +326,12 @@
     }
     function memorySelectionReady() { return !memorySelectionUnsupported && (!memorySelection || memorySelection.ready()); }
     function memoryControlled() { return memorySelectionUnsupported || memorySelection?.controlled() === true; }
-    function memoryReady() { return memorySelectionReady() && (!memorySelection || memorySelection.matchesProfile(selectedMemory)) && (selectedMemory === null || !!window.RabbitNativeMemory && (chatId !== null || typedMemoryScope(snapshot)) && memoryReadable && memoryRows.some(row => row.mode === "read_only" && canonical(row) === canonical(selectedMemory))); }
+    function unsupportedMemoryCombination() {
+      if (chatId !== null || !selectedMemory) return false;
+      const transcript = snapshot?.conversation, cursor = transcript?.cores?.codex?.received_seq;
+      return currentCore() === "dsh" || transcript?.entries.some(row => row.kind === "message" && row.seq > cursor) === true;
+    }
+    function memoryReady() { return memorySelectionReady() && (!memorySelection || memorySelection.matchesProfile(selectedMemory)) && (selectedMemory === null || !unsupportedMemoryCombination() && !!window.RabbitNativeMemory && (chatId !== null || typedMemoryScope(snapshot)) && memoryReadable && memoryRows.some(row => row.mode === "read_only" && canonical(row) === canonical(selectedMemory))); }
     function memoryAttached(record) {
       const receipt = record.receipt;
       return record.rawVerified && (chatId !== null || pending?.client_id !== record.intent.client_id || record.inputVerified === true) && record.intent.state === "ready" && isSHA(record.intent.derived_inputs_sha256)
@@ -406,9 +478,9 @@
     function adoptBinding(value) {
       const next = commandCodec().normalizeBinding(value);
       if (chatId !== null || !enabled || destroyed || next.workspace_id !== workspace || workspace !== String(getWorkspace() || "")) return false;
-      const previous = draftBinding, edits = draftEdits, framed = draftFrame8;
-      draftBinding = next; draftFrame8 = true; draftEdits++;
-      if (!save()) { draftBinding = previous; draftEdits = edits; draftFrame8 = framed; errorText = "浏览器不能保存指令对象；原文字和对象保留。"; render(); return false; }
+      const previous = draftBinding, edits = draftEdits, framed = draftFrame8, choiceVersion = bindingChoiceVersion;
+      draftBinding = next; draftFrame8 = true; draftEdits++; bindingChoiceVersion++;
+      if (!save()) { draftBinding = previous; draftEdits = edits; draftFrame8 = framed; bindingChoiceVersion = choiceVersion; errorText = "浏览器不能保存指令对象；原文字和对象保留。"; render(); return false; }
       proposedBinding = null; notifyBinding(); render(); return true;
     }
     function bindTarget(value) {
@@ -534,8 +606,8 @@
       try {
         previous = window.sessionStorage.getItem(sessionKey);
         const pendingFormat = chatId === null && pending?.target_context ? 7 : chatId === null && pending?.client_id?.startsWith("specialist/check/") ? 6 : pending && !pending.body_json ? 1 : chatId === null ? selectedMemory || pending?.memory_profile ? 5 : 1 : selectedMemory || pending?.memory_profile ? 4 : pending?.body_json && !pending.intent_sha256 ? 2 : 3;
-        const version = chatId === null && (draftFrame8 || typeof getCommandContext === "function") ? 8 : pendingFormat;
-        const encoded = JSON.stringify({ version, ...([5, 6, 7, 8].includes(version) ? { scope: "specialist", scope_id: "specialist/codex" } : {}), draft, pending, ...(version === 1 ? {} : { selected_profile: selectedProfile, material_refs: draftMaterials }), ...(version >= 4 ? { selected_memory: selectedMemory } : {}), ...(version === 8 ? { pending_format: pendingFormat, draft_binding: draftBinding, draft_revision: draftEdits, last_command: lastCommand } : {}), answer_journal: answerJournal, lane_created: laneCreated, ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}), ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}) });
+        const version = chatId !== null ? 9 : draftFrame8 || typeof getCommandContext === "function" ? 8 : pendingFormat;
+        const encoded = JSON.stringify({ version, ...([5, 6, 7, 8].includes(version) ? { scope: "specialist", scope_id: "specialist/codex" } : version === 9 ? { scope: "native_chat", scope_id: expectedSession } : {}), draft, pending, ...(version === 1 ? {} : { selected_profile: selectedProfile, material_refs: draftMaterials }), ...(version >= 4 ? { selected_memory: selectedMemory } : {}), ...(version === 8 ? { pending_format: pendingFormat, draft_binding: draftBinding, draft_revision: draftEdits, pending_draft_revision: pending ? pendingDraftRevision : null, last_command: lastCommand } : version === 9 ? { pending_format: pendingFormat, draft_revision: draftEdits, pending_draft_revision: pending ? pendingDraftRevision : null } : {}), answer_journal: answerJournal, lane_created: laneCreated, ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}), ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}) });
         window.sessionStorage.setItem(sessionKey, encoded); sessionWritten = true;
         window.localStorage.setItem(storageKey, encoded);
       } catch (_) {
@@ -558,7 +630,7 @@
       const id = String(getWorkspace() || "");
       if (id === workspace) return;
       save(); workspace = id; storageKey = id ? storagePrefix() + lane : ""; sessionKey = id ? (chatId === null ? "rabbit.specialist.page.v1." + encodeURIComponent(id) : "rabbit.native-chat.page.v1." + encodeURIComponent(id) + "." + chatId) : ""; generation++;
-      draft = ""; draftMaterials = []; pending = null; pendingCommand = null; draftBinding = proposedBinding = lastCommand = commandReadbackReading = commandObservation = null; draftFrame8 = false; draftEdits = 0; draftStorageInvalid = false; answerJournal = Object.create(null); snapshot = null; snapshotReadable = false; epoch = null; seq = null; nextCursor = null; historyAvailable = null; feedback = ""; errorText = "";
+      draft = ""; draftMaterials = []; pending = null; pendingCommand = null; pendingDraftRevision = null; bindingChoiceVersion = 0; draftBinding = proposedBinding = lastCommand = commandReadbackReading = commandObservation = null; draftFrame8 = false; draftEdits = 0; draftStorageInvalid = false; answerJournal = Object.create(null); snapshot = null; snapshotReadable = false; epoch = null; seq = null; nextCursor = null; historyAvailable = null; feedback = ""; errorText = "";
       nativeMaterials?.setScope(JSON.stringify([workspace, chatId]));
       selectedProfile = null; profileRows = []; currentProfileRow = null; localConfigurationPending = null; localConfigurationInvalid = localConfigurationUnsupported = localConfigurationSupported = localConfigurationCommitting = configurationWriting = false; profilesReadable = profilesReading = nativeCatalogReady = false; profilesError = ""; profilesRequest++; pendingVerified = true; preparing = false; writeVersion++;
       selectedMemory = null; memoryRows = []; memoryReadable = memoryReading = false; memoryError = ""; memoryRequest++; memoryVersion++;
@@ -573,13 +645,15 @@
       guideTurnScope = null; guideTerminalTurns.clear(); guideOwnClients.clear(); guideOwnTurns.clear(); historyRestore = null; modelCheckResult = null;
       try {
         const saved = sessionKey && JSON.parse(window.sessionStorage.getItem(sessionKey) || "null");
-        if (saved && (saved.version === 1 || chatId !== null && [2, 3, 4].includes(saved.version) || chatId === null && [5, 6, 7, 8].includes(saved.version) && saved.scope === "specialist" && saved.scope_id === "specialist/codex") && typeof saved.draft === "string" && saved.draft.length <= 200000) {
+        if (saved && (saved.version === 1 || chatId !== null && ([2, 3, 4].includes(saved.version) || saved.version === 9 && saved.scope === "native_chat" && saved.scope_id === expectedSession) || chatId === null && [5, 6, 7, 8].includes(saved.version) && saved.scope === "specialist" && saved.scope_id === "specialist/codex") && typeof saved.draft === "string" && saved.draft.length <= 200000) {
           draft = saved.draft;
           if (Object.hasOwn(saved, "configuration_selection")) { if (!configurationSelection) throw Error(); configurationSelection.reset(saved.configuration_selection, { workspace, chatId }); }
           if (saved.version >= 2) selectedProfile = saved.selected_profile === null ? null : profileChoice(saved.selected_profile);
           if (saved.version >= 3) draftMaterials = materialRefs(saved.material_refs);
           if (saved.version >= 4) selectedMemory = saved.selected_memory === null ? null : selectedMemoryChoice(saved.selected_memory);
           if ([5, 6, 7, 8].includes(saved.version) && (selectedProfile !== null || draftMaterials.length)) throw Error();
+          if (saved.version === 9 && (![1, 2, 3, 4].includes(saved.pending_format) || !Number.isSafeInteger(saved.draft_revision) || saved.draft_revision < 0)) throw Error();
+          if (saved.version === 9) draftEdits = saved.draft_revision;
           if (saved.version === 8) {
             if (![1, 5, 6, 7].includes(saved.pending_format) || !Number.isSafeInteger(saved.draft_revision) || saved.draft_revision < 0) throw Error();
             draftFrame8 = true; draftEdits = saved.draft_revision;
@@ -588,7 +662,13 @@
             lastCommand = restoredCommand(saved.last_command);
           }
           const p = saved.pending;
-          if (p !== null && p !== undefined) { const format = saved.version === 8 ? saved.pending_format : saved.version; pending = restoredPending(p, format); pendingVerified = format === 1; if (format === 6) guideOwnClients.add(pending.client_id); }
+          if (p !== null && p !== undefined) { const format = [8, 9].includes(saved.version) ? saved.pending_format : saved.version; pending = restoredPending(p, format); pendingVerified = format === 1; if (format === 6) guideOwnClients.add(pending.client_id); }
+          if ([8, 9].includes(saved.version)) {
+            const revision = Object.hasOwn(saved, "pending_draft_revision") ? saved.pending_draft_revision
+              : saved.version === 8 && pending && lastCommand?.client_id === pending.client_id ? lastCommand.draft_revision : null;
+            if (saved.version === 9 && !Object.hasOwn(saved, "pending_draft_revision") || revision !== null && (!Number.isSafeInteger(revision) || revision < 0 || revision > draftEdits || !pending)) throw Error();
+            pendingDraftRevision = revision;
+          }
           if (pending && lastCommand?.client_id === pending.client_id && canonical(lastCommand.target.context) !== canonical(pending.target_context || null)) throw Error();
           if (p !== null && p !== undefined && !pending) draftStorageInvalid = true;
           if (object(saved.answer_journal)) for (const [digest, state] of Object.entries(saved.answer_journal).slice(0, 128)) if (/^[a-f0-9]{64}$/.test(digest) && ["submitted_unknown", "response_submitted", "resolved"].includes(state)) answerJournal[digest] = state;
@@ -632,10 +712,25 @@
       if (!validText(text) || !(text.trim() || text === "" && (refs.length || hasAI || hasMemory)) || typeof TextEncoder !== "function" || new TextEncoder().encode(text).length > 128 * 1024
           || !fitsSend("specialist/ui/00000000-0000-4000-8000-000000000000", text, choice, refs, memory)) throw Error("交接内容无效或超过原生发送容量。");
       if (value.material_preview !== undefined) { if (!nativeMaterials) throw Error("原生材料组件尚未就绪；整份未放入。"); nativeMaterials.seed(refs, value.material_preview); }
-      const previous = { draft, input: input.value, refs: draftMaterials, profile: selectedProfile, memory: selectedMemory };
-      draft = text; input.value = text; draftMaterials = refs; selectedProfile = choice; selectedMemory = memory;
-      if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedProfile = previous.profile; selectedMemory = previous.memory; throw Error("浏览器不能保存原生草稿；原内容保留，尚未发送。"); }
-      draftEdits++; if (hasMemory) memoryVersion++; render(); return true;
+      const previous = { draft, input: input.value, refs: draftMaterials, profile: selectedProfile, memory: selectedMemory, edits: draftEdits };
+      draft = text; input.value = text; draftMaterials = refs; selectedProfile = choice; selectedMemory = memory; draftEdits++;
+      if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedProfile = previous.profile; selectedMemory = previous.memory; draftEdits = previous.edits; throw Error("浏览器不能保存原生草稿；原内容保留，尚未发送。"); }
+      if (hasMemory) memoryVersion++; render(); return true;
+    }
+    function captureDraftRevision() {
+      syncWorkspace();
+      if (chatId === null || !workspace || workspace !== String(getWorkspace() || "") || !enabled || destroyed || draftStorageInvalid || input.value !== draft) return null;
+      const key = canonical([workspace, chatId, generation, draftEdits, selectedProfile, selectedMemory, draftMaterials]);
+      if (draftTransferKey !== key) { draftTransferKey = key; draftTransferToken = Object.freeze({}); }
+      return draftTransferToken;
+    }
+    function adoptTextDraft(expectedToken, text) {
+      if (!expectedToken || expectedToken !== captureDraftRevision() || !visible || settingsVisible || document.hidden
+          || !validText(text) || text.length > 200000 || typeof TextEncoder !== "function" || new TextEncoder().encode(text).length > 128 * 1024) return false;
+      const previous = { draft, input: input.value, edits: draftEdits };
+      draft = text; input.value = text; draftEdits++;
+      if (!save()) { draft = previous.draft; input.value = previous.input; draftEdits = previous.edits; render(); return false; }
+      render(); return true;
     }
     // The quote picker captures only the current ordinary Codex draft. It may
     // append to existing text/materials but never replaces the native session,
@@ -673,6 +768,22 @@
     function message(error, fallback) { const text = String(error && error.message || ""); return text && text.length < 300 ? text : fallback; }
     function reportError(error, fallback) { errorText = message(error, fallback); onError(error); }
     function ready() { return snapshotReadable && snapshot && snapshot.connection && snapshot.connection.state === "ready"; }
+    function currentCore() { return chatId === null ? snapshot?.conversation?.current_core || "codex" : "codex"; }
+    function canSwitchCore() {
+      return chatId === null && snapshotReadable && !!snapshot?.conversation && !destroyed && enabled && !mutating && !preparing && !openingForSend
+        && !answering && !reading && !configurationWriting && !pending && !draftStorageInvalid && !proposedBinding && !commandReadbackReading && !commandObservation && !lastCommand?.readback_failed
+        && !nativePending().length && !activeTurn() && !hasUnresolvedRequests() && snapshot.disconnect_unconfirmed !== true
+        && ["not_open", "closed", "ready"].includes(snapshot.connection.state)
+        && (snapshot.connection.state !== "ready" || snapshot.requests_available === true)
+        && !["submitted_unknown", "accepted"].includes(lastCommand?.status);
+    }
+    async function switchCore(core) {
+      if (!canSwitchCore() || !["codex", "dsh"].includes(core) || core === currentCore() || !snapshot.conversation.available_cores.includes(core)) { render(); return; }
+      const operation = window.crypto?.randomUUID?.();
+      if (!profileUuid.test(operation || "")) { errorText = "浏览器不能保存核心切换编号，原核心与草稿保留。"; render(); return; }
+      // The server commits the sole marker after the new connection succeeds.
+      await mutate("core", { core, operation_id: operation });
+    }
     function hasUnresolvedRequests() { return answering || !!snapshot?.requests?.length || Object.values(answerJournal).includes("submitted_unknown"); }
     function canOpenForSend() {
       return selectionReady() && memorySelectionReady() && !filePicker?.busy() && (composerMount || chatId !== null) && snapshotReadable && ["not_open", "closed"].includes(snapshot?.connection?.state)
@@ -690,9 +801,9 @@
           : lastCommand?.client_id === pending.client_id
             ? lastCommand.draft_revision === draftEdits && canonical(lastCommand.target) === canonical(draftBinding)
             : !pending.target_context;
-        if (receipt.status !== "rejected" && sameCommand && draft === pending.text && JSON.stringify(draftMaterials) === JSON.stringify(pending.material_refs || [])
-            && canonical(selectedMemory) === canonical(pending.memory_profile || null)) { draft = ""; input.value = ""; draftMaterials = []; draftBinding = proposedBinding = null; notifyBinding(); }
-        pending = null; pendingCommand = null; save();
+        if (receipt.status !== "rejected" && pendingDraftRevision !== null && pendingDraftRevision === draftEdits && sameCommand && draft === pending.text && JSON.stringify(draftMaterials) === JSON.stringify(pending.material_refs || [])
+            && canonical(selectedMemory) === canonical(pending.memory_profile || null)) { draft = ""; input.value = ""; draftMaterials = []; draftEdits++; draftBinding = proposedBinding = null; notifyBinding(); }
+        pending = null; pendingCommand = null; pendingDraftRevision = null; save();
       }
     }
     async function readMaterialReceipt(currentRead, knownUnsent = false) {
@@ -919,11 +1030,25 @@
       operationRecords.hidden = !operations.length;
       // One explicit top-level view retains every original item, including
       // mixed/image/future parts omitted by readable message presentation.
-      originalsText.textContent = JSON.stringify([...merged.values()], null, 2);
-      feed.replaceChildren(...nodes);
+      originalsText.textContent = JSON.stringify(chatId === null && snapshot?.native_core_view
+        ? { codex_display_records: [...merged.values()], dsh: snapshot.native_core_view, conversation: snapshot.conversation } : [...merged.values()], null, 2);
+      const transcript = chatId === null && snapshot?.conversation;
+      if (transcript?.entries?.length) {
+        const continuous = transcript.entries.map(entry => {
+          if (entry.kind === "core_switch") {
+            const marker = node("p", "rbs-core-switch", entry.text); marker.setAttribute("data-core-switch", entry.operation_id);
+            marker.setAttribute("role", "note"); marker.style.cssText = "margin:24px 0;text-align:center;font-size:12px;opacity:.65;"; return marker;
+          }
+          const box = node("article", "rbs-item rbs-message rbs-message-" + entry.role), body = node("div", "rbs-item-body");
+          box.setAttribute("data-message-role", entry.role); box.setAttribute("data-core", entry.core); box.setAttribute("data-message-seq", String(entry.seq));
+          box.setAttribute("aria-label", entry.role === "user" ? "用户消息" : "AI消息"); rich(body, entry.text); box.append(body); return box;
+        });
+        feed.replaceChildren(...continuous);
+      } else feed.replaceChildren(...nodes);
       return shownMemory;
     }
     function consume(value, cursor) {
+      if (chatId === null) value = projectSpecialistCore(value);
       if (!object(value) || !object(value.connection) || !object(value.binding)
           || expectedSession !== null && value.binding.session_key !== expectedSession
           || !["not_open", "opening", "ready", "failed", "closed"].includes(value.connection.state)
@@ -933,7 +1058,7 @@
           || value.disconnect_unconfirmed !== undefined && typeof value.disconnect_unconfirmed !== "boolean"
           || ["live_items", "receipts", "answers", "requests"].some(key => value[key] != null && !Array.isArray(value[key]))
           || ["receipts", "answers", "requests"].some(key => Array.isArray(value[key]) && !value[key].every(object))) throw Error("专员状态格式不完整。");
-      if (chatId === null && (Object.hasOwn(value, "memory_intents") || pending?.memory_profile || selectedMemory)) {
+      if (chatId === null && !value.core_unavailable && value.conversation?.current_core !== "dsh" && (Object.hasOwn(value, "memory_intents") || pending?.memory_profile || selectedMemory)) {
         if (!typedMemoryScope(value) || value.binding.session_key !== "specialist/codex" || !Array.isArray(value.memory_intents) || value.memory_intents.length > 64 || typeof value.memory_intents_has_more !== "boolean") throw Error("专员共享记忆状态所属范围无法核验。");
         const policy = value.requested_model_policy;
         if (!exact(policy, ["model", "effort", "applies_to", "execution_verified"]) || policy.model !== "gpt-6-luna" || policy.effort !== "max" || policy.applies_to !== "each_turn" || policy.execution_verified !== false) throw Error("专员固定请求策略无法核验。");
@@ -972,6 +1097,7 @@
     }
     function schedule() {
       clearTimeout(timer); timer = null;
+      if (passive) return;
       // A left-column send keeps running while another conversation is open.
       // Once idle, the hidden specialist stops polling until focused again.
       if ((!visible && !(composerMount && (pending || activeTurn() || hasUnresolvedRequests()))) || !enabled || destroyed || document.hidden) return;
@@ -1004,7 +1130,7 @@
     }
     async function refresh(options = {}) {
       syncWorkspace();
-      if (!enabled || destroyed) return;
+      if (!enabled || destroyed || passive) return;
       if (mutating || preparing || configurationWriting) { if (options.timer !== true) fullReadPending = true; return; }
       if (reading) { if (options.timer !== true) fullReadPending = true; return; }
       if (!pendingVerified) await verifyPending();
@@ -1039,8 +1165,9 @@
         if (chatId !== null && currentRead()) { if (configurationSelection) configurationSelection.observe(value); else if (Object.hasOwn(value, "configuration_selection") || Object.hasOwn(value, "configuration_selection_error")) selectionUnsupported = true; }
         if (chatId !== null && currentRead()) { if (memorySelection) memorySelection.observe(value); else if (Object.hasOwn(value, "memory_selection") || Object.hasOwn(value, "memory_selection_error")) memorySelectionUnsupported = true; }
         await readMaterialReceipt(currentRead);
-        await syncAnswerJournal(value);
-        if (currentRead()) { observeGuideTurn(value); observeCommandTurn(value); }
+        const observed = chatId === null ? snapshot : value;
+        await syncAnswerJournal(observed);
+        if (currentRead()) { observeGuideTurn(observed); observeCommandTurn(observed); }
         if (currentRead() && openFeedbackPending && !readingPartial && ready()) {
           if (Object.values(disconnectFeedback).includes(feedback)) feedback = "";
           openFeedbackPending = false;
@@ -1065,12 +1192,12 @@
       // This explicit view request is consumed once, even if its read/open fails.
       // Focus and ordinary refreshes never create another restore request.
       request.attempted = true;
-      if (!snapshotReadable || ready() || !nativeToken(snapshot?.binding?.thread_id)
+      if (!snapshotReadable || snapshot?.core_unavailable || ready() || !nativeToken(snapshot?.binding?.thread_id)
           || snapshot?.disconnect_unconfirmed === true || !["not_open", "closed", "failed"].includes(snapshot?.connection?.state)) return;
       await mutate("open", {});
     }
     async function mutate(kind, body, onKnownUnsent = null) {
-      if (mutating || preparing || destroyed || !enabled) return null;
+      if (mutating || preparing || destroyed || !enabled || snapshot?.core_unavailable) return null;
       syncWorkspace(); if (!snapshotReadable) return null;
       const stamp = generation; writeVersion++; mutating = true; errorText = ""; if (kind === "open") openFeedbackPending = false; render();
       try { const value = await api(apiRoot + "/" + kind, { method: "POST", body: JSON.stringify(body) }); if (stamp !== generation || destroyed) return null; if (kind === "open") openFeedbackPending = true; if (kind === "send") rememberGuideReceipt(value?.receipt); return value; }
@@ -1140,7 +1267,7 @@
     async function send(options = {}) {
       if (configurationWriting || lastCommand?.readback_failed || proposedBinding) return;
       syncWorkspace();
-      const manual = chatId === null && typeof options.manualCheckText === "string", requestText = manual ? options.manualCheckText : draft;
+      const manual = chatId === null && typeof options.manualCheckText === "string", requestText = manual ? options.manualCheckText : draft, requestDraftRevision = manual ? null : draftEdits;
       if (manual && !canCheckGuide()) return;
       if (!selectionReady() || !memorySelectionReady() || filePicker?.busy() || guideCheckReading || openingForSend || pending || draftStorageInvalid || nativePending().length || activeTurn() || hasUnresolvedRequests() || mutating || preparing || !enabled || destroyed
           || document.hidden || chatId !== null && (!visible || settingsVisible) || !requestText.trim() || requestText.length > 200000) return;
@@ -1148,21 +1275,21 @@
       if (!manual && chatId === null && (draftFrame8 || typeof getCommandContext === "function")) {
         try {
           if (!draftBinding) throw Error("这份指令尚未确定对象；请点“设为当前”或从目标对话进入专员，原稿保留。");
-          const target = commandCodec().normalizeBinding(draftBinding), original = draftBinding, scope = workspace;
+          const target = commandCodec().normalizeBinding(draftBinding), choiceVersion = bindingChoiceVersion, scope = workspace;
           if (target.workspace_id !== workspace) throw Error("当前工作对象属于另一个入口，尚未发送。");
-          command = { context: target.context, target, isCurrent: () => draftBinding === original && scope === workspace && scope === String(getWorkspace() || ""), edits: draftEdits };
+          command = { context: target.context, target, isCurrent: () => bindingChoiceVersion === choiceVersion && scope === workspace && scope === String(getWorkspace() || ""), edits: requestDraftRevision };
           if (!commandCurrent(command)) return;
         } catch (error) { reportError(error, "当前工作对象尚未核实，原草稿保留。"); render(); return; }
       }
       if (!ready()) {
         if (!canOpenForSend() || reading) return;
-        const stamp = generation, view = viewVersion, scope = workspace, text = draft, edits = draftEdits, choices = canonical([selectedProfile, draftMaterials, selectedMemory]), thread = snapshot?.binding?.thread_id;
+        const stamp = generation, view = viewVersion, scope = workspace, choices = canonical([selectedProfile, draftMaterials, selectedMemory]), thread = snapshot?.binding?.thread_id;
         openingForSend = true; render();
         let opened = false;
         try {
           const value = await mutate("open", {});
           opened = value !== null && stamp === generation && scope === String(getWorkspace() || "") && !destroyed && enabled && ready()
-            && !document.hidden && (chatId === null || view === viewVersion && visible && !settingsVisible) && draftEdits === edits && draft === text
+            && !document.hidden && (chatId === null || view === viewVersion && visible && !settingsVisible)
             && canonical([selectedProfile, draftMaterials, selectedMemory]) === choices && commandCurrent(command) && (!thread || snapshot?.binding?.thread_id === thread);
         } finally { openingForSend = false; if (!destroyed) render(); }
         if (!opened) return;
@@ -1183,10 +1310,10 @@
           submitted.body_json = JSON.stringify(sendBody(clientId, text, profile, refs, memory, context)); submitted.request_sha256 = await bodyHash(submitted.body_json); submitted.intent_sha256 = await bodyHash(canonical(JSON.parse(submitted.body_json)));
           if (stamp !== generation || destroyed || !enabled || filePicker?.busy() || document.hidden || (manual || chatId !== null) && view !== viewVersion || workspace !== String(getWorkspace() || "") || !profileReady() || (manual ? !visible || settingsVisible || !!draft.trim() || choices !== canonical([selectedProfile, draftMaterials, selectedMemory]) : !materialsReady() || !memoryReady()
               || JSON.stringify(refs) !== JSON.stringify(draftMaterials) || canonical(memory) !== canonical(selectedMemory))) return;
-          if (command && (!commandCurrent(command) || command.edits !== draftEdits || draft !== text)) return;
+          if (command && !commandCurrent(command)) return;
           if (command && typeof onPrepareCommand === "function") {
             const isCurrent = () => stamp === generation && !destroyed && enabled && workspace === String(getWorkspace() || "")
-              && commandCurrent(command) && command.edits === draftEdits && draft === text;
+              && commandCurrent(command);
             const prepared = await onPrepareCommand({ workspace_id: workspace, client_id: clientId, target: copy(command.target), isCurrent });
             if (prepared === false) throw Error("设置请求登记尚未完成；原指令保留。");
             if (!isCurrent() || document.hidden) return;
@@ -1196,17 +1323,18 @@
       }
       if (!commandCurrent(command)) return;
       const previousCommand = lastCommand;
-      pending = submitted; pendingVerified = true;
-      if (command) lastCommand = { client_id: clientId, target: copy(command.target), draft_revision: draftEdits,
+      pending = submitted; pendingDraftRevision = requestDraftRevision; pendingVerified = true;
+      if (command) lastCommand = { client_id: clientId, target: copy(command.target), draft_revision: requestDraftRevision,
         thread_id: snapshot?.binding?.thread_id || null, turn_id: null, status: "submitted_unknown", reported: false, readback_failed: false };
-      if (!save()) { pending = null; lastCommand = previousCommand; errorText = "浏览器不能保存发送回执，尚未发送；原草稿保留。"; render(); return; }
+      if (!save()) { pending = null; pendingDraftRevision = null; lastCommand = previousCommand; errorText = "浏览器不能保存发送回执，尚未发送；原草稿保留。"; render(); return; }
       if (command) pendingCommand = { ...command, client_id: clientId };
       if (manual) guideOwnClients.add(clientId);
       const value = await mutate("send", submitted.body_json ? JSON.parse(submitted.body_json) : sendBody(submitted.client_id, submitted.text), () => {
         if (pending !== submitted) return;
-        pending = null; pendingCommand = null;
+        const previousDraftRevision = pendingDraftRevision;
+        pending = null; pendingCommand = null; pendingDraftRevision = null;
         if (lastCommand?.client_id === submitted.client_id) lastCommand.status = "rejected";
-        if (!save()) { pending = submitted; feedback = "这次消息已确认尚未发送，但浏览器无法清除本地回执；原稿仍保留。"; }
+        if (!save()) { pending = submitted; pendingDraftRevision = previousDraftRevision; feedback = "这次消息已确认尚未发送，但浏览器无法清除本地回执；原稿仍保留。"; }
         else feedback = "这次消息尚未发送；原稿保留，修改后可以手动发送。";
       });
       if (value && value.receipt) { observeCommandReceipt(value.receipt); finishPending(value.receipt); observeCommandTurn(snapshot); }
@@ -1297,6 +1425,8 @@
         if (stamp !== generation || destroyed || Object.hasOwn(answerJournal, digest)) return;
         const latest = snapshot && Array.isArray(snapshot.requests) && snapshot.requests.find(r => r.token === record.token);
         if (!ready() || mutating || !latest || latest.state !== "pending" || requestEpoch !== epoch || JSON.stringify(latest.request) !== requestStamp) throw Error("请求已变化或页面正在提交其他操作，请刷新后核对；尚未答复。");
+        if (currentCore() === "dsh" && (latest.answerable !== true || latest.epoch !== snapshot?.native_core_view?.epoch
+            || latest.request?.payload?.sessionId !== snapshot?.native_core_view?.binding?.sessionId)) throw Error("DSH 询问身份已变化，尚未答复。");
         if (fileApproval) { const patch = fileApprovalPatch(latest); if (patch.stamp !== patchStamp || needsPatch && !patch.allowed) throw Error(translate("补丁已变化，请核对最新内容；尚未答复。")); }
         for (const [old, state] of Object.entries(answerJournal)) if (state === "resolved") delete answerJournal[old];
         if (Object.keys(answerJournal).length >= 128) throw Error("尚未核对的审批回执过多，请先核对已有请求。");
@@ -1308,7 +1438,72 @@
       const value = await mutate("answer", { token: record.token, result });
       if (!value) feedback = "这次答复结果尚未确认，不会再次答复同一请求。"; render();
     }
+    function dshAnswer(record, result) {
+      const native = snapshot?.native_core_view, payload = record?.request?.payload;
+      if (currentCore() !== "dsh" || !ready() || record?.answerable !== true || record.epoch !== native?.epoch
+          || payload?.sessionId !== native?.binding?.sessionId) return;
+      const response = { type: "client-response", rpcId: record.request.rpcId, result };
+      if (new TextEncoder().encode(JSON.stringify(response)).length > 128 * 1024) { errorText = "DSH 答复超过原生容量，原问题保留，尚未答复。"; render(); return; }
+      return answer(record, { epoch: native.epoch, response });
+    }
+    function dshRequestCard(record) {
+      const payload = record.request?.payload, box = node("article", "rbs-request");
+      box.append(node("h3", "", payload?.type === "approval/requested" ? "DSH · 工具审批" : "DSH · 原生问题"));
+      const raw = node("details", "rbs-parameters"); raw.append(node("summary", "", "原始 DSH 请求"), node("pre", "rbs-native", JSON.stringify(record.request, null, 2))); box.append(raw);
+      const supported = record.answerable === true && record.epoch === snapshot?.native_core_view?.epoch
+        && payload?.sessionId === snapshot?.native_core_view?.binding?.sessionId;
+      if (!supported) { box.append(node("p", "rbs-note", "原生询问身份尚未确认，保留原始内容，不能答复。")); return box; }
+      if (payload.type === "approval/requested" && nativeToken(payload.approvalId) && validText(payload.toolName)) {
+        box.append(node("p", "rbs-note", payload.toolName + (validText(payload.reason) ? " · " + payload.reason : "")));
+        const controls = node("div", "rbs-actions");
+        for (const [label, outcome] of [["拒绝", "rejected"], ["仅这次允许", "allowed-once"]]) controls.append(button(label, () => dshAnswer(record, { ok: true, value: { sessionId: payload.sessionId, approvalId: payload.approvalId, outcome } })));
+        box.append(controls); return box;
+      }
+      const questions = payload.questions;
+      if (payload.type !== "question/requested" || !Array.isArray(questions) || !questions.length || questions.length > 32
+          || questions.some(question => !object(question) || !validText(question.id) || !validText(question.question) || question.question.length > 16000
+            || question.multiSelect !== undefined && typeof question.multiSelect !== "boolean"
+            || question.options !== undefined && (!Array.isArray(question.options) || question.options.length > 128
+              || question.options.some(option => !object(option) || !validText(option.label) || option.description !== undefined && !validText(option.description))))) {
+        box.append(node("p", "rbs-note", "此原生询问形状暂不支持，只保留原始内容，没有自动答复。")); return box;
+      }
+      // This follows the native DSH question batch protocol: no preselected answer.
+      const drafts = questions.map(() => ({ selected: [], custom: "", skipped: false })), groups = [], note = node("p", "rbs-note");
+      const synchronize = index => {
+        const draft = drafts[index], group = groups[index];
+        for (const option of group.options) option.control.checked = draft.selected.includes(option.label);
+        group.custom.value = draft.custom; group.status.textContent = draft.skipped ? "此题已跳过" : ""; note.textContent = "";
+      };
+      questions.forEach((question, index) => {
+        const group = node("fieldset", "rbs-item rbs-field rbs-question"); group.append(node("legend", "", question.header || question.question));
+        if (question.header) group.append(node("p", "", question.question));
+        if (validText(question.detail)) { const detail = node("div", "rbs-question-detail"); rich(detail, question.detail); group.append(detail); }
+        const options = [];
+        for (const [optionIndex, option] of (question.options || []).entries()) {
+          const label = node("label", "rbs-question-option"), control = node("input", "rbs-question-choice"); control.type = question.multiSelect === true ? "checkbox" : "radio";
+          control.name = "dsh-specialist-question-" + record.token + "-" + index; control.value = option.label;
+          control.setAttribute("data-question-index", index); control.setAttribute("data-option-index", optionIndex);
+          label.append(control, node("span", "", option.label)); if (option.description) label.append(node("small", "", option.description)); group.append(label); options.push({ control, label: option.label });
+          control.addEventListener("change", () => {
+            if (control.disabled) return; const draft = drafts[index]; draft.skipped = false;
+            draft.selected = question.multiSelect === true ? control.checked ? [...new Set([...draft.selected, option.label])] : draft.selected.filter(value => value !== option.label) : [option.label];
+            if (question.multiSelect !== true) draft.custom = ""; synchronize(index);
+          });
+        }
+        const custom = node("textarea", "rbs-control rbs-question-custom"); custom.rows = 2; custom.setAttribute("aria-label", "其他回答：" + question.question); group.append(custom);
+        custom.addEventListener("input", () => { if (custom.disabled) return; const draft = drafts[index]; draft.custom = custom.value; draft.skipped = false; if (question.multiSelect !== true && custom.value.trim()) draft.selected = []; synchronize(index); });
+        const status = node("p", "rbs-note"), skip = button("跳过此题", () => { if (skip.disabled) return; drafts[index] = { selected: [], custom: "", skipped: true }; synchronize(index); });
+        group.append(skip, status); groups.push({ options, custom, status }); box.append(group);
+      });
+      const controls = node("div", "rbs-actions");
+      controls.append(button("取消这组问题", () => dshAnswer(record, { ok: false, error: { code: "cancelled", message: "the user closed this question request", details: {} } })), button("提交整组回答", () => {
+        if (drafts.some(draft => !draft.skipped && !draft.selected.length && !draft.custom.trim())) { note.textContent = "请回答或明确跳过每道问题。"; return; }
+        const answers = questions.map((question, index) => { const draft = drafts[index], custom = draft.custom.trim(); return { id: question.id, selected: draft.skipped ? [] : custom && question.multiSelect !== true ? [] : draft.selected.slice(), ...(draft.skipped || !custom ? {} : { custom }) }; });
+        return dshAnswer(record, { ok: true, value: { sessionId: payload.sessionId, answer: { answers } } });
+      })); box.append(note, controls); return box;
+    }
     function requestCard(record, patch) {
+      if (chatId === null && currentCore() === "dsh") return dshRequestCard(record);
       const request = record.request || {}, params = request.params || {}, box = node("article", "rbs-request");
       const names = { "item/commandExecution/requestApproval": "执行命令前确认", "item/fileChange/requestApproval": "修改文件前确认", "item/permissions/requestApproval": "额外权限请求", "item/tool/requestUserInput": "需要你的回答", "mcpServer/elicitation/request": "工具需要补充信息" };
       const mcpConfirmation = request.method === "mcpServer/elicitation/request" && mcpCallConfirmation(params);
@@ -1536,7 +1731,7 @@
         if (end !== -1) sections.set(part.slice(0, end).trim(), part.slice(end + 1).trim());
       }
       const topic = guideChoice === "agent" ? "设置 Agent" : "切换大模型";
-      return [sections.get(topic), sections.has("常用指令") ? "## 常用指令\n\n" + sections.get("常用指令") : ""].filter(Boolean).join("\n\n");
+      return sections.get(topic) || "";
     }
     async function checkModels() {
       syncWorkspace();
@@ -1581,7 +1776,7 @@
       ].filter(Boolean).join("；") : "";
       agentGuide.textContent = english ? "Set up Agent" : "设置 Agent";
       modelGuide.textContent = english ? "Choose model" : "切换大模型";
-      if (manualButton) manualButton.textContent = english ? "Open manual" : "打开手册";
+      if (manualButton) manualButton.textContent = english ? "User manual" : "使用手册";
       closeGuide.textContent = english ? "Hide guide" : "收起指南"; closeGuide.hidden = !!guideMount || !guideChoice;
       agentGuide.setAttribute("aria-pressed", String(guideChoice === "agent")); modelGuide.setAttribute("aria-pressed", String(guideChoice === "model"));
       guideSheet.hidden = !guideChoice;
@@ -1603,27 +1798,27 @@
       if (guideCache?.catalog === catalog && guideCache?.history === history && guideCache?.dsh === dsh && guideCache.key === cacheKey) return;
       guideCache = { catalog, history, dsh, key: cacheKey };
       guideSheet.replaceChildren();
-      const title = node("h2", "", english ? guideChoice === "agent" ? "Agent reference" : "Model reference" : guideChoice === "agent" ? "Agent 设置提示" : "大模型设置提示");
-      guideSheet.append(title, node("p", "rbs-guide-target", targetText ? (english ? "Target to name: " : "要调整的对象：") + targetText : english ? "Name the conversation or saved configuration you want to change." : "告诉专员要改哪段对话或哪份配置。"));
-      if (guideChoice === "model") guideSheet.append(node("p", "rbs-guide-source", english ? "Ask the specialist to adjust the target conversation’s Agent, model or reasoning. Changing Agent requires another conversation with its context carried over." : "在这里让专员调整目标对话的 Agent、模型和强度；换 Agent 需另建对话并带入内容。"));
-      if (verification) guideSheet.append(node("p", "rbs-guide-verification", verification === "inherited"
-        ? english ? "Next turn inherits native settings; no model or reasoning level is selected here." : "下轮沿用原生设置；这里没有指定模型和强度。"
-        : english ? "The latest configuration needs verification. Use Check and update." : "最新配置待核对，点“核对并更新”。"));
+      guideSheet.append(node("p", "rbs-guide-target", targetText ? (english ? "Target: " : "对象：") + targetText : english ? "Choose a conversation or saved configuration first." : "请先选择要调整的对话或配置。"));
+      if (["failed", "unverified"].includes(verification)) guideSheet.append(node("p", "rbs-guide-verification", english ? "Configuration unverified. Use Check and update." : "配置待核对，点“核对并更新”。"));
       const bundledGuide = guideMarkdown();
       if (guideChoice === "agent") {
-        const list = node("dl", "rbs-guide-list");
-        for (const [id, label] of [["codex", "Codex"], ["hermes", "Hermes"], ["pi", "Pi"], ["claude", "Claude Code"], ["dsh", "DeepSeek Harness"]]) {
-          const count = catalog?.ai_profiles?.filter(row => row.agent_instance_id === "local/" + id).length || 0;
-          list.append(node("dt", "", label), node("dd", "", count ? english ? `${count} saved configuration(s)` : `${count} 份已保存配置` : english ? "No saved configuration read" : "尚未读到保存配置"));
+        const labels = { codex: "Codex", hermes: "Hermes", pi: "Pi", claude: "Claude Code", dsh: "DeepSeek Harness" };
+        for (const id of [backend, ...Object.keys(labels).filter(id => id !== backend)]) {
+          const group = node("details", "rbs-guide-candidates"); group.open = id === backend;
+          group.append(node("summary", "", labels[id]));
+          const names = [...new Set((catalog?.ai_profiles || []).filter(row => row.agent_instance_id === "local/" + id && (row.native_available === true || !nativeTarget && row.available === true))
+            .map(row => guideText(row.name, 40)).filter(Boolean))];
+          group.append(node("p", "", id === "dsh" ? english ? "Native settings only; per-chat model and effort selection is unavailable." : "DSH 原生设置；暂不能切换本对话模型与强度。"
+            : names.length ? (english ? "Available configurations: " : "可用配置：") + names.join("、") : english ? "No available configuration read." : "尚未读到可用配置。"));
+          guideSheet.append(group);
         }
-        guideSheet.append(list);
         if (!bundledGuide) guideSheet.append(node("p", "rbs-guide-example", english ? 'Try: “Create a Hermes configuration named Daily chat, keeping its native model.”'
           : "可以这样说：“新建一份名叫‘日常聊天’的 Hermes 配置，模型沿用原生设置。”"));
       } else {
         const labels = { codex: "Codex", pi: "Pi", hermes: "Hermes", claude: "Claude Code", dsh: "DeepSeek Harness" };
         const order = [backend, ...["codex", "pi", "hermes", "claude", "dsh"].filter(id => id !== backend)];
         for (const id of order) {
-          const group = node("details", "rbs-guide-candidates"); group.open = id === backend && id !== "dsh";
+          const group = node("details", "rbs-guide-candidates"); group.open = id === backend;
           group.append(node("summary", "", labels[id]));
           if (id === "dsh") {
             let source = null, historical = false;
@@ -1651,6 +1846,7 @@
               group.append(node("p", "rbs-guide-source", (english ? "Last update (catalogue): " : "上次更新（目录读取）：") + guideTime(source.observed_at, english)));
               group.append(node("p", "rbs-guide-source", english ? "Reads the directory only; providers may access the network. This does not enable switching in this conversation." : "只读取目录，提供商可能联网；目录不代表可在本对话切换。"));
             }
+            if (!source || guideTime(source.observed_at, false) === "未报告") group.append(node("p", "rbs-guide-source", english ? "This conversation cannot switch models or effort here." : "暂不能在本对话切换模型与强度。"));
             guideSheet.append(group); continue;
           }
           const liveSource = catalog?.native_profile_capabilities?.[id];
@@ -1681,8 +1877,6 @@
             const effortLabel = id === "hermes" ? english ? "Requestable reasoning: " : "可请求强度：" : english ? "Reasoning options: " : "强度：";
             table.append(node("p", "", effortLabel + guideEffortSummary(effortRows, english)));
             group.append(table);
-            if (id === "pi") group.append(node("p", "rbs-guide-source", english ? "Pi: none maps to native off. Provider behavior may differ." : "Pi：none 对应原生 off；提供商行为可能不同。"));
-            if (id === "hermes") group.append(node("p", "rbs-guide-source", english ? "Hermes lists request levels; the provider may map them differently." : "Hermes 这里列的是请求强度，提供商可能另作映射。"));
           }
           group.append(node("p", "rbs-guide-source", (english ? "Last update (catalogue): " : "上次更新（目录读取）：") + (source?.catalogue_available === true ? guideTime(source.observed_at, english) : english ? "Not yet verified" : "尚未核对")));
           if (source?.catalogue_available === true) {
@@ -1690,6 +1884,8 @@
             evidence.append(node("summary", "", english ? "Catalogue source" : "目录来源"),
               node("p", "rbs-guide-source", (english ? "Source: " : "来源：") + (guideText(source.source) || (english ? "Not reported" : "未报告"))));
             if (guideText(source.source_chat_id)) evidence.append(node("p", "rbs-guide-source", (english ? "Source conversation: " : "来源对话：") + guideText(source.source_chat_id)));
+            if (id === "pi") evidence.append(node("p", "rbs-guide-source", english ? "Pi: none maps to native off. Provider behavior may differ." : "Pi：none 对应原生 off；提供商行为可能不同。"));
+            if (id === "hermes") evidence.append(node("p", "rbs-guide-source", english ? "Hermes lists request levels; the provider may map them differently." : "Hermes 这里列的是请求强度，提供商可能另作映射。"));
             group.append(evidence);
           }
           guideSheet.append(group);
@@ -1717,10 +1913,9 @@
           example = english ? `Try: “Check which models and reasoning options can be changed for ${configuration}, and tell me the supported choices first.”`
             : `可以这样说：“核对${configuration}能改哪些模型和强度，先告诉我支持的选项。”`;
         }
-        if (!bundledGuide) guideSheet.append(node("p", "rbs-guide-example", example));
+        guideSheet.append(node("p", "rbs-guide-example", example));
       }
       if (bundledGuide) { const text = node("div", "rbs-guide-text"); rich(text, bundledGuide); guideSheet.append(text); }
-      else guideSheet.append(node("p", "rbs-guide-footnote", english ? "Name the conversation or saved configuration. For a single conversation, say ‘next turn’." : "说出对话或配置名；只改一轮时，说‘下一轮’。"));
       if (manualButton) guideSheet.append(manualButton);
     }
     function renderConfigurationStatus() {
@@ -1745,7 +1940,17 @@
       const followLatest = visible && !settingsVisible && conversationBody?.clientHeight > 0 && conversationBody.scrollHeight - conversationBody.scrollTop - conversationBody.clientHeight < 48;
       syncConfigurationSelection();
       renderGuide(); renderConfigurationStatus();
-      toolStatus?.update({ workspace, snapshot: snapshotReadable ? snapshot : null, active: visible && enabled && !destroyed, language, disabled: mutating || preparing || openingForSend });
+      toolStatus?.update({ workspace, snapshot: snapshotReadable && currentCore() === "codex" ? snapshot : null, active: visible && enabled && !destroyed && !passive, language, disabled: mutating || preparing || openingForSend });
+      if (coreBox) {
+        coreBox.hidden = !snapshot?.conversation;
+        coreLabel.children[0].textContent = language === "en" ? "Specialist core" : "专员核心";
+        coreSelect.setAttribute("aria-label", language === "en" ? "Specialist core" : "专员核心");
+        coreSelect.replaceChildren();
+        for (const [id, label] of [["codex", "Codex"], ["dsh", "DSH"]]) { const option = node("option", "", label); option.value = id; option.disabled = !snapshot?.conversation?.available_cores.includes(id); coreSelect.append(option); }
+        coreSelect.value = currentCore(); coreSelect.disabled = !canSwitchCore();
+        coreNote.textContent = language === "en" ? "One conversation and shared management settings. Switching waits for native execution and approvals to finish."
+          : "同一段专员对话和管理设置。原生请求执行中、等待审批或结果未知时暂不能切换。";
+      }
       handoffView?.setScope(JSON.stringify([workspace, chatId, epoch, snapshot?.binding?.thread_id ?? null]));
       root.setAttribute("lang", language); input.placeholder = chatId === null ? language === "en" ? "Message the Rabbit specialist…" : "给小白兔专员发消息…" : language === "en" ? "Message Codex…" : "给 Codex 发消息…";
       if (chatId === null && !settingsPanel) composer.replaceChildren(...(typedMemoryScope(snapshot) || selectedMemory || pending?.memory_profile ? [memoryBox] : []), targetNotice, input, materialBox, composerActions, ...(composerStatus ? [composerStatus] : []));
@@ -1754,7 +1959,7 @@
         ? language === "en" ? "Check and apply suggestion" : "核对并应用建议" : language === "en" ? "Check settings result" : "核对设置结果";
       checkCommandButton.hidden = !lastCommand?.readback_failed; checkCommandButton.disabled = !!commandReadbackReading || mutating || preparing || !enabled;
       const labels = [[openButton, chatId === null ? "打开专员" : "打开对话"], [checkButton, "核对上次发送"], [moreButton, "继续读取原生记录"]]; for (const [button, label] of labels) button.textContent = translate(label);
-      const state = snapshot && snapshot.connection.state || "not_open"; connection.textContent = translate(snapshotReadable ? { not_open: "尚未打开", ready: "已连接", opening: "正在连接", failed: "连接失败", closed: "已关闭" }[state] || "连接失败" : "状态待核对");
+      const state = snapshot && snapshot.connection.state || "not_open"; connection.textContent = (currentCore() === "dsh" ? "DSH · " : "") + translate(snapshotReadable ? { not_open: "尚未打开", ready: "已连接", opening: "正在连接", failed: "连接失败", closed: "已关闭" }[state] || "连接失败" : "状态待核对");
       if (composerStatus) {
         composerStatus.textContent = commandReadbackReading ? language === "en" ? "Checking settings result…" : "正在核对设置结果…"
           : lastCommand?.readback_failed ? language === "en" ? "Settings result needs checking in specialist More." : "设置结果待核对，请打开专员的“更多”。"
@@ -1771,7 +1976,7 @@
       if (maintenanceLabel) maintenanceLabel.textContent = language === "en" ? "Connection and tools" : "连接与工具";
       if (settingsPanel) settingsPanel.setAttribute("lang", language);
       input.disabled = !enabled || destroyed;
-      openButton.disabled = mutating || preparing || openingForSend || !enabled || !snapshotReadable || snapshot?.disconnect_unconfirmed === true; openButton.hidden = ready();
+      openButton.disabled = mutating || preparing || openingForSend || !enabled || !snapshotReadable || snapshot?.disconnect_unconfirmed === true || !!snapshot?.core_unavailable; openButton.hidden = ready();
       disconnectButton.textContent = translate(disconnectLabel); disconnectButton.hidden = !snapshot || !["ready", "failed", "closed"].includes(snapshot.connection.state); disconnectButton.disabled = !canDisconnect();
       chatMoreSummary.textContent = language === "en" ? "More" : "更多";
       if (originalAppLink) {
@@ -1837,6 +2042,10 @@
           memoryStale ? english ? "The saved memory choice changed or is unverified. Choose a version before sending." : "原选共享记忆已变化或尚未核实，请重新选择后发送。" : "", memoryReading ? english ? "Reading saved parameters…" : "正在读取保存的参数…" : "", memoryError].filter(Boolean).join(" ");
       }
       notices.replaceChildren(); if (errorText) notices.append(node("p", "rbs-error", errorText)); if (feedback) notices.append(node("p", "rbs-note", feedback));
+      if (snapshot?.core_unavailable) notices.append(node("p", "rbs-note", snapshot.core_unavailable));
+      if (unsupportedMemoryCombination()) notices.append(node("p", "rbs-note", currentCore() === "dsh"
+        ? "DSH 专员与额外共享记忆的组合尚未接通；原选择和草稿保留，请明确取消附加记忆或切回 Codex 后发送。"
+        : "跨核心补充前文与额外共享记忆的组合尚未接通；原选择和草稿保留，请明确取消附加记忆后继续。"));
       if (pending) notices.append(node("p", "rbs-note", translate(pending.state === "accepted" ? "消息已由原生 Agent 接收，正在等待本轮结束；原草稿暂时保留。" : mutating ? "正在发送；原始消息与配置已保存。" : "上次发送尚未确认；保留原始回执，不会自动再次发送。")));
       if (draftStorageInvalid) notices.append(node("p", "rbs-error", "浏览器保存的草稿或发送回执无法核实；请保留原记录，尚未再次发送。"));
       if (nativePending().some(r => r.kind === "thread_start" && r.status === "submitted_unknown")) notices.append(node("p", "rbs-error", "原生会话创建尚未确认，当前不能自动新建另一段会话。"));
@@ -1853,14 +2062,18 @@
       const keys = new Set();
       for (const record of snapshot && snapshot.requests || []) {
         const patch = record.request && record.request.method === "item/fileChange/requestApproval" ? fileApprovalPatch(record) : null;
-        const key = record.token || JSON.stringify(record.request && record.request.id), encoded = JSON.stringify([record.request, patch && patch.stamp]);
+        const key = record.token || JSON.stringify(record.request && record.request.id), encoded = JSON.stringify([record.request, patch && patch.stamp,
+          ...(currentCore() === "dsh" ? [record.epoch, record.answerable, snapshot?.native_core_view?.binding?.sessionId] : [])]);
         keys.add(key);
         let stored = requestNodes.get(key); if (!stored || stored.encoded !== encoded) { stored = { encoded, node: requestCard(record, patch), note: node("p", "rbs-note", "该请求已答复或结果尚未确认，不会重复答复。") }; stored.node.append(stored.note); requestNodes.set(key, stored); }
         const ownershipUnconfirmed = record.state === "ownership_unconfirmed";
         stored.note.textContent = translate(ownershipUnconfirmed ? "先核对上次发送，确认这条请求属于原消息。" : "该请求已答复或结果尚未确认，不会重复答复。");
-        const disabled = !ready() || mutating || preparing || !record.token || record.state !== "pending" || burned.has(record.token) || stored.blocked;
+        const dshInvalid = currentCore() === "dsh" && (record.answerable !== true || record.epoch !== snapshot?.native_core_view?.epoch || record.request?.payload?.sessionId !== snapshot?.native_core_view?.binding?.sessionId);
+        const disabled = !ready() || mutating || preparing || !record.token || record.state !== "pending" || burned.has(record.token) || stored.blocked || dshInvalid;
         stored.note.hidden = !(ownershipUnconfirmed || burned.has(record.token) || stored.blocked);
-        for (const button of stored.node.querySelectorAll("button")) button.disabled = disabled || button.getAttribute("data-file-allow") === "true" && !patch.allowed;
+        const controls = [...stored.node.querySelectorAll("button")];
+        if (currentCore() === "dsh") controls.push(...stored.node.querySelectorAll("input"), ...stored.node.querySelectorAll("textarea"), ...stored.node.querySelectorAll("select"));
+        for (const button of controls) button.disabled = disabled || button.getAttribute("data-file-allow") === "true" && !patch.allowed;
         if (disabled) stored.node.setAttribute("data-state", record.state || "unavailable"); cards.push(stored.node);
       }
       for (const key of requestNodes.keys()) if (!keys.has(key)) requestNodes.delete(key);
@@ -1870,6 +2083,7 @@
       if (followLatest) conversationBody.scrollTop = conversationBody.scrollHeight;
     }
     input.addEventListener("input", () => {
+      if (passive) setPassive(false);
       const wasEmpty = !draft.trim(), previous = draftBinding;
       draft = input.value; draftEdits++;
       if (chatId === null && (draftFrame8 || typeof getCommandContext === "function")) {
@@ -1891,12 +2105,13 @@
       }
     });
     if (composerMount) {
-      const focusComposer = async () => { if (enabled && !destroyed) { syncWorkspace(); render(); if (!snapshotReadable && !reading && !mutating && !preparing) { await refresh(); await loadInitialMemoryProfiles(); } } };
+      const focusComposer = async () => { if (enabled && !destroyed) { const wasPassive = passive; passive = false; syncWorkspace(); render(); if ((wasPassive || !snapshotReadable) && !reading && !mutating && !preparing) { await refresh(); await loadInitialMemoryProfiles(); } } };
       input.addEventListener("focus", focusComposer); input.addEventListener("click", focusComposer);
     }
     const visibility = () => { if (document.hidden) { viewVersion++; historyRestore = null; clearTimeout(timer); timer = null; save(); } else if (visible || composerMount && (pending || activeTurn() || hasUnresolvedRequests())) refresh(); };
     if (document.addEventListener) document.addEventListener("visibilitychange", visibility);
     async function show(options = {}) {
+      passive = false;
       if (destroyed) return;
       settingsVisible = false; visible = true; root.hidden = false; if (guideMount) guideMount.hidden = false; syncWorkspace();
       if (options?.restoreHistory === true && (chatId === null && composerMount || sharedComposer) && !historyRestore)
@@ -1904,14 +2119,23 @@
       render(); await refresh(); await restoreExistingHistory();
       if (ready()) await loadInitialProfiles(); await loadInitialMemoryProfiles();
     }
-    async function showSettings() { if (destroyed) return; viewVersion++; historyRestore = null; settingsVisible = true; visible = true; root.hidden = true; if (guideMount) guideMount.hidden = true; syncWorkspace(); render(); await refresh(); if (ready()) await loadInitialProfiles(); await loadInitialMemoryProfiles(); }
+    async function showSettings() { if (destroyed) return; passive = false; viewVersion++; historyRestore = null; settingsVisible = true; visible = true; root.hidden = true; if (guideMount) guideMount.hidden = true; syncWorkspace(); render(); await refresh(); if (ready()) await loadInitialProfiles(); await loadInitialMemoryProfiles(); }
     function hide() { viewVersion++; historyRestore = null; settingsVisible = false; visible = false; root.hidden = true; if (guideMount) guideMount.hidden = true; clearTimeout(timer); timer = null; save(); schedule(); if (!settingsPanel) toolStatus?.reset(); }
     function setLanguage(value) { language = value === "en" ? "en" : "zh-CN"; requestNodes.clear(); render(); }
-    function setEnabled(value) {
+    function setPassive(value) {
+      const wasPassive = passive; passive = value === true;
+      if (passive) { clearTimeout(timer); timer = null; }
+      else if (wasPassive && enabled && composerMount && !destroyed && workspace) { initialComposerRead = true; void refresh(); }
+      render();
+    }
+    function setEnabled(value, options = {}) {
+      const wasPassive = passive;
+      if (chatId === null && Object.hasOwn(options, "passive")) passive = options.passive === true;
+      if (passive) { clearTimeout(timer); timer = null; }
       enabled = value === true; if (composerMount && !destroyed) syncWorkspace(); if (!enabled) hide(); render();
       // Make a restored sidebar draft sendable without another focus gesture.
       // This reads the existing holder only; it never opens an Agent.
-      if (enabled && composerMount && !destroyed && workspace && !initialComposerRead) { initialComposerRead = true; void refresh(); }
+      if (enabled && !passive && composerMount && !destroyed && workspace && (!initialComposerRead || wasPassive)) { initialComposerRead = true; void refresh(); }
     }
     function setMaterialInputs(value) { materialsEnabled = chatId !== null && value === true; render(); }
     function destroy() { destroyed = true; hide(); toolStatus?.destroy(); generation++; fullReadPending = false; if (composerMount) composer.remove(); if (guideMount) guide.remove(); settingsPanel?.remove(); if (document.removeEventListener) document.removeEventListener("visibilitychange", visibility); }
@@ -2112,7 +2336,7 @@
       }
     }
     function updateGuideContext() { guideCache = null; renderGuide(); }
-    render(); return { getDraftBinding, getGuideBinding, bindTarget, applyConfigurationReadback, getComposerView, chooseConfiguration, saveLocalConfiguration, prepareInitialLocalConfiguration, sendDraft: send, focusComposer: () => input.focus({ preventScroll: true }), show, showSettings, hide, refresh, setLanguage, setEnabled, setMaterialInputs, destroy, selectSavedProfile, putDraft, captureQuoteDraft, applyQuoteDraft, getTextSnapshot, getConfigurationContext, updateGuideContext, openGuide, getStatusReportMount: () => statusReportMount };
+    render(); return { captureDraftRevision, adoptTextDraft, getDraftBinding, getGuideBinding, bindTarget, applyConfigurationReadback, getComposerView, chooseConfiguration, saveLocalConfiguration, prepareInitialLocalConfiguration, sendDraft: send, focusComposer: () => input.focus({ preventScroll: true }), show, showSettings, hide, refresh, setLanguage, setEnabled, setPassive, setMaterialInputs, destroy, selectSavedProfile, putDraft, captureQuoteDraft, applyQuoteDraft, getTextSnapshot, getConfigurationContext, updateGuideContext, openGuide, getStatusReportMount: () => statusReportMount };
   }
-  window.RabbitSpecialist = Object.freeze({ create, dshCatalogue });
+  window.RabbitSpecialist = Object.freeze({ create, dshCatalogue, coreConversation, projectSpecialistCore });
 })();

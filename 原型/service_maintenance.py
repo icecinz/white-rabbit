@@ -226,7 +226,7 @@ def inspect_service(service):
             result[prefix + '_unknown'] = 1
     try:
         with _short_lock(service._specialist_lock):
-            _native(result, service.specialist, 'specialist')
+            _native(result, getattr(service, '_specialist_conversation', None) or service.specialist, 'specialist')
     except Exception:
         result['specialist_unknown'] = 1
     try:

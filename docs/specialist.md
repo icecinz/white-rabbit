@@ -2,7 +2,9 @@
 
 [English](specialist.md) · [简体中文](specialist.zh-CN.md) · [Home](../README.md)
 
-The Rabbit specialist is the application's management assistant: a **separate, fixed native Codex conversation** with its own role and work context. Its job is to understand an instruction, inspect the relevant state, and use the owning module's supported interfaces.
+The Rabbit specialist is the application's management assistant: **one continuous application conversation, with Codex or DSH as its execution core**. Each core retains its own native session, role, and received-text position. Its job is to understand an instruction, inspect the relevant state, and use the owning module's supported interfaces.
+
+This describes the **0.2.0-alpha.1 early source snapshot**. Configure the management prerequisites and the selected native connection, preserving its original account, provider, tools, and approvals.
 
 It is responsibility 7, reusing the runtime foundation from responsibility 3 and the UI from responsibility 5. Data, settings, and validation remain in their modules. There is no second settings database or unrestricted management bypass.
 
@@ -12,9 +14,23 @@ Type an instruction in the upper-left specialist input without leaving the page 
 
 When a supported conversation is open, the application can attach that target's type, workspace, and exact ID to the management instruction, without attaching the chat body. If the target changes while preparing the request, the instruction is retained rather than silently applied to a different chat.
 
-The specialist keeps one native thread across refreshes/reconnection. Its current connection uses a fixed model/reasoning request policy, separate from ordinary AI profiles. Automatic model switching and a fleet of management agents are not implemented.
+The application retains the same management history across refreshes. Codex and DSH keep separate native identities and model/provider settings, rather than taking ordinary AI-profile selection as a request to replace the specialist. Native login, tools, and approval rules remain with the selected core.
+
+## Switch the specialist core
+
+Use **Settings → Rabbit specialist → Specialist core** to choose an available Codex or DSH connection. Switching does not create another visible management chat. Existing Codex binding, history, role documents, and user edits are retained.
+
+The next turn supplies the chosen core with current target metadata and conversation prose it has not received. Native tools, approvals, and execution receipts stay with their original holder; old tool calls are records, not commands to replay. Incomplete/nontext carryover or text beyond the supported capacity blocks the operation instead of silently dropping context.
+
+A successful switch writes exactly one boundary in the application history. Running, pending-approval, or unknown requests block switching; failure to prepare the new connection retains the previous core, history, and draft. Uncertain persistence keeps the original operation ID for checking. Native approval and failure behavior still depend on the selected agent; a shared coordinator does not make every tool or recovery path interchangeable.
+
+A supported management pattern is: list profiles, identify the exact target, rename it using its ID and current version, then reread the saved result. Both cores use the same bounded management MCP; this does not imply unrestricted configuration access.
+
+**DSH specialist shared-memory selection is not connected**; ordinary DSH next-turn read-only memory is a separate supported route. Hermes is a future specialist option, not a third available core. Core switching retains application prose and native identities, rather than promising full model/tool equivalence or restart recovery.
 
 ## What you can ask
+
+The application-interface catalog describes supported operations. The selected core, tool connection, exact target, and native permissions determine what can run.
 
 | Example | Supported scope |
 | --- | --- |
@@ -40,7 +56,7 @@ Use **Check and update** beside the specialist guide when you want a new report.
 | AI analysis | Send those four frozen facts to one available tool-free text route for structured judgments and short explanations | Each item must refer to the original evidence ID and digest. An unknown fact cannot be upgraded to verified; a disabled feature is not automatically a fault. |
 | Saved report | Validate the response, make one bounded second metadata observation, and save facts, judgments, explanation, and analysis source locally | Changed evidence is marked inapplicable; unverified or changed evidence yields a partial report, while failed analysis remains incomplete. The report does not change configurations, create a target chat, execute tools, recall private memory, or send test tasks. |
 
-The management specialist remains the **fixed native Codex conversation**. Status analysis currently uses the application's **existing Claude-configured text adapter**, not a second tool-enabled management specialist. That disposable text route has tools and native conversation persistence disabled, and receives only the supplied metadata facts. It can use the provider/model already configured for that route; it is not proof of an Anthropic backend or a particular underlying model. The report distinguishes a requested model label from a connection-reported label. If the route is unavailable or analysis fails, the collected program facts remain available and the explanation is marked incomplete; there is no automatic fallback or retry. Analysis may use the online service configured for that connection. Report labels and generated notes currently remain mainly Chinese.
+The selected **Codex/DSH management core** is separate from status analysis, which currently uses the application's **existing Claude-configured text adapter**. The current tool-connection fact still observes the Codex-side specialist holder; it is not a complete DSH tool-health check. The disposable analysis route has tools and native conversation persistence disabled, and receives only the supplied metadata facts. It can use the provider/model already configured for that route; it is not proof of an Anthropic backend or a particular underlying model. The report distinguishes a requested model label from a connection-reported label. If the route is unavailable or analysis fails, the collected program facts remain available and the explanation is marked incomplete; there is no automatic fallback or retry. Analysis may use the online service configured for that connection. Report labels and generated notes currently remain mainly Chinese.
 
 Refreshing or reopening the panel reads the saved report under its original check ID. Lightweight identity/version comparisons can mark an earlier judgment as no longer applicable; ordinary reads do not repeat the tool/memory RPC checks or call the model again. Browser recovery preserves a pending check instead of silently creating a second one. A service generation change leaves an unfinished check unconfirmed rather than resubmitting it. The report is an observation with sources and times, not continuous proof that an account, model, tool, or service is currently usable.
 
@@ -57,9 +73,9 @@ The profile UI says **Start a new profile from this profile**, rather than imply
 
 ## Codex draft and conversation settings
 
-Codex supports a local model/reasoning adjustment for **one existing conversation** or the **unsent home draft**. Human controls and specialist management use the same save rules. Repeated edits update one internal setting; they do not create more named profiles or alter the global default. Selecting a named profile exits the local adjustment. Other agents retain saved-profile selection; their local fine-tuning is not connected in this release.
+Codex supports a local model/reasoning adjustment for **one existing conversation** or the **unsent new-conversation draft**. Human controls and specialist management use the same save rules. Repeated edits update one internal setting; they do not create more named profiles or alter the global default. Selecting a named profile exits the local adjustment. Other agents retain saved-profile selection; their local fine-tuning is not connected in this release.
 
-For a home draft, the specialist receives its ID and configuration metadata, not the unsent message or files. Its suggestion remains pending until the **originating browser page** saves against the expected version and returns an application receipt. Submission alone is not completion. Existing text, files, and memory choice remain; first Send creates the conversation and binds the setting to it. A changed configuration or a send already in progress prevents an older suggestion from overwriting the new choice.
+For an unsent draft, the specialist receives its ID and configuration metadata, not the unsent message or files. Its suggestion remains pending until the **originating browser page** saves against the expected version and returns an application receipt. Submission alone is not completion. Existing text, files, and memory choice remain; first Send creates the conversation and binds the setting to it. A changed configuration or a send already in progress prevents an older suggestion from overwriting the new choice.
 
 Navigation or refresh retains the original target. A new tab does not silently take over a pending suggestion; use the explicit review/apply action when needed. An unknown save/application result is checked under the original ID, not proposed or applied again. Model-catalog evidence must be available for supported fine-tuning; refreshing the UI does not secretly start an agent to fill a missing catalog.
 
@@ -67,7 +83,7 @@ Some infrequent settings have no individual graphical switch. Their readable cat
 
 ## Delegation and its current limits
 
-Native target input/result routes exist for all five agents. End-to-end specialist delegation has narrower evidence: Codex and a Pi material handoff have complete verified routes; a Claude material handoff has corroborated input and exact result retrieval. Hermes's full specialist chain still needs validation. This does not establish every target, tool, or interruption case.
+Native target input/result routes exist for all five agents. A complete delegation also needs compatible material, an exact target/request identity, and an available result path; an input interface alone is not a promise that every core/tool combination can complete it.
 
 Pi/Hermes save eligible complete results after the first exact successful retrieval, allowing later reads by the original task ID after service reconstruction. Before that first read, a broken connection may leave the answer unavailable. A saved result is explicitly previous evidence, not a current-owner observation.
 

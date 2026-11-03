@@ -3,8 +3,8 @@
 
   const agents = window.RabbitAgents;
   const defaults = Object.freeze({ theme: "system", density: "comfortable", send_shortcut: "enter", default_backend: "codex", default_models: agents.emptyModels(), show_internal: false, markdown: true, favorites: [] });
-  const managementTabs = [["devices", "设备"], ["agents", "Agent"], ["models", "大模型"]];
-  const settingsTabs = [["general", "通用设置"], ["native-chats", "Agent 会话"], ["specialist", "小白兔专员"], ["ai-settings", "交给 AI 的设置"]];
+  const managementTabs = [["agents", "Agent"], ["models", "大模型"]];
+  const settingsTabs = [["general", "通用设置"], ["native-chats", "连接与恢复"], ["specialist", "小白兔专员"], ["ai-settings", "交给 AI 的设置"], ["about", "关于"]];
   const enums = { theme: ["system", "light", "dark"], density: ["comfortable", "compact"], send_shortcut: ["enter", "ctrl-enter"], default_backend: agents.ids };
   const settingValues = Object.freeze({ theme: enums.theme, density: enums.density, send_shortcut: enums.send_shortcut, markdown: [true, false], show_internal: [true, false] });
   const sharedSettings = new Set(["theme", "density", "send_shortcut"]);
@@ -12,11 +12,12 @@
   // never pass through this table; untranslated modules keep their own text.
   const languageKey = "rabbit.ui.language.v1";
   const english = Object.freeze({
-    "对话": "Chats", "新对话": "New chat", "小白兔专员": "Rabbit specialist", "管理": "Manage", "设置": "Settings", "通用设置": "General", "Agent 会话": "Agent session", "先从对话列表选择一段 Agent 对话": "Select an Agent chat from the chat list first", "专员设置尚未接入。": "Specialist settings are not connected yet.", "聊天": "Chat", "外观": "Appearance", "数据": "Data", "设备": "Devices", "大模型": "Models", "AI 配置": "AI profiles", "记忆配置": "Memory profiles", "管理分类": "Management tabs", "设置分类": "Settings tabs", "管理和设置": "Management and settings", "AI 配置 · 记忆配置 · 接入连接": "AI profiles · Memory profiles · Connections", "让小白兔更适合你": "Make Rabbit work for you",
-    "更多": "More", "本机 Agent": "Local Agent", "检测说明": "Status notes", "连接与手机入口": "Connection and phone access", "刷新检测": "Refresh status", "正在检测…": "Checking…", "关闭详情": "Close details", "查看设备详情": "Device details", "查看接入详情": "Connection details", "重试读取设置": "Retry settings",
+    "关于": "About", "一封旧信": "An old letter",
+    "对话": "Chats", "新对话": "New chat", "小白兔专员": "Rabbit specialist", "管理": "Manage", "设置": "Settings", "通用设置": "General", "Agent 会话": "Agent session", "先从对话列表选择一段 Agent 对话": "Select an Agent chat from the chat list first", "专员设置尚未接入。": "Specialist settings are not connected yet.", "聊天": "Chat", "外观": "Appearance", "数据": "Data", "大模型": "Models", "AI 配置": "AI profiles", "记忆配置": "Memory profiles", "管理分类": "Management tabs", "设置分类": "Settings tabs", "管理和设置": "Management and settings", "AI 配置 · 记忆配置 · 接入连接": "AI profiles · Memory profiles · Connections", "让小白兔更适合你": "Make Rabbit work for you",
+    "更多": "More", "本机 Agent": "Local Agent", "检测说明": "Status notes", "连接与恢复": "Connection and recovery", "刷新检测": "Refresh status", "正在检测…": "Checking…", "关闭详情": "Close details", "查看接入详情": "Connection details", "重试读取设置": "Retry settings",
     "接入检查通过": "Setup check passed", "接入待核对": "Setup unverified", "有通过的通路": "With a passed route", "当前可用": "Available", "当前不可用": "Unavailable", "可用": "Available", "不可用": "Unavailable", "备注": "Notes", "使用手册": "Manual", "请求验证通过": "Request verified", "可选择 · 发送时验证": "Selectable · checked on send", "本机服务可达": "Local service reachable", "状态未知": "Status unknown",
     "固定使用此模型": "Use this model", "跟随当前 Agent 默认模型": "Follow Agent default", "已跟随当前 Agent 默认模型": "Following Agent default", "新建跟随默认的配置": "Create default-follow profile", "☆ 收藏": "☆ Favorite", "★ 已收藏": "★ Favorited", "全部": "All", "收藏": "Favorites",
-    "搜索模型、连接或 Agent": "Search models, connections or Agents", "搜索大模型": "Search models", "跟随 Agent": "Follow Agent", "手机入口": "Phone access", "打开 IM.codes": "Open IM.codes", "如何打开正式聊天": "How to open your chats",
+    "搜索模型、连接或 Agent": "Search models, connections or Agents", "搜索大模型": "Search models", "跟随 Agent": "Follow Agent",
     "新对话默认 AI 配置": "Default AI profile", "新对话默认 Agent": "Default Agent", "管理 AI 配置": "Manage AI profiles", "发送快捷键": "Send shortcut", "Enter 发送": "Enter to send", "Ctrl / ⌘ + Enter 发送": "Ctrl / ⌘ + Enter to send",
     "主题": "Theme", "跟随系统": "System", "浅色": "Light", "深色": "Dark", "布局密度": "Layout density", "舒适": "Comfortable", "紧凑": "Compact", "统一 Markdown 排版": "Render Markdown", "显示内部记录": "Show internal records", "导出当前对话": "Export current chat", "保存位置": "Storage location",
     "界面语言": "Interface language", "仅基础导航、管理和设置标签；其他界面、原文和配置名保持原样。语言只保存在当前浏览器。": "Basic navigation, management and settings labels only. Other views, original text and profile names stay unchanged. Saved in this browser only.", "当前页面已切换；浏览器未能保存，刷新后可能恢复中文。": "Changed for this page. Browser storage is unavailable; refreshing may restore Chinese.",
@@ -28,7 +29,7 @@
     "小白兔已连接的工作": "Rabbit-connected work", "仅观察小白兔已连接的工作；不包括原应用中的其他工作。": "Rabbit-owned connections only; other work in the original apps is not observed.",
     "处理中": "Working", "等待确认": "Needs attention", "本连接空闲": "Connection idle", "状态待核对": "Status unknown", "尚未连接": "Not connected", "正在连接": "Connecting", "连接异常": "Connection error", "连接已关闭": "Connection closed", "连接中的对话": "Connected chat", "部分工作状态未知": "Some work states are unknown", "暂无已连接的工作": "No connected work",
     "HAPI报告的工作": "HAPI-reported work", "Hub 查询时间": "Hub query time", "非原生实时状态": "Not native real-time status", "Hub 活跃": "Hub active", "Hub 思考中": "Hub thinking", "Hub 等待确认": "Hub needs attention", "Hub 非活跃": "Hub inactive", "未命名工作": "Unnamed work", "Agent 未报告": "Agent unreported", "Hub 未列出工作": "No work reported by Hub", "HAPI状态待核对": "HAPI status unknown", "HAPI尚未核对，点“刷新检测”读取。": "HAPI is unverified. Use Refresh status to query it.", "只显示 Hub 报告；不证明原生执行者实时状态，也不能在此发送或审批。": "Hub reports only; native executor state is unverified. No sending or approval here.",
-    "＋ 添加 Agent": "＋ Add Agent", "＋ 添加模型": "＋ Add model", "尚未配置；请按手动指南完成原生安装与连接检测。": "Not configured. Follow the manual guide to install the native Agent and check its connection.", "打开手动接入指南；原生安装、凭据和检测完成后才可接入。": "Open the manual setup guide. Native installation, credentials and connection checks are required.", "配置指导暂时打不开；现有连接保持原样。": "Setup guidance could not be opened. Existing connections stay unchanged.", "目录名称匹配，不代表已验证实际模型相同；每条连接沿用各自的状态。": "Catalog names match; this does not verify that the actual models are identical. Each connection keeps its own status.", "本机发现的模型。展开只查看，能否使用在发送时确认。": "Models found on this computer. Expand to view; availability is checked when you send.", "目录暂未报告模型。": "No models reported by the catalog yet."
+    "接入说明": "Connection guide", "尚未配置；请按手动指南完成原生安装与连接检测。": "Not configured. Follow the manual guide to install the native Agent and check its connection.", "打开手动接入指南；原生安装、凭据和检测完成后才可接入。": "Open the manual setup guide. Native installation, credentials and connection checks are required.", "配置指导暂时打不开；现有连接保持原样。": "Setup guidance could not be opened. Existing connections stay unchanged.", "目录名称匹配，不代表已验证实际模型相同；每条连接沿用各自的状态。": "Catalog names match; this does not verify that the actual models are identical. Each connection keeps its own status.", "本机发现的模型。展开只查看，能否使用在发送时确认。": "Models found on this computer. Expand to view; availability is checked when you send.", "目录暂未报告模型。": "No models reported by the catalog yet."
   });
   let interfaceLanguage = "zh-CN";
   try { if (window.localStorage && window.localStorage.getItem(languageKey) === "en") interfaceLanguage = "en"; } catch (_) { /* Browser storage can be unavailable inside a preview. */ }
@@ -82,22 +83,22 @@
     return control;
   }
 
-  function create({ root, api, getWorkspace = () => "", getSelection, profiles = null, profilesEnabled = () => false, workStatus = null, onNavigate = null, onSectionChange = () => {}, renderSpecialistSettings = null, renderNativeSettings = null, onPreferences = () => {}, onManagement = () => {}, onLanguageChange = () => {}, onAddResource = null, onManual = null }) {
+  function create({ root, api, getWorkspace = () => "", getSelection, getOverview = () => null, onOpenWork = null, profiles = null, profilesEnabled = () => false, workStatus = null, onNavigate = null, onSectionChange = () => {}, renderSpecialistSettings = null, renderNativeSettings = null, onPreferences = () => {}, onManagement = () => {}, onLanguageChange = () => {}, onAddResource = null, onManual = null }) {
     if (!root || typeof api !== "function") throw new Error("小白兔管理界面缺少入口或接口。");
-    let page = "management", tab = "devices", visible = false;
+    let page = "management", tab = "agents", visible = false;
     let prefs = normalized({}), confirmed = normalized({}), prefsReady = false, prefsLoading = false, prefsLoadVersion = 0, mutationVersion = 0;
     let saving = false, saveError = "", preferenceMessage = "", pending = new Map(), keyVersions = new Map(), metadataVersion = 0;
-    let management = null, managementLoading = false, managementError = "", managementVersion = 0, managementPromise = null;
-    let modelFilter = "all", modelQuery = "", detail = null;
+    let management = null, managementLoading = false, managementError = "", managementVersion = 0, managementPromise = null, managementWorkspace = "", managementEvidence = null, managementOverview = null;
+    let modelFilter = "all", modelQuery = "", focusedObject = null;
     let statusNode = null, cardsNode = null;
     let languageSaved = true, resourceMessage = "", resourceBusy = false;
     let settings = null, settingsLoading = false, settingsError = "", settingsVersion = 0;
     const settingsFieldVersions = new Map();
-    const pageTabs = () => profilesEnabled() && profiles ? [["ai-profiles", "AI 配置"], ["memory-profiles", "记忆配置"], ["agents", "Agent"], ["models", "大模型"], ["devices", "设备"]] : managementTabs;
+    const pageTabs = () => profilesEnabled() && profiles ? [["ai-profiles", "AI 配置"], ["memory-profiles", "记忆配置"], ["agents", "Agent"], ["models", "大模型"]] : managementTabs;
     function getNavigation(nextPage = page) { return (nextPage === "settings" ? settingsTabs : pageTabs()).map(([id, label]) => ({ id, label: translate(label) })); }
     function getSection() { return { page, tab }; }
     // Manual navigation uses a stable topic, never a project-document path.
-    function manualTopic() { return page === "settings" ? tab === "native-chats" ? "native" : tab === "specialist" ? "specialist" : "settings" : tab === "devices" ? "devices" : "ai"; }
+    function manualTopic() { return page === "settings" ? tab === "native-chats" ? "native" : tab === "specialist" ? "specialist" : "settings" : "ai"; }
     const media = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
 
     function applyAppearance() {
@@ -258,16 +259,31 @@
       statusNode.hidden = !messages.length;
       statusNode.classList.toggle("rbw-error", Boolean(saveError || managementError || page === "management" && resourceMessage));
     }
-    async function loadManagement() {
+    function syncManagementWorkspace() {
+      const scope = String(getWorkspace() || "");
+      if (managementWorkspace !== scope) {
+        managementWorkspace = scope; managementVersion++; management = null; managementEvidence = null; managementOverview = null;
+        managementLoading = false; managementPromise = null; managementError = ""; resourceMessage = ""; focusedObject = null;
+        workStatus?.setAgentFilter?.(null);
+      }
+      return scope;
+    }
+    async function loadManagement({ refresh = false } = {}) {
+      const scope = syncManagementWorkspace();
       const version = ++managementVersion;
       managementLoading = true;
       managementError = "";
       if (visible) render();
       const operation = (async () => {
         try {
-          const response = await api("/api/management?refresh=1");
-          if (version !== managementVersion) return;
+          const value = await api(refresh ? "/api/management?refresh=1" : "/api/management/my-ai");
+          if (version !== managementVersion || scope !== String(getWorkspace() || "")) return;
+          if (!refresh && (!value || value.workspace_id !== scope || value.scope !== "saved_and_cached_overview" || value.connection_checked !== false || value.memory_read !== false || value.inference_performed !== false)) throw Error("已有目录不属于当前工作区，请重新读取。");
+          const response = refresh ? value : value.management;
+          if (!refresh) managementOverview = window.RabbitMyAI?.project(value, scope) || null;
+          if (!response || !Array.isArray(response.agents) || !Array.isArray(response.models) || response.workspace_id && response.workspace_id !== scope) throw Error("已有目录没有读完整。");
           management = { ...response, agents: Array.isArray(response.agents) ? response.agents : [], models: Array.isArray(response.models) ? response.models : [] };
+          managementEvidence = refresh ? { source: "本次主动检测", completed_at: new Date().toISOString() } : { source: "已有目录缓存", age: value.cache?.agent_checked_age_seconds };
           onManagement(management);
         } catch (error) {
           if (version === managementVersion) managementError = readableError(error, "连接状态暂时读不到，请重新检测。已有聊天和草稿仍保留。");
@@ -280,7 +296,7 @@
     }
     function refreshDetection() {
       const external = visible && page === "management" && tab === "agents" ? workStatus?.refreshExternal?.() : null;
-      return Promise.allSettled([loadManagement(), external]);
+      return Promise.allSettled([loadManagement({ refresh: true }), external]);
     }
     function status(label, available) {
       const item = node("span", available === true ? "rbw-state rbw-online" : "rbw-state");
@@ -309,24 +325,13 @@
       const agent = management && management.agents.find((value) => value.id === current.backend);
       return { ...current, agent };
     }
-    function detailPanel(heading, entries) {
-      const panel = node("section", "rbw-detail");
-      panel.dataset.controlInterface = "ai";
-      const head = node("div", "rbw-title-row");
-      head.append(node("h3", "", heading), action("关闭详情", () => { detail = null; render(); }, "rbw-button rbw-subtle"));
-      panel.append(head);
-      const list = node("dl", "rbw-facts");
-      for (const [label, value] of entries) list.append(node("dt", "", translate(label)), node("dd", "", value || "未报告"));
-      panel.append(list);
-      return panel;
-    }
     function catalogModels() {
-      return [...new Map((management && management.models || []).filter(model => model && typeof model.id === "string").map(model => [model.id, model])).values()];
+      const native = Object.values(management?.native_profile_capabilities || {}).flatMap(row => row?.catalogue_available === true && Array.isArray(row.models) ? row.models : []);
+      return [...new Map([...native, ...(management?.models || [])].filter(model => model && typeof model.id === "string").map(model => [model.id, model])).values()];
     }
     function modelConnections(model) {
-      const directory = catalogModels();
-      if (typeof model.provider !== "string" || !model.provider || typeof model.model !== "string" || !model.model) return directory.filter(candidate => candidate.id === model.id);
-      return directory.filter(candidate => candidate.id === model.id || candidate.provider === model.provider && candidate.model === model.model);
+      // A shared display name/provider is not a verified common model identity.
+      return catalogModels().filter(candidate => candidate.id === model.id);
     }
     function catalogDetails(rows, { collapsed = true } = {}) {
       const box = node(collapsed ? "details" : "section", "rbw-catalog");
@@ -345,34 +350,28 @@
       else box.append(node("p", "rbw-muted rbw-small", translate("目录暂未报告模型。")));
       return box;
     }
-    async function addResource(kind) {
+    async function addResource(kind, target = null) {
       if (resourceBusy) return;
       if (typeof onAddResource !== "function") { resourceMessage = "尚未配置；请按手动指南完成原生安装与连接检测。"; updateStatus(); return; }
       resourceBusy = true; resourceMessage = ""; render();
-      try { if (await onAddResource(kind) === false) resourceMessage = "配置指导暂时打不开；现有连接保持原样。"; }
+      try { if (await onAddResource(kind, target) === false) resourceMessage = "配置指导暂时打不开；现有连接保持原样。"; }
       catch (_) { resourceMessage = "配置指导暂时打不开；现有连接保持原样。"; }
       finally { resourceBusy = false; if (visible) render(); }
     }
     function addResourceButton(kind) {
-      const button = action(kind === "agent" ? "＋ 添加 Agent" : "＋ 添加模型", () => addResource(kind), "rbw-button rbw-subtle");
+      const captured = focusedObject && { ...focusedObject }, scope = String(getWorkspace() || "");
+      const button = action("接入说明", () => { if (scope === String(getWorkspace() || "") && (!captured || focusedObject?.kind === captured.kind && focusedObject.id === captured.id)) return addResource(kind, captured); }, "rbw-button rbw-subtle");
       button.setAttribute("title", translate("打开手动接入指南；原生安装、凭据和检测完成后才可接入。"));
       button.disabled = resourceBusy;
       return button;
     }
-    function devicesPage(container) {
-      const device = management && management.device;
-      if (!device) return;
-      const grid = node("div", "rbw-grid");
-      const configured = management.agents.filter((agent) => agent.available).map((agent) => agent.name).join("、");
-      const item = card(device.name || "这台电脑", `${device.platform === "Darwin" ? "macOS" : device.platform || "系统未报告"} · 执行设备`, device.online === true, device.online === true ? "本机服务可达" : "状态未知", [configured ? `当前接入：${configured}` : "当前没有报告已通过接入检查的 Agent"]);
-      item.append(foldedDetails("连接与手机入口", [action("查看设备详情", () => { detail = detail === "device" ? null : "device"; render(); }, "rbw-button rbw-subtle"), phoneEntry()]));
-      grid.append(item); container.append(grid);
-      if (detail === "device") container.append(detailPanel("本机设备详情", [["设备", device.name], ["系统", device.platform === "Darwin" ? "macOS" : device.platform], ["用途", "执行设备"], ["连接", device.online === true ? "当前请求已到达本机服务" : "未确认"], ["Agent", configured || "没有报告已通过接入检查的 Agent"], ["远程切换与唤醒", "后续接入；当前没有验证其他电脑的连接"]]));
-    }
     function agentsPage(container) {
+      if (focusedObject?.kind === "agent") { agentDetail(container); return; }
       const grid = node("div", "rbw-grid"), current = selection();
       for (const agent of management.agents) {
+        if (focusedObject?.kind === "agent" && focusedObject.id !== agent.id) continue;
         const item = card(agent.name || agent.id, translate("本机 Agent"), agent.available === true, agent.available === true ? "接入检查通过" : "接入待核对", [`默认模型：${agent.model || "未报告"}`, agent.available !== true ? agent.reason || "接入条件尚未满足" : ""]);
+        item.dataset.agentId = agent.id;
         item.dataset.selected = String(current.backend === agent.id);
         item.append(foldedDetails("备注", [
           ...(agent.provider ? [node("p", "rbw-card-meta", `连接：${agent.provider}`)] : []),
@@ -380,6 +379,78 @@
         ])); grid.append(item);
       }
       container.append(grid);
+    }
+    function overview() {
+      try { const value = getOverview() || managementOverview; return value?.workspace_id === String(getWorkspace() || "") ? value : null; }
+      catch (_) { return null; }
+    }
+    function getObjectTitle() {
+      if (managementWorkspace !== String(getWorkspace() || "") || !focusedObject) return "";
+      const row = focusedObject.kind === "agent" ? management?.agents.find(row => row.id === focusedObject.id)
+        : focusedObject.kind === "model" ? catalogModels().find(row => row.id === focusedObject.id) : profiles?.getMemory?.(focusedObject.id);
+      return row?.name || row?.model || "";
+    }
+    function agentDetail(container) {
+      const identity = focusedObject.id, scope = managementWorkspace;
+      const source = management.agents.find(row => row.id === identity);
+      if (!source) { container.append(node("p", "rbw-empty", "这项 Agent 已不在当前目录，请返回所有 Agent。")); return; }
+      const cached = overview(), summary = cached?.agents.find(row => row.id === identity);
+      const isCurrent = () => visible && page === "management" && tab === "agents" && scope === String(getWorkspace() || "") && focusedObject?.kind === "agent" && focusedObject.id === identity;
+      const detail = node("section", "rbw-agent-detail"), hero = node("div", "rbw-agent-hero"), copy = node("div", "rbw-agent-copy");
+      detail.dataset.agentId = identity;
+      hero.append(node("span", "rbw-agent-initial", agents.initials[identity] || source.name?.slice(0, 1) || "AI"));
+      copy.append(node("h3", "", source.name || identity));
+      const label = summary?.status_label || ((source.checked === true || managementEvidence?.completed_at) && !source.available ? "连接待处理"
+        : source.available === true && (source.checked === true || managementEvidence?.completed_at) ? "接入检查通过"
+        : source.native_enabled === true || source.has_saved_configuration === true ? "有连接设置 · 待核对" : "待核对");
+      const badge = status(label, summary?.status === "running"); badge.dataset.state = summary?.status || "unverified"; copy.append(badge);
+      copy.append(node("p", "rbw-card-meta", "查看已发现的模型、准确关联的工作和接入说明。")); hero.append(copy); detail.append(hero);
+      const models = node("section", "rbw-agent-section"), modelHeading = node("div", "rbw-agent-section-heading"); modelHeading.append(node("h3", "", "模型")); models.append(modelHeading);
+      const modelList = node("div", "rbw-agent-models");
+      for (const model of catalogModels().filter(row => row.agent_id === identity)) {
+        const id = model.id, control = action(model.name || model.model || "模型", async () => {
+          if (!isCurrent()) return;
+          try { await openObject({ kind: "model", id }); }
+          catch (error) { if (scope === String(getWorkspace() || "")) { resourceMessage = readableError(error, "模型详情暂未打开，原工作保留。"); render(); } }
+        }, "rbw-button rbw-agent-model");
+        control.dataset.modelId = id; control.dataset.controlInterface = "ai";
+        control.append(node("span", "rbw-card-meta", "已发现 · 通过 " + (source.name || identity))); modelList.append(control);
+      }
+      if (!modelList.children.length) modelList.append(node("p", "rbw-muted rbw-small", "目录尚未报告模型。请明确刷新检测后再核对。"));
+      models.append(modelList); detail.append(models);
+      const work = node("section", "rbw-agent-section"), workHeading = node("div", "rbw-agent-section-heading");
+      workHeading.append(node("h3", "", "工作"), node("p", "rbw-muted rbw-small", "只列能准确对应的记录")); work.append(workHeading);
+      if (workStatus) work.append(workStatus.root);
+      const rows = node("ul", "rbw-agent-work-list");
+      for (const item of cached?.works || []) {
+        if (item.agent !== identity) continue;
+        const row = node("li", "rbw-agent-work"), description = node("div", "rbw-agent-work-copy"); row.dataset.workKey = item.key;
+        description.append(node("strong", "", item.name), node("p", "rbw-card-meta", [item.status_label, item.detail].filter(Boolean).join(" · ")));
+        const controls = node("div", "rbw-agent-work-actions");
+        for (const value of item.actions || []) {
+          const captured = JSON.parse(JSON.stringify(value));
+          if (captured.kind === "original" && /^codex:\/\/threads\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(captured.url || "")) {
+            const link = node("a", "rbw-agent-work-link", captured.label); link.href = captured.url; link.dataset.controlInterface = "human";
+            link.addEventListener("click", event => { if (!isCurrent()) event.preventDefault(); }); controls.append(link);
+          } else if (["read", "continue"].includes(captured.kind) && typeof onOpenWork === "function") {
+            const control = action(captured.label, async () => {
+              if (!isCurrent()) return;
+              try { await onOpenWork(captured, isCurrent); }
+              catch (error) { if (isCurrent()) { resourceMessage = readableError(error, "原工作暂未打开，原稿保留。"); render(); } }
+            }, "rbw-button rbw-subtle"); controls.append(control);
+          }
+        }
+        row.append(description, controls); rows.append(row);
+      }
+      if (!rows.children.length) rows.append(node("li", "rbw-muted rbw-small", "已有索引暂未列出这位 Agent 的工作；没有推断外部工作为空闲。"));
+      work.append(rows); detail.append(work);
+      const evidence = [node("p", "rbw-card-meta", "来源：本机已保存连接、已有模型目录与对话索引。"), node("p", "rbw-card-meta", source.check_scope || "目录名称和接入设置不证明模型调用成功。")];
+      if (managementEvidence?.completed_at) evidence.push(node("p", "rbw-card-meta", "本次主动检测读回：" + managementEvidence.completed_at));
+      else evidence.push(node("p", "rbw-card-meta", Number.isFinite(managementEvidence?.age) ? `最近连接检查：距缓存读取约 ${Math.floor(managementEvidence.age)} 秒。` : "最近连接核对时间：未记录；本次打开没有发起核对。"));
+      if (source.reason) evidence.push(node("p", "rbw-card-meta", source.reason));
+      const nativeCatalogue = management.native_profile_capabilities?.[identity];
+      if (nativeCatalogue?.observed_at) evidence.push(node("p", "rbw-card-meta", "原生模型目录核对：" + nativeCatalogue.observed_at));
+      detail.append(foldedDetails("来源与核对记录", evidence, "rbw-more rbw-agent-evidence")); container.append(detail);
     }
     function modelMatches(model) {
       const query = modelQuery.trim().toLocaleLowerCase();
@@ -391,6 +462,7 @@
       cardsNode.replaceChildren();
       const seen = new Set();
       for (const model of catalogModels()) {
+        if (focusedObject?.kind === "model" && focusedObject.id !== model.id) continue;
         if (seen.has(model.id)) continue;
         const connections = modelConnections(model);
         for (const connection of connections) seen.add(connection.id);
@@ -488,30 +560,35 @@
       const refresh = action(settingsLoading ? "正在读取 AI 设置目录…" : "读取最新设置目录", () => loadSettings({ apply: true }), "rbw-button rbw-subtle"); refresh.disabled = settingsLoading; refresh.dataset.controlInterface = "ai"; details.append(refresh);
       return details;
     }
-    function phoneEntry() {
-      const section = node("section", "rbw-phone-entry");
-      section.dataset.controlInterface = "human";
-      section.setAttribute("aria-label", translate("手机入口"));
-      section.append(node("h3", "", translate("手机入口")), node("p", "rbw-muted rbw-small", "沿用现有 IM.codes 账号和已绑定的在线 Mac。iPhone 正式文字聊天收发和刷新保留已验证。"));
-      const link = node("a", "rbw-button rbw-subtle rbw-phone-link", translate("打开 IM.codes"));
-      link.setAttribute("href", "https://app.im.codes/");
-      link.setAttribute("target", "_blank");
-      link.setAttribute("rel", "noopener noreferrer");
-      link.setAttribute("referrerpolicy", "no-referrer");
-      section.append(link);
-      const details = node("details", "rbw-phone-steps");
-      details.append(node("summary", "", translate("如何打开正式聊天")));
-      const steps = node("ol", "");
-      for (const instruction of [
-        "在 Mac 打开小白兔，保持电脑和本机服务在线。",
-        "在手机登录现有 IM.codes 账号，选择已绑定的在线 Mac → 本地网页预览，端口填 17860、路径填 /，打开。手机应用没有此入口时，可在 Safari 登录官方网页版查看。",
-        "可在这里继续正式文字聊天；收到回答后刷新，同一段聊天仍会保留。",
-      ]) steps.append(node("li", "", instruction));
-      details.append(steps, node("p", "rbw-muted rbw-small", "需要重开时，固定 IM.codes 的网页面板；不要把带临时凭证的预览地址当长期书签。"));
-      section.append(details, node("p", "rbw-muted rbw-small", "正式入口 17860 包含真实聊天，Mac 需保持在线。"));
-      return section;
+    let oldLetter;
+    function aboutPage(container) {
+      if (!oldLetter) {
+        oldLetter = node("details", "rbw-more rbw-letter");
+        const body = node("article", "rbw-letter-body");
+        oldLetter.append(node("summary", "", translate("一封旧信")), body);
+        let reading = false, loaded = false;
+        oldLetter.addEventListener("toggle", async () => {
+          if (!oldLetter.open || reading || loaded) return;
+          reading = true;
+          try {
+            const response = await fetch("/old-letter.md", { mode: "same-origin" });
+            if (!response.ok) throw Error();
+            const text = (await response.text()).replace(/^# 一封旧信\r?\n\s*/, "");
+            if (!text.trim()) throw Error();
+            body.replaceChildren();
+            if (window.OneAIRichText?.render) window.OneAIRichText.render(body, text);
+            else body.append(node("pre", "document-lines", text));
+            loaded = true;
+          } catch (_) {
+            body.textContent = "旧信暂时无法读取。收起后重新展开即可重试。";
+          } finally { reading = false; }
+        });
+      }
+      oldLetter.children[0].textContent = translate("一封旧信");
+      container.append(oldLetter);
     }
     function settingsPage(container) {
+      if (tab === "about") { aboutPage(container); return; }
       if (tab === "ai-settings") { container.append(aiSettingsDirectory()); return; }
       if (tab === "native-chats") {
         if (typeof renderNativeSettings === "function") renderNativeSettings(container);
@@ -533,10 +610,12 @@
     }
     function render() {
       if (!visible) return;
+      syncManagementWorkspace();
       cardsNode = null;
       root.setAttribute("lang", language());
       const wrapper = node("div", page === "settings" ? "rbw-page rbw-settings-page" : "rbw-page");
       const heading = node("div", "rbw-toolbar rbw-action-group");
+      if (page === "management" && focusedObject) heading.append(action(focusedObject.kind === "agent" ? "所有 Agent" : "查看完整目录", () => { focusedObject = null; workStatus?.setAgentFilter?.(null); onSectionChange(getSection()); render(); }, "rbw-button rbw-subtle"));
       const profilePage = page === "management" && profilesEnabled() && profiles && ["ai-profiles", "memory-profiles"].includes(tab);
       if (page === "management" && !profilePage) { const refresh = action(managementLoading ? "正在检测…" : "刷新检测", refreshDetection, "rbw-button rbw-subtle"); refresh.dataset.controlInterface = "ai"; refresh.disabled = managementLoading; heading.append(refresh); }
       if (!profilePage && typeof onManual === "function") heading.append(aiControl(action("使用手册", () => onManual(manualTopic()), "rbw-button rbw-subtle")));
@@ -545,15 +624,14 @@
       statusNode = node("p", "rbw-feedback"); if (page === "settings") statusNode.dataset.controlInterface = "ai"; statusNode.setAttribute("role", "status"); statusNode.setAttribute("aria-live", "polite"); wrapper.append(statusNode); updateStatus();
       if (!prefsReady && !prefsLoading && saveError) wrapper.append(action("重试读取设置", () => loadPreferences(), "rbw-button rbw-subtle"));
       const body = node("div", "rbw-body");
-      if (page === "management" && tab === "agents" && workStatus) {
+      if (page === "management" && tab === "agents" && focusedObject?.kind !== "agent" && workStatus) {
         body.append(workStatus.root);
-      } else workStatus?.hide();
+      } else if (!(page === "management" && tab === "agents")) workStatus?.hide();
       if (page === "management") {
         if (profilesEnabled() && profiles && ["ai-profiles", "memory-profiles"].includes(tab)) profiles.renderManagement(body, tab === "memory-profiles" ? "memory" : "ai");
         else if (!management) body.append(node("p", "rbw-empty", managementLoading ? "正在读取当前电脑的连接状态…" : "连接状态尚未读取。"));
         else {
-          if (tab === "devices") devicesPage(body);
-          else if (tab === "agents") agentsPage(body);
+          if (tab === "agents") agentsPage(body);
           else modelsPage(body);
         }
       } else settingsPage(body);
@@ -561,19 +639,43 @@
       if (page === "management" && tab === "agents") workStatus?.show();
     }
     function show(nextPage, nextTab) {
+      syncManagementWorkspace();
       page = nextPage === "settings" ? "settings" : "management";
       const navigation = getNavigation(page);
-      tab = navigation.some(({ id }) => id === nextTab) ? nextTab : navigation[0].id;
+      const section = navigation.some(({ id }) => id === nextTab) ? nextTab : navigation[0].id;
+      if (tab !== section) focusedObject = null;
+      tab = section;
+      workStatus?.setAgentFilter?.(focusedObject?.kind === "agent" ? focusedObject.id : null);
       if (settings && getWorkspace() && settings.workspace_id !== String(getWorkspace())) { settings = null; settingsLoading = false; settingsVersion++; }
-      visible = true; root.hidden = false; detail = null; render();
+      visible = true; root.hidden = false; render();
       onSectionChange(getSection());
       if (!prefsReady && !prefsLoading) loadPreferences();
       else if (page === "settings" && prefsReady && !settings && !settingsLoading) loadSettings();
-      if (!management && !managementLoading) loadManagement();
+      if (page === "management" && !["ai-profiles", "memory-profiles"].includes(tab) && !management && !managementLoading) loadManagement();
     }
     function hide() { visible = false; root.hidden = true; workStatus?.hide(); }
     function selectChanged() { if (visible) render(); }
-    return { show, hide, getNavigation, getSection, preferences, loadPreferences, applyPreferences, selectChanged };
+    async function openObject(target) {
+      if (!target || !["agent", "model", "memory"].includes(target.kind) || typeof target.id !== "string" || !target.id || target.id.length > 512) throw Error("管理对象编号无效。");
+      target = { kind: target.kind, id: target.id };
+      const scope = syncManagementWorkspace(), section = target.kind === "agent" ? "agents" : target.kind === "model" ? "models" : "memory-profiles";
+      show("management", section); focusedObject = { ...target }; workStatus?.setAgentFilter?.(target.kind === "agent" ? target.id : null); render();
+      if (target.kind === "memory") {
+        if (!profilesEnabled() || !profiles) throw Error("记忆配置管理暂不可用。");
+        await profiles.load();
+        if (!visible || page !== "management" || tab !== section || String(getWorkspace()) !== scope || focusedObject?.id !== target.id) return false;
+        const profile = profiles.getMemory(target.id); if (!profile || profile.id === "none") throw Error("这项记忆配置已变化，请重新读取目录。");
+        profiles.editNamed("memory", profile.id, profile.revision);
+      } else {
+        if (managementLoading) await managementPromise; else if (!management) await loadManagement();
+        if (!visible || page !== "management" || tab !== section || String(getWorkspace()) !== scope || focusedObject?.id !== target.id) return false;
+        const rows = target.kind === "agent" ? management?.agents : catalogModels();
+        if (!rows?.some(row => row.id === target.id)) throw Error("这项管理对象已不在当前目录；没有按名称猜选。");
+        workStatus?.setAgentFilter?.(target.kind === "agent" ? target.id : null); render();
+      }
+      onSectionChange(getSection()); return true;
+    }
+    return { show, hide, getNavigation, getSection, getObject: () => managementWorkspace === String(getWorkspace() || "") && focusedObject ? { ...focusedObject } : null, getObjectTitle, openObject, preferences, loadPreferences, applyPreferences, selectChanged };
   }
   window.RabbitWorkspace = { create, translate, language, settingsCatalogue };
 })();

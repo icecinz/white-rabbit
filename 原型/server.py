@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from chat_store import (ChatStore, BusyError, ContextSelectionConflict, SourceUpdateConflict,
                         ProfileSelectionConflict, imported_message, source_update_comparison, source_image_backfill_plan)
 from rabbit_preparation import build_context, ContextCapacityError, prepare_text_file_messages
-from library import LibraryView, conversation_query, conversation_directory
+from library import LibraryView, NativeTextError, conversation_query, conversation_directory
 from preferences import Preferences, management, validate_model_id
 import app_settings
 import app_management
@@ -374,6 +374,7 @@ class Service:
         self.specialist = None
         self._specialist_store = None
         self._specialist_http = None
+        self._specialist_conversation = None
         self._specialist_work_document = None
         self._specialist_lock = threading.RLock()
         self.interface_tasks = None
@@ -388,6 +389,12 @@ class Service:
         self.hermes_native_chats = None
         self.claude_native_chats = None
         self.dsh_native_chats = None
+        # Imported text adapters do not imply an explicitly configured native
+        # entry. Only a brand-new library may choose an initial native default.
+        self._prefer_initial_native_default = adapters is None or any(connection is not None for connection in
+            (native_chat_connection, pi_native_connection, hermes_native_connection,
+             claude_native_connection, dsh_native_connection))
+        self._pending_initial_native_default = False
         self._memory_thread = None
         self._source_repair_thread = None
         self._memory_stop = threading.Event()
@@ -457,6 +464,12 @@ class Service:
                 # factory; it cannot open native RPC before HTTP is listening.
                 def specialist_factory(store, *, cwd):
                     return specialist_connection.create(store, cwd=cwd, workspace_id=self.workspace_id)
+                # A DSH-only installation must not reserve an imaginary Codex
+                # native session merely because the management Python exists.
+                if dsh_native_connection is not None and getattr(specialist_connection, 'codex_command', None) == 'codex':
+                    import shutil
+                    if shutil.which('codex') is None:
+                        specialist_factory = None
             if specialist_factory is not None:
                 self._initialize_specialist(specialist_factory, work_document=specialist_work_document)
             # The flag permits creation only. A former ledger remains visible
@@ -564,6 +577,29 @@ class Service:
                         excluded_sources=self.native_chat_sources, reader=reader)
                     self.dsh_history = NativeHistoryService(self, manager, adoption)
                     manager.adopted_open_checker = self.dsh_history.verify_open
+            if specialist_connection is not None and dsh_native_connection is not None:
+                from rabbit_runtime.dsh.connection import DshNativeConnection
+                if isinstance(dsh_native_connection, DshNativeConnection):
+                    from rabbit_specialist.core_conversation import SpecialistConversation, dsh_factory
+                    cwd = self.specialist.cwd if self.specialist is not None else self.data_dir / 'specialist-workspace'
+                    if self.specialist is None:
+                        cwd = Path(cwd)
+                        if cwd.is_symlink():
+                            raise ValueError('专员工作目录不可用。')
+                        cwd.mkdir(mode=0o700, exist_ok=True)
+                        if specialist_work_document:
+                            from rabbit_specialist.specialist_workspace import prepare_workspace
+                            self._specialist_work_document = prepare_workspace(cwd,
+                                self._read_specialist_work_document,
+                                bound_thread_id='existing-specialist' if (self.data_dir / 'specialist-conversation.json').exists() else None)
+                    self._specialist_conversation = SpecialistConversation(self._specialist_http,
+                        self.data_dir / 'specialist-conversation.json', workspace_id=self.workspace_id,
+                        dsh_factory=dsh_factory(dsh_native_connection, data_dir=self.data_dir,
+                            cwd=cwd, workspace_id=self.workspace_id,
+                            mcp_python=specialist_connection.mcp_python, tool_script=specialist_connection.tool_script,
+                            port=specialist_connection.port))
+                    self._specialist_http = self._specialist_conversation
+            self._choose_initial_native_default()
             self._status_checks = status_check_service.StatusChecks(self)
             # All local initialization and recovery checks finish before any
             # background work begins. Memory starts last, with no later setup.
@@ -650,12 +686,16 @@ class Service:
         from rabbit_runtime.claude.session_store import ClaudeNativeStore
         from rabbit_runtime.dsh.session_store import DSHNativeStore
         result = []
+        from types import SimpleNamespace
+        specialist_dsh = getattr(getattr(self, '_specialist_conversation', None), '_dsh_store', None)
         for name, store_type, manager in (
                 ('native-chats.sqlite', NativeSessionStore, self.native_chats),
                 ('pi-native.sqlite', PiNativeStore, self.pi_native_chats),
                 ('hermes-native.sqlite', HermesNativeStore, self.hermes_native_chats),
                 ('claude-native.sqlite', ClaudeNativeStore, self.claude_native_chats),
-                ('dsh-native.sqlite', DSHNativeStore, self.dsh_native_chats)):
+                ('dsh-native.sqlite', DSHNativeStore, self.dsh_native_chats),
+                ('specialist-dsh-native.sqlite', DSHNativeStore,
+                 SimpleNamespace(store=specialist_dsh) if specialist_dsh is not None else None)):
             path = self.data_dir / name
             if manager is None and not os.path.lexists(path):
                 continue
@@ -941,6 +981,12 @@ class Service:
 
     def _close_specialist(self):
         with self._specialist_lock:
+            if self._specialist_conversation is not None:
+                try:
+                    self._specialist_conversation.close()
+                except BaseException:
+                    raise BusyError('专员核心仍在收尾，记录库与服务独占锁暂时保留。') from None
+                self._specialist_conversation = None
             if self.specialist is not None:
                 try:
                     self.specialist.close()
@@ -1187,14 +1233,16 @@ class Service:
         return self.backend_cache
 
     @admitted_service
-    def status(self):
+    def status(self, *, cached_only=False):
+        if type(cached_only) is not bool:
+            raise ValueError('状态读取方式无效。')
         try:
             history = self.history.stats()
         except Exception:
             history = {'agents': {}, 'built_at': None,
                        'notice': self.history_notice or '历史索引未就绪，请点击更新历史。'}
         history.setdefault('notice', '已接入用户和助手文字及可读取的原生图片；图片缺失会单独说明，工具现场尚未接入。')
-        return {'history': history, 'backends': self.backends(), 'active_runs': self.store.active_count(),
+        return {'history': history, 'backends': list(self.backend_cache or []) if cached_only else self.backends(), 'active_runs': self.store.active_count(),
                 'native_chats': {'enabled': self.native_chats is not None, 'max_connections': 2},
                 'pi_native_chats': {'enabled': self.pi_native_chats is not None, 'max_connections': 1},
                 'hermes_native_chats': {'enabled': self.hermes_native_chats is not None, 'max_connections': 1},
@@ -1394,7 +1442,7 @@ class Service:
         action = fields['operation']
         # Snapshot the fixed holder before taking a chat DB write transaction.
         # Service admission keeps shutdown out; the holder guard verifies liveness.
-        holder = self.specialist
+        holder = self._specialist_conversation or self.specialist
         if 'parameters' in fields:
             try:
                 validate_model_id(fields['parameters']['model_id'], 'codex')
@@ -1448,7 +1496,9 @@ class Service:
             from rabbit_runtime.native_session_store import NativeSessionStoreError
             store = self._specialist_store
             try:
-                receipt = store.read_operation(client_id, session_key='specialist/codex') if store else None
+                receipt = (self._specialist_conversation.terminal_receipt(client_id)
+                    if self._specialist_conversation is not None else
+                    store.read_operation(client_id, session_key='specialist/codex') if store else None)
             except NativeSessionStoreError:
                 receipt = None
             if (type(receipt) is not dict or receipt.get('kind') != 'turn_start'
@@ -1709,6 +1759,7 @@ class Service:
         # Preserve parameter intent even if a formerly used connection is now
         # offline. Migration is startup work, never an inference or GET side
         # effect, and it never manufactures past request snapshots.
+        had_profiles = bool(self.profiles.list()['profiles'])
         for backend in AGENT_IDS:
             if backend not in self.adapters:
                 continue
@@ -1740,13 +1791,20 @@ class Service:
             if settings['default_models'].get(backend) == model_id:
                 self.default_profile_ids[backend] = migrated['id']
         try:
-            saved_default = self.profiles.get_default()
+            default_state = self.profiles.get_default_state()
+            saved_default = default_state['ai_profile_id']
         except (ValueError, KeyError):
             if not self.profile_migration_notice:
                 self.profile_migration_notice = '原默认 AI 配置暂不可读取，原选择保留；请从已有配置中选择。'
             return
         if saved_default is not None:
             return  # An offline saved default is still the user's intent.
+        if not had_preferences and self._prefer_initial_native_default:
+            # Keep legacy imports at their original point in startup. Native
+            # managers are lazy and not constructed yet, so defer only this
+            # fresh choice; existing profiles/default revisions remain intent.
+            self._pending_initial_native_default = not had_profiles and default_state['revision'] == 0
+            return
         default_id = self.default_profile_ids.get(settings['default_backend'])
         if default_id is None and not had_preferences:
             # A fresh isolated entry has no Codex preference to preserve. Use
@@ -1756,6 +1814,31 @@ class Service:
             self.profiles.set_default(default_id)
         elif had_preferences and not self.profile_migration_notice:
             self.profile_migration_notice = '原默认 Agent 当前未接入，原选择保留；请从已有 AI 配置中选择。'
+
+    def _choose_initial_native_default(self):
+        if not self._pending_initial_native_default:
+            return
+        self._pending_initial_native_default = False
+        state = self.profiles.get_default_state()
+        if self.preferences.path.exists() or state['ai_profile_id'] is not None or state['revision'] != 0:
+            return
+        enabled = self.enabled_native_agents()
+        # DSH has a bare native entry, not named per-chat model configuration.
+        candidates = []
+        for backend in ('codex', 'hermes', 'pi', 'claude'):
+            profile_id = self.default_profile_ids.get(backend)
+            if backend not in enabled or profile_id is None:
+                continue
+            try:
+                profile = self.profiles.get(profile_id)
+                self._resolve_native_profile_from_cache(profile)
+            except (NativeProfileUnavailable, ValueError, KeyError):
+                continue
+            candidates.append(profile_id)
+        # Only an unambiguous first entry can be selected for the user. With
+        # several native Agents, leave the existing picker to ask once.
+        if len(candidates) == 1:
+            self.profiles.set_default(candidates[0], expected_revision=state['revision'])
 
     def _default_ai_profile_id(self):
         try:
@@ -3099,6 +3182,20 @@ class Service:
         return result
 
     @admitted_service
+    def native_index_text(self, agent, chat_id, **options):
+        revision = options.get('revision')
+        if revision is not None:
+            if type(revision) is not str or not re.fullmatch(r'[0-9a-f]{16}:[0-9a-f]{24}', revision):
+                raise NativeTextError(400, 'native_text_invalid', '文字索引版本无效。')
+            instance, value = revision.split(':')
+            if instance != self.instance_id:
+                raise NativeTextError(409, 'native_text_changed', '本机入口已重启，请重新读取文字索引。')
+            options['revision'] = value
+        result = self.library.native_text(agent, chat_id, **options)
+        result.update(workspace_id=self.workspace_id, revision=self.instance_id + ':' + result['revision'])
+        return result
+
+    @admitted_service
     def receipt(self, kind, client_id, chat_id=None):
         if kind not in ('creation', 'message'):
             raise ValueError('请求回执类型无效。')
@@ -3905,7 +4002,7 @@ class Handler(BaseHTTPRequestHandler):
     def service(self):
         return self.server.service
 
-    def _allowed(self, mutate=False, nonce=None):
+    def _allowed(self, mutate=False):
         port = self.server.server_address[1]
         allowed = {'127.0.0.1:' + str(port), 'localhost:' + str(port)}
         if self.headers.get('Host', '').lower() not in allowed:
@@ -3915,9 +4012,9 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if self.headers.get('Sec-Fetch-Site') == 'cross-site':
             return False
-        # Keep our nonce separate from IM.codes' outer browser-session CSRF.
+        # Local mutations require our same-origin request header.
         if mutate:
-            candidate = self.headers.get('X-OneAI-CSRF') or nonce
+            candidate = self.headers.get('X-OneAI-CSRF')
             if not isinstance(candidate, str) or not secrets.compare_digest(candidate.encode(), self.service.csrf_token.encode()):
                 return False
         return True
@@ -3981,6 +4078,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = action()
             self._reply(status, result)
+        except NativeTextError as error:
+            self._reply(error.status, {'workspace_id': self.service.workspace_id,
+                'error': str(error), 'code': error.code})
         except native_origins.NativeOriginError as error:
             payload = {'workspace_id': self.service.workspace_id, 'error': str(error), 'code': error.code}
             if error.accepted is not None:
@@ -4155,7 +4255,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._require_bodyless_get('dsh_native_receipt_invalid', 'DSH')
                 return self.service.dsh_native_request('GET', path, query=route.query)
             if path == '/api/status':
-                return self.service.status()
+                self._require_bodyless_get('status_invalid', '状态')
+                if route.query not in ('', 'cached=1'):
+                    raise ValueError('状态只接受明确的缓存读取参数。')
+                return self.service.status(cached_only=route.query == 'cached=1')
             if path == '/api/history/source-changes':
                 self._require_bodyless_get('history_source_changes_invalid', '历史来源')
                 if route.query:
@@ -4204,6 +4307,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.service.list_library(query=arg('query'), agent=arg('agent', 'all'),
                     offset=number('offset', 0, 1000000), limit=number('limit', 50, 100),
                     include_internal=arg('include_internal') == '1', folder=folders[0] if folders is not None else None)
+            if path == '/api/library/native-text':
+                self._require_bodyless_get('native_text_invalid', '文字索引')
+                query = parse_qs(route.query, keep_blank_values=True)
+                fields = {'agent', 'chat_id', 'source_session_id', 'message_id', 'offset', 'limit', 'revision'}
+                if not {'agent', 'chat_id'} <= set(query) <= fields or any(len(value) != 1 for value in query.values()):
+                    raise NativeTextError(400, 'native_text_invalid', '请选择准确的原生对话和文字索引位置。')
+                options = {key: value[0] for key, value in query.items()}
+                for key in ('offset', 'limit'):
+                    if key in options:
+                        if not re.fullmatch(r'[0-9]{1,7}', options[key]):
+                            raise NativeTextError(400, 'native_text_invalid', '分页位置或页大小无效。')
+                        options[key] = int(options[key])
+                return self.service.native_index_text(**options)
             if path == '/api/markdown-chats':
                 self._require_bodyless_get('markdown_invalid', '对话文件夹')
                 if route.query:
@@ -4263,6 +4379,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.service.external_work_snapshot()
             if path == '/api/management':
                 return self.service.management_inventory(fresh=arg('refresh') == '1')
+            if path == '/api/management/my-ai':
+                self._require_bodyless_get('my_ai_invalid', '我的AI')
+                if route.query:
+                    raise ValueError('我的AI总览不接受探测参数。')
+                import my_ai_overview
+                return my_ai_overview.snapshot(self.service)
             if path == '/api/management/ai-profiles':
                 return self.service.saved_ai_profile_inventory()
             if path == '/api/management/conversations':
@@ -4459,6 +4581,9 @@ class Handler(BaseHTTPRequestHandler):
         def respond():
             route = urlsplit(self.path)
             path = route.path
+            if path == '/api/library/native-text':
+                self.close_connection = True
+                raise NativeTextError(405, 'native_text_invalid', '文字索引仅支持读取。')
             native_chat = path == '/api/native-chats' or path.startswith('/api/native-chats/')
             pi_chat = path == '/api/pi-chats' or path.startswith('/api/pi-chats/')
             hermes_chat = path == '/api/hermes-chats' or path.startswith('/api/hermes-chats/')
@@ -4502,7 +4627,7 @@ class Handler(BaseHTTPRequestHandler):
                                 decode_specialist_body(raw) if specialist or native_material or native_management or native_task else json.loads(raw))
                 if not isinstance(body, dict):
                     raise ValueError('请求格式无效。')
-                if not self._allowed(mutate=True, nonce=body.get('_one_ai_csrf')):
+                if not self._allowed(mutate=True):
                     raise RequestDenied('消息校验未通过。请重新打开聊天页面。')
             except SpecialistHTTPError as error:
                 error.accepted = False

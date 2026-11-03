@@ -37,7 +37,7 @@
     if (settingsRoot !== null && typeof settingsRoot.append !== "function") throw Error("原生对话设置入口无效。");
     const settingsPanel = settingsRoot ? node("section", "rbs-settings") : null;
     if (settingsPanel) { settingsPanel.setAttribute("data-control-interface", "ai"); settingsRoot.append(settingsPanel); }
-    let workspace = "", storageKey = "", draft = "", draftMaterials = [], pending = null, journal = Object.create(null), storageInvalid = false, materialsEnabled = materialInputs === true;
+    let workspace = "", storageKey = "", draft = "", draftMaterials = [], draftRevision = 0, pending = null, journal = Object.create(null), storageInvalid = false, materialsEnabled = materialInputs === true;
     let openingForSend = false, openSendUnconfirmed = false, composerVersion = 0;
     let visible = false, destroyed = false, enabled = true, language = "zh-CN", generation = 0, timer = null, reading = false, writing = false, posting = false, writeVersion = 0, readPending = false, snapshot = null, readable = false, errorText = "", notice = "";
     let selectedProfile = null, profileRows = [], profilesReadable = false, profilesReading = false, profileRequest = 0, profilesError = "", receiptError = "", currentImageInput = "unknown";
@@ -88,8 +88,8 @@
       state: textInputState,
       append: ref => {
         if (!textInputState() || ref?.kind !== "text") throw Error("Pi草稿或材料入口已变化，文件已保存在本机，没有放入其他草稿。");
-        const previous = draftMaterials; draftMaterials = materialRefs([...draftMaterials, ref]);
-        if (!save()) { draftMaterials = previous; throw Error("浏览器不能保存Pi文件选择；原草稿与材料保留。"); }
+        const previous = draftMaterials, revision = draftRevision; draftMaterials = materialRefs([...draftMaterials, ref]); draftRevision++;
+        if (!save()) { draftMaterials = previous; draftRevision = revision; throw Error("浏览器不能保存Pi文件选择；原草稿与材料保留。"); }
         composerVersion++; render(); return true;
       }, changed: render
     }) : null;
@@ -194,12 +194,12 @@
     function save() {
       if (!storageKey || storageInvalid) return false;
       const version = selectedMemory || pending?.memory_profile ? 4 : pending && !pending.body_json ? 1 : pending?.material_refs !== undefined || draftMaterials.length ? 3 : 2;
-      try { window.sessionStorage.setItem(storageKey, encode({ version, draft, pending, answer_journal: journal, ...(version >= 2 ? { selected_profile: selectedProfile } : {}), ...(version >= 3 ? { material_refs: draftMaterials } : {}), ...(version === 4 ? { selected_memory: selectedMemory } : {}), ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}), ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}) })); return true; } catch (_) { return false; }
+      try { window.sessionStorage.setItem(storageKey, encode({ version, draft, draft_revision: draftRevision, pending, answer_journal: journal, ...(version >= 2 ? { selected_profile: selectedProfile } : {}), ...(version >= 3 ? { material_refs: draftMaterials } : {}), ...(version === 4 ? { selected_memory: selectedMemory } : {}), ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}), ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}) })); return true; } catch (_) { return false; }
     }
     function syncWorkspace() {
       const id = String(getWorkspace() || ""); if (id === workspace) return;
       save(); configurationWriting = false; followLatest = true; conversationShown = false; viewVersion++; openingForSend = openSendUnconfirmed = false; composerVersion++; workspace = id; generation++; storageKey = id ? "rabbit.pi-native.page.v1." + encodeURIComponent(id) + "." + chatId : "";
-      draft = ""; draftMaterials = []; pending = null; journal = Object.create(null); storageInvalid = false; snapshot = null; readable = false; errorText = notice = ""; digests.clear(); requestNodes.clear(); toolNodes.clear(); burned.clear(); reading = writing = false; readPending = false;
+      draft = ""; draftMaterials = []; draftRevision = 0; pending = null; journal = Object.create(null); storageInvalid = false; snapshot = null; readable = false; errorText = notice = ""; digests.clear(); requestNodes.clear(); toolNodes.clear(); burned.clear(); reading = writing = false; readPending = false;
       selectedProfile = null; profileRows = []; profilesReadable = profilesReading = posting = false; profileRequest++; writeVersion++; profilesError = receiptError = ""; freshSend = null; currentImageInput = "unknown"; historyBefore = null; historyRequest++;
       selectedMemory = null; memoryRows = []; memoryReadable = memoryReading = false; memoryError = memorySourcesError = ""; memoryRequest++; memoryVersion++; memoryEvidence.clear(); memoryCards.clear(); memoryTextVersions.clear();
       selectionUnsupported = false; configurationSelection?.reset(undefined, { workspace, chatId });
@@ -208,6 +208,7 @@
         const saved = storageKey && JSON.parse(window.sessionStorage.getItem(storageKey) || "null");
         if (saved) {
           if (!object(saved) || ![1, 2, 3, 4].includes(saved.version) || !validText(saved.draft) || saved.draft.length > 200000) throw Error(); draft = saved.draft;
+          if (saved.draft_revision !== undefined) { if (!Number.isSafeInteger(saved.draft_revision) || saved.draft_revision < 0) throw Error(); draftRevision = saved.draft_revision; }
           if (Object.hasOwn(saved, "configuration_selection")) { if (!configurationSelection) throw Error(); configurationSelection.reset(saved.configuration_selection, { workspace, chatId }); }
           if (saved.version >= 2) selectedProfile = saved.selected_profile === null ? null : preference(saved.selected_profile);
           if (saved.version >= 3) draftMaterials = materialRefs(saved.material_refs);
@@ -215,6 +216,7 @@
           if (saved.pending !== null) {
             const p = saved.pending; if (!object(p) || !uuid(p.client_id) || !validText(p.message) || !p.message.trim() || p.message.length > 200000 || !(saved.version >= 3 && p.request_sha256 === null || /^[a-f0-9]{64}$/.test(p.request_sha256)) || !["submitted_unknown", "accepted"].includes(p.status)) throw Error();
             pending = { client_id: p.client_id, message: p.message, request_sha256: p.request_sha256, status: p.status };
+            if (p.draft_revision !== undefined) { if (saved.draft_revision === undefined || !Number.isSafeInteger(p.draft_revision) || p.draft_revision < 0 || p.draft_revision > draftRevision) throw Error(); pending.draft_revision = p.draft_revision; }
             if (saved.version >= 2) {
               const selected = p.profile_snapshot === null ? null : profile(p.profile_snapshot);
               const refs = saved.version >= 3 ? materialRefs(p.material_refs) : [], memory = saved.version === 4 && p.memory_profile !== undefined ? selectedMemoryChoice(p.memory_profile) : null;
@@ -255,6 +257,22 @@
       if (!save()) { selectedProfile = previous; throw Error("浏览器不能保存Pi配置选择；原选择与草稿保留。"); }
       composerVersion++; render(); return true;
     }
+    let draftToken = null;
+    function captureDraftRevision() {
+      if (!workspace || workspace !== String(getWorkspace() || "") || !enabled || destroyed || storageInvalid || input.value !== draft) return null;
+      const selection = canonical([selectedProfile, selectedMemory]);
+      if (!draftToken || draftToken.workspace !== workspace || draftToken.generation !== generation || draftToken.revision !== draftRevision || draftToken.selection !== selection)
+        draftToken = Object.freeze({ workspace, chat_id: chatId, generation, revision: draftRevision, selection });
+      return draftToken;
+    }
+    function adoptTextDraft(expected, value) {
+      const current = captureDraftRevision();
+      if (!current || expected !== current || !visible || root.hidden || document.hidden || !validText(value) || value.length > 200000) return false;
+      const previous = { draft, input: input.value, revision: draftRevision, composer: composerVersion };
+      draft = value; input.value = value; draftRevision++; composerVersion++;
+      if (!save()) { draft = previous.draft; input.value = previous.input; draftRevision = previous.revision; composerVersion = previous.composer; render(); return false; }
+      render(); return true;
+    }
     function putDraft(value) {
       syncWorkspace();
       if (!object(value) || value.workspace_id !== workspace || !workspace || value.chat_id !== chatId || !enabled || destroyed
@@ -273,9 +291,9 @@
       if (!validText(text) || !(text.trim() || text === "" && (refs.length || hasAI || hasMemory)) || typeof TextEncoder !== "function" || new TextEncoder().encode(text).length > 128 * 1024
           || new TextEncoder().encode(encode(sendBody("00000000-0000-4000-8000-000000000000", text, choice, refs, memory))).length > 256 * 1024) throw Error("交接内容无效或超过原生发送容量。");
       if (value.material_preview !== undefined) { if (!nativeMaterials || !refs.length) throw Error("材料预览缺少所选版本；整份未放入。"); nativeMaterials.seed(refs, value.material_preview); }
-      const previous = { draft, input: input.value, refs: draftMaterials, profile: selectedProfile, memory: selectedMemory };
-      draft = text; input.value = text; draftMaterials = refs; selectedProfile = choice; selectedMemory = memory;
-      if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedProfile = previous.profile; selectedMemory = previous.memory; throw Error("浏览器不能保存Pi原生草稿；原内容保留，尚未发送。"); }
+      const previous = { draft, input: input.value, refs: draftMaterials, profile: selectedProfile, memory: selectedMemory, revision: draftRevision };
+      draft = text; input.value = text; draftMaterials = refs; selectedProfile = choice; selectedMemory = memory; draftRevision++;
+      if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedProfile = previous.profile; selectedMemory = previous.memory; draftRevision = previous.revision; throw Error("浏览器不能保存Pi原生草稿；原内容保留，尚未发送。"); }
       composerVersion++; if (hasMemory) memoryVersion++; render(); return true;
     }
     // The quote picker may append to the current draft, but never replaces the
@@ -305,9 +323,9 @@
             || refs.length > before.length && (!materialsEnabled || !nativeMaterials || material_preview === undefined)
             || new TextEncoder().encode(encode(sendBody("00000000-0000-4000-8000-000000000000", text, selectedProfile, refs, selectedMemory))).length > 256 * 1024) return false;
         if (refs.length > before.length) nativeMaterials.seed(refs, material_preview);
-        const previous = { draft, input: input.value, refs: draftMaterials, version: composerVersion };
-        draft = text; input.value = text; draftMaterials = refs; composerVersion++;
-        if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; composerVersion = previous.version; render(); return false; }
+        const previous = { draft, input: input.value, refs: draftMaterials, version: composerVersion, revision: draftRevision };
+        draft = text; input.value = text; draftMaterials = refs; composerVersion++; draftRevision++;
+        if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; composerVersion = previous.version; draftRevision = previous.revision; render(); return false; }
         render(); return true;
       } catch (_) { return false; }
     }
@@ -416,7 +434,7 @@
       if (found.status === "accepted") { pending.status = "accepted"; save(); return; }
       if (terminal.has(found.status)) {
         const old = pending, previousDraft = draft, previousInput = input.value, previousMaterials = draftMaterials;
-        if (found.status !== "rejected" && draft === old.message && encode(draftMaterials) === encode(old.material_refs || [])) { draft = ""; input.value = ""; draftMaterials = []; }
+        if (found.status !== "rejected" && old.draft_revision === draftRevision && draft === old.message && encode(draftMaterials) === encode(old.material_refs || [])) { draftToken = null; draft = ""; input.value = ""; draftMaterials = []; }
         pending = null;
         if (!save()) { pending = old; draft = previousDraft; input.value = previousInput; draftMaterials = previousMaterials; errorText = "原请求结果已确认，但本地回执暂不能清除；不会重复发送。"; }
       }
@@ -534,8 +552,8 @@
     async function send() {
       syncWorkspace(); if (configurationWriting || openingForSend || writing || pending || storageInvalid || !visible || root.hidden || document.hidden || !validText(draft) || !draft.trim() || draft.length > 200000 || !(sendStateReady() || canOpenForSend())) return;
       followLatest = true;
-      const sendGeneration = generation, sendVersion = composerVersion, sendDraft = draft, sendChoice = canonical(selectedProfile), sendMemory = canonical(selectedMemory), sendMaterials = encode(draftMaterials);
-      const sameSendView = () => sameScope(sendGeneration) && visible && !root.hidden && !document.hidden && !textPicker?.busy() && composerVersion === sendVersion && draft === sendDraft && canonical(selectedProfile) === sendChoice && canonical(selectedMemory) === sendMemory && encode(draftMaterials) === sendMaterials;
+      const sendGeneration = generation, sendView = viewVersion, sendDraft = draft, sendRevision = draftRevision, sendChoice = canonical(selectedProfile), sendMemory = canonical(selectedMemory), sendMaterials = encode(draftMaterials);
+      const sameSendView = () => sameScope(sendGeneration) && visible && !root.hidden && !document.hidden && !textPicker?.busy() && viewVersion === sendView && canonical(selectedProfile) === sendChoice && canonical(selectedMemory) === sendMemory && encode(draftMaterials) === sendMaterials;
       if (!sendStateReady()) {
         openingForSend = true; render();
         try {
@@ -545,13 +563,13 @@
         } finally { if (sameScope(sendGeneration)) { openingForSend = false; render(); } }
       }
       if (!sameSendView() || !sendStateReady()) return;
-      const stamp = generation, message = draft, refs = materialRefs(draftMaterials), selected = selectedProfile === null ? null : profile(selectedRow()), memory = selectedMemory === null ? null : selectedMemoryChoice(selectedMemory), identity = encode([snapshot.epoch, snapshot.binding?.session_id]), clientId = window.crypto?.randomUUID?.(); if (!uuid(clientId)) { errorText = "无法生成稳定Pi请求编号，尚未发送。"; render(); return; }
+      const stamp = generation, message = sendDraft, refs = materialRefs(draftMaterials), selected = selectedProfile === null ? null : profile(selectedRow()), memory = selectedMemory === null ? null : selectedMemoryChoice(selectedMemory), identity = encode([snapshot.epoch, snapshot.binding?.session_id]), clientId = window.crypto?.randomUUID?.(); if (!uuid(clientId)) { errorText = "无法生成稳定Pi请求编号，尚未发送。"; render(); return; }
       writing = true; render();
       try {
         const body = sendBody(clientId, message, selected, refs, memory), bodyJson = encode(body);
         if (typeof TextEncoder !== "function" || new TextEncoder().encode(message).length > 128 * 1024 || new TextEncoder().encode(bodyJson).length > 256 * 1024) throw Error("消息超过单次发送容量，原稿保留，请缩短后发送。");
-        const hash = refs.length || memory ? null : await promptHash(message), intentHash = await digest(canonical(body)), journalHash = await digest(canonical(journalBody(body, selected, memory))); if (!sameSendView() || !sameScope(stamp) || !sendStateReady() || pending || encode(refs) !== encode(draftMaterials) || canonical(memory) !== canonical(selectedMemory) || memory && (draft !== message || identity !== encode([snapshot.epoch, snapshot.binding?.session_id]))) return;
-        pending = { client_id: clientId, message, request_sha256: hash, status: "submitted_unknown", body_json: bodyJson, intent_sha256: intentHash, journal_sha256: journalHash, profile_snapshot: selected };
+        const hash = refs.length || memory ? null : await promptHash(message), intentHash = await digest(canonical(body)), journalHash = await digest(canonical(journalBody(body, selected, memory))); if (!sameSendView() || !sameScope(stamp) || !sendStateReady() || pending || encode(refs) !== encode(draftMaterials) || canonical(memory) !== canonical(selectedMemory) || memory && identity !== encode([snapshot.epoch, snapshot.binding?.session_id])) return;
+        pending = { client_id: clientId, message, draft_revision: sendRevision, request_sha256: hash, status: "submitted_unknown", body_json: bodyJson, intent_sha256: intentHash, journal_sha256: journalHash, profile_snapshot: selected };
         if (refs.length || memory) pending.material_refs = refs;
         if (memory) pending.memory_profile = memory;
         if (!save()) { pending = null; throw Error("浏览器不能保存Pi发送回执，尚未发送；原稿保留。"); }
@@ -687,6 +705,7 @@
     }
     function render() {
       syncConfigurationSelection();
+      if (draftToken && draftToken.selection !== canonical([selectedProfile, selectedMemory])) draftToken = null;
       renderProfileStatus();
       moreSummary.textContent = tr("更多", "More"); operationSummary.textContent = tr("操作记录", "Operation records");
       const scope = encode([workspace, snapshot?.epoch ?? null, snapshot?.binding?.session_id ?? null]);
@@ -725,8 +744,8 @@
         const blocked = configurationWriting || writing || !!pending || storageInvalid || !enabled || destroyed, materialStamp = generation;
         for (const ref of draftMaterials) if (nativeMaterials) materialBox.append(nativeMaterials.card(ref, { language, disabled: blocked, remove: () => {
           if (materialStamp !== generation || configurationWriting || writing || pending || storageInvalid || !enabled || destroyed) return;
-          const previous = draftMaterials; draftMaterials = draftMaterials.filter(item => item.kind !== ref.kind || item.id !== ref.id);
-          if (!save()) { draftMaterials = previous; errorText = tr("材料移除未保存；原引用保留。", "Removal was not saved; the original reference remains."); } render();
+          const previous = draftMaterials, revision = draftRevision; draftMaterials = draftMaterials.filter(item => item.kind !== ref.kind || item.id !== ref.id); draftRevision++;
+          if (!save()) { draftMaterials = previous; draftRevision = revision; errorText = tr("材料移除未保存；原引用保留。", "Removal was not saved; the original reference remains."); } render();
         } }));
         if (!materialsReady()) materialBox.append(node("p", "rbs-note", tr("图片需要当前原生模型明确声明支持图片，或选择已核实支持图片的配置；材料和草稿保留。", "Images require declared support from the current native model or a verified saved configuration. Materials and draft remain.")));
       }
@@ -750,7 +769,7 @@
       textPicker?.update(language);
       if (followLatest && conversationBody && visible && !root.hidden) conversationBody.scrollTop = conversationBody.scrollHeight;
     }
-    input.addEventListener("input", () => { composerVersion++; draft = input.value; save(); render(); });
+    input.addEventListener("input", () => { composerVersion++; draftRevision++; draft = input.value; save(); render(); });
     if (sharedComposer) input.addEventListener("keydown", event => {
       if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229 && !event.shiftKey
           && (getSendShortcut() === "ctrl-enter" ? event.ctrlKey || event.metaKey : !event.ctrlKey && !event.metaKey)) {
@@ -840,7 +859,7 @@
         if (generation === stamp && workspace === scope) { configurationWriting = false; render(); if (visible && enabled) await refresh(); }
       }
     }
-    render(); return { getComposerView, chooseConfiguration, applyConfigurationReadback, focusComposer: () => input.focus({ preventScroll: true }), sendDraft: send, show, showSettings, hide, destroy, refresh, setLanguage, setEnabled, setMaterialInputs, getConfigurationContext, selectSavedProfile, putDraft, captureQuoteDraft, applyQuoteDraft, getTextSnapshot };
+    render(); return { getComposerView, chooseConfiguration, applyConfigurationReadback, focusComposer: () => input.focus({ preventScroll: true }), sendDraft: send, show, showSettings, hide, destroy, refresh, setLanguage, setEnabled, setMaterialInputs, getConfigurationContext, captureDraftRevision, adoptTextDraft, selectSavedProfile, putDraft, captureQuoteDraft, applyQuoteDraft, getTextSnapshot };
   }
   window.RabbitPiNative = Object.freeze({ create });
 })();

@@ -2384,7 +2384,7 @@ class ManagementClient:
             if datetime.fromisoformat(stamp.replace('Z', '+00:00')).utcoffset() != timedelta(0):
                 raise ValueError('Invalid snapshot time.')
             agents, works = value['agents'], value['works']
-            if type(agents) is not list or len(agents) != 5 or type(works) is not list or len(works) > 7:
+            if type(agents) is not list or len(agents) != 5 or type(works) is not list or len(works) > 8:
                 raise ValueError('Invalid work list.')
             by_agent = {}
             def reason(code):
@@ -2407,7 +2407,7 @@ class ManagementClient:
                         or type(row['complete']) is not bool):
                     raise ValueError('Invalid owned work.')
                 if role == 'specialist':
-                    if agent != 'codex' or row['chat_id'] is not None: raise ValueError('Invalid specialist.')
+                    if agent not in ('codex', 'dsh') or row['chat_id'] is not None: raise ValueError('Invalid specialist.')
                 else:
                     _uuid(row['chat_id']); counts[agent] += 1
                     if counts[agent] > (2 if agent == 'codex' else 1): raise ValueError('Work limit.')

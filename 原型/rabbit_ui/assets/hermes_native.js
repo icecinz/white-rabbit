@@ -42,7 +42,7 @@
     if (settingsRoot !== null && typeof settingsRoot.append !== "function") throw Error("原生对话设置入口无效。");
     const settingsPanel = settingsRoot ? node("section", "rbs-settings") : null;
     if (settingsPanel) { settingsPanel.setAttribute("data-control-interface", "ai"); settingsRoot.append(settingsPanel); }
-    let workspace = "", storageKey = "", draft = "", draftMaterials = [], pending = null, journal = Object.create(null), storageInvalid = false, materialsEnabled = materialInputs === true;
+    let workspace = "", storageKey = "", draft = "", draftMaterials = [], draftRevision = 0, pending = null, journal = Object.create(null), storageInvalid = false, materialsEnabled = materialInputs === true;
     let openingForSend = false, openSendUnconfirmed = false, composerVersion = 0;
     let visible = false, destroyed = false, enabled = true, language = "zh-CN", generation = 0, timer = null, reading = false, writing = false, posting = false, readPending = false, writeVersion = 0, snapshot = null, readable = false, errorText = "", notice = "";
     let resolutionInfo = null, receiptProof = null, receiptError = "", freshSend = null, historyBefore = null, historyRequest = 0;
@@ -66,12 +66,15 @@
     const historyScope = () => encode([workspace, chatId, generation, snapshot?.epoch ?? null, snapshot?.binding?.session_key ?? null, snapshot?.binding?.runtime_session_id ?? null]);
     const historyView = window.RabbitHermesNativeHistory?.create({ root: messages, operationsRoot: historyTools, originalsRoot, api, getState: () => snapshot, getScope: historyScope, onPage: before => { historyBefore = before; historyRequest++; return refresh(); }, rich, handoffView, splitMemory: text => splitMemoryText(text), onError });
     function button(zh, en, callback) { const b = node("button", "rbs-button", tr(zh, en)); b.type = "button"; b.setAttribute("data-hermes-zh", zh); b.setAttribute("data-hermes-en", en); b.addEventListener("click", callback); return b; }
-    const openButton = button("连接 Hermes", "Connect Hermes", () => { if (!openingForSend) return mutate("open", {}); }), disconnectButton = button("断开连接", "Disconnect", disconnect), sendButton = button("发送", "Send", submit);
+    const openButton = button("连接 Hermes", "Connect Hermes", () => { if (canOpenConnection()) return mutate("open", {}); }), disconnectButton = button("断开连接", "Disconnect", disconnect), sendButton = button("发送", "Send", submit);
     const discardButton = button("放弃未发送附件", "Discard unsent attachments", discardAttachments);
     const moreMenu = node("details", "rbs-chat-more"), moreSummary = node("summary");
+    const restoreEmpty = node("section", "rbs-empty-state"), restoreNote = node("p", "rbs-note");
+    let openButtonHome = moreMenu;
+    restoreEmpty.append(restoreNote);
     operationRecords.append(operationSummary, historyTools, tools); moreMenu.append(moreSummary, connection);
     sendButton.className += " rbs-primary rbs-submit";
-    input.rows = 3; input.setAttribute("aria-label", "Hermes原生独立草稿"); if (settingsPanel) { const recovery = node("details", "rbs-setting-details"), summary = node("summary", "", "连接与恢复"); summary.setAttribute("data-control-interface", "human"); recovery.append(summary, openButton, disconnectButton); settingsPanel.append(recovery); moreMenu.append(discardButton); } else moreMenu.append(openButton, disconnectButton, discardButton); head.append(statusCard, moreMenu); rawEvents.className += " rbs-originals"; rawEvents.append(eventSummary, eventPre); moreMenu.append(rawEvents, originalsRoot, operationRecords); composerActions.append(sendButton); composer.append(input, composerActions); page.append(head, notices, messages, memorySources, requests, composer); root.append(page); root.hidden = true;
+    input.rows = 3; input.setAttribute("aria-label", "Hermes原生独立草稿"); if (settingsPanel) { const recovery = node("details", "rbs-setting-details"), summary = node("summary", "", "连接与恢复"); summary.setAttribute("data-control-interface", "human"); recovery.append(summary, openButton, disconnectButton); openButtonHome = recovery; settingsPanel.append(recovery); moreMenu.append(discardButton); } else moreMenu.append(openButton, disconnectButton, discardButton); head.append(statusCard, moreMenu); rawEvents.className += " rbs-originals"; rawEvents.append(eventSummary, eventPre); moreMenu.append(rawEvents, originalsRoot, operationRecords); composerActions.append(sendButton); composer.append(input, composerActions); page.append(head, notices, messages, memorySources, requests, composer); root.append(page); root.hidden = true;
     const profileBox = node("div", "rbs-field"), profileLabel = node("label", "rbs-field"), profileTitle = node("span"), profileSelect = node("select", "rbs-control"), profileControls = node("div", "rbs-actions"), profileInfo = node("p", "rbs-note"), currentInfo = node("p", "rbs-note");
     profileBox.setAttribute("data-control-interface", "ai");
     const configurationButton = button("核对配置后发送原消息", "Check configuration, then send original message", () => pending?.attachment_discarded ? restoreDiscardedDraft() : resolveConfiguration());
@@ -95,8 +98,8 @@
       state: textInputState,
       append: ref => {
         if (!textInputState() || ref?.kind !== "text") throw Error("Hermes草稿或材料入口已变化，文件已保存在本机，没有放入其他草稿。");
-        const previous = draftMaterials; draftMaterials = materialRefs([...draftMaterials, ref]);
-        if (!save()) { draftMaterials = previous; throw Error("浏览器不能保存Hermes文件选择；原草稿与材料保留。"); }
+        const previous = draftMaterials, revision = draftRevision; draftMaterials = materialRefs([...draftMaterials, ref]); draftRevision++;
+        if (!save()) { draftMaterials = previous; draftRevision = revision; throw Error("浏览器不能保存Hermes文件选择；原草稿与材料保留。"); }
         composerVersion++; render(); return true;
       }, changed: render
     }) : null;
@@ -192,12 +195,12 @@
     function save() {
       if (!storageKey || storageInvalid) return false;
       const version = selectedMemory || pending?.memory_profile ? 4 : pending && !pending.body_json ? 1 : pending?.material_refs !== undefined || draftMaterials.length ? 3 : 2;
-      try { window.sessionStorage.setItem(storageKey, encode({ version, draft, pending, answer_journal: journal, ...(version >= 2 ? { selected_profile: selectedProfile } : {}), ...(version >= 3 ? { material_refs: draftMaterials } : {}), ...(version === 4 ? { selected_memory: selectedMemory } : {}), ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}), ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}) })); return true; } catch (_) { return false; }
+      try { window.sessionStorage.setItem(storageKey, encode({ version, draft, draft_revision: draftRevision, pending, answer_journal: journal, ...(version >= 2 ? { selected_profile: selectedProfile } : {}), ...(version >= 3 ? { material_refs: draftMaterials } : {}), ...(version === 4 ? { selected_memory: selectedMemory } : {}), ...(configurationSelection?.managed() ? { configuration_selection: configurationSelection.checkpoint() } : {}), ...(memorySelection?.managed() ? { memory_selection: memorySelection.checkpoint() } : {}) })); return true; } catch (_) { return false; }
     }
     function syncWorkspace() {
       const id = String(getWorkspace() || ""); if (id === workspace) return;
       save(); configurationWriting = false; followLatest = true; conversationShown = false; viewVersion++; openingForSend = openSendUnconfirmed = false; composerVersion++; workspace = id; generation++; storageKey = id ? "rabbit.hermes-native.page.v1." + encodeURIComponent(id) + "." + chatId : "";
-      draft = ""; draftMaterials = []; pending = null; journal = Object.create(null); storageInvalid = false; snapshot = null; readable = false; errorText = notice = ""; digests.clear(); requestNodes.clear(); toolNodes.clear(); burned.clear(); reading = writing = false; readPending = false;
+      draft = ""; draftMaterials = []; draftRevision = 0; pending = null; journal = Object.create(null); storageInvalid = false; snapshot = null; readable = false; errorText = notice = ""; digests.clear(); requestNodes.clear(); toolNodes.clear(); burned.clear(); reading = writing = false; readPending = false;
       resolutionInfo = null; selectedProfile = null; profileRows = []; profilesReadable = profilesReading = posting = false; profileRequest++; writeVersion++; profilesError = "";
       selectedMemory = null; memoryRows = []; memoryReadable = memoryReading = false; memoryError = memorySourcesError = ""; memoryRequest++; memoryVersion++; memoryEvidence.clear(); memoryCards.clear(); memorySuffixes.clear(); memorySuffixCache.clear();
       receiptProof = null; receiptError = ""; freshSend = null; historyBefore = null; historyRequest++;
@@ -207,6 +210,7 @@
         const saved = storageKey && JSON.parse(window.sessionStorage.getItem(storageKey) || "null");
         if (saved) {
           if (!object(saved) || ![1, 2, 3, 4].includes(saved.version) || !validText(saved.draft) || saved.draft.length > 200000) throw Error(); draft = saved.draft;
+          if (saved.draft_revision !== undefined) { if (!Number.isSafeInteger(saved.draft_revision) || saved.draft_revision < 0) throw Error(); draftRevision = saved.draft_revision; }
           if (Object.hasOwn(saved, "configuration_selection")) { if (!configurationSelection) throw Error(); configurationSelection.reset(saved.configuration_selection, { workspace, chatId }); }
           if (saved.version >= 2) selectedProfile = saved.selected_profile === null ? null : preference(saved.selected_profile);
           if (saved.version >= 3) draftMaterials = materialRefs(saved.material_refs);
@@ -214,6 +218,7 @@
           if (saved.pending !== null) {
             const p = saved.pending; if (!object(p) || !uuid(p.client_id) || !validText(p.message) || !p.message.trim() || p.message.length > 200000 || !(saved.version >= 3 && p.request_sha256 === null || /^[a-f0-9]{64}$/.test(p.request_sha256)) || !["submitted_unknown", "accepted"].includes(p.status)) throw Error();
             pending = { client_id: p.client_id, message: p.message, request_sha256: p.request_sha256, status: p.status };
+            if (p.draft_revision !== undefined) { if (saved.draft_revision === undefined || !Number.isSafeInteger(p.draft_revision) || p.draft_revision < 0 || p.draft_revision > draftRevision) throw Error(); pending.draft_revision = p.draft_revision; }
             if (saved.version >= 2) {
               const selected = p.profile_snapshot === null ? null : profile(p.profile_snapshot);
               const refs = saved.version >= 3 ? materialRefs(p.material_refs) : [], memory = saved.version === 4 && p.memory_profile !== undefined ? selectedMemoryChoice(p.memory_profile) : null;
@@ -251,6 +256,22 @@
       if (!save()) { selectedProfile = previous; throw Error("浏览器不能保存Hermes配置选择；原选择与草稿保留。"); }
       composerVersion++; render(); return true;
     }
+    let draftToken = null;
+    function captureDraftRevision() {
+      if (!workspace || workspace !== String(getWorkspace() || "") || !enabled || destroyed || storageInvalid || input.value !== draft) return null;
+      const selection = canonical([selectedProfile, selectedMemory]);
+      if (!draftToken || draftToken.workspace !== workspace || draftToken.generation !== generation || draftToken.revision !== draftRevision || draftToken.selection !== selection)
+        draftToken = Object.freeze({ workspace, chat_id: chatId, generation, revision: draftRevision, selection });
+      return draftToken;
+    }
+    function adoptTextDraft(expected, value) {
+      const current = captureDraftRevision();
+      if (!current || expected !== current || !visible || root.hidden || document.hidden || !validText(value) || value.length > 200000) return false;
+      const previous = { draft, input: input.value, revision: draftRevision, composer: composerVersion };
+      draft = value; input.value = value; draftRevision++; composerVersion++;
+      if (!save()) { draft = previous.draft; input.value = previous.input; draftRevision = previous.revision; composerVersion = previous.composer; render(); return false; }
+      render(); return true;
+    }
     function putDraft(value) {
       syncWorkspace();
       if (!object(value) || value.workspace_id !== workspace || !workspace || value.chat_id !== chatId || !enabled || destroyed
@@ -269,9 +290,9 @@
       if (!validText(text) || !(text.trim() || text === "" && (refs.length || hasAI || hasMemory)) || typeof TextEncoder !== "function" || new TextEncoder().encode(text).length > 128 * 1024
           || new TextEncoder().encode(encode(sendBody("00000000-0000-4000-8000-000000000000", text, choice, refs, memory))).length > 256 * 1024) throw Error("交接内容无效或超过原生发送容量。");
       if (value.material_preview !== undefined) { if (!nativeMaterials || !refs.length) throw Error("材料预览缺少所选版本；整份未放入。"); nativeMaterials.seed(refs, value.material_preview); }
-      const previous = { draft, input: input.value, refs: draftMaterials, profile: selectedProfile, memory: selectedMemory };
-      draft = text; input.value = text; draftMaterials = refs; selectedProfile = choice; selectedMemory = memory;
-      if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedProfile = previous.profile; selectedMemory = previous.memory; throw Error("浏览器不能保存Hermes原生草稿；原内容保留，尚未发送。"); }
+      const previous = { draft, input: input.value, refs: draftMaterials, profile: selectedProfile, memory: selectedMemory, revision: draftRevision };
+      draft = text; input.value = text; draftMaterials = refs; selectedProfile = choice; selectedMemory = memory; draftRevision++;
+      if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; selectedProfile = previous.profile; selectedMemory = previous.memory; draftRevision = previous.revision; throw Error("浏览器不能保存Hermes原生草稿；原内容保留，尚未发送。"); }
       composerVersion++; if (hasMemory) memoryVersion++; render(); return true;
     }
     // Quote selection changes only this renderer's existing draft. Capturing
@@ -303,9 +324,9 @@
             || refs.length > before.length && (!materialsEnabled || !nativeMaterials || material_preview === undefined)
             || new TextEncoder().encode(encode(sendBody("00000000-0000-4000-8000-000000000000", text, selectedProfile, refs, selectedMemory))).length > 256 * 1024) return false;
         if (refs.length > before.length) nativeMaterials.seed(refs, material_preview);
-        const previous = { draft, input: input.value, refs: draftMaterials, version: composerVersion };
-        draft = text; input.value = text; draftMaterials = refs; composerVersion++;
-        if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; composerVersion = previous.version; render(); return false; }
+        const previous = { draft, input: input.value, refs: draftMaterials, version: composerVersion, revision: draftRevision };
+        draft = text; input.value = text; draftMaterials = refs; composerVersion++; draftRevision++;
+        if (!save()) { draft = previous.draft; input.value = previous.input; draftMaterials = previous.refs; composerVersion = previous.version; draftRevision = previous.revision; render(); return false; }
         render(); return true;
       } catch (_) { return false; }
     }
@@ -496,7 +517,7 @@
       if (found.status === "accepted") { pending.status = "accepted"; save(); return; }
       if (terminal.has(found.status)) {
         const old = pending, previousDraft = draft, previousInput = input.value, previousMaterials = draftMaterials;
-        if (found.status !== "rejected" && draft === old.message && encode(draftMaterials) === encode(old.material_refs || [])) { draft = ""; input.value = ""; draftMaterials = []; }
+        if (found.status !== "rejected" && old.draft_revision === draftRevision && draft === old.message && encode(draftMaterials) === encode(old.material_refs || [])) { draftToken = null; draft = ""; input.value = ""; draftMaterials = []; }
         pending = null;
         if (!save()) { pending = old; draft = previousDraft; input.value = previousInput; draftMaterials = previousMaterials; errorText = "原请求结果已确认，但本地回执暂不能清除；不会重复发送。"; }
       }
@@ -542,15 +563,16 @@
       if (!old || old.memory_profile || !old.body_json || tx?.client_id !== old.client_id || tx.phase !== "discarded"
           || receiptProof.receipt !== null && receiptProof.receipt?.status !== "rejected" || tx.raw_request_sha256 !== old.intent_sha256) return;
       if (draft && (draft !== old.message || encode(draftMaterials) !== encode(old.material_refs || []))) { old.attachment_discarded = true; save(); return; }
-      const previous = draft, previousMaterials = draftMaterials;
-      draft = old.message; input.value = draft; draftMaterials = materialRefs(old.material_refs); pending = null;
-      if (!save()) { pending = old; draft = previous; draftMaterials = previousMaterials; input.value = draft; errorText = tr("原稿恢复未能保存；原请求仍保留。", "Draft recovery could not be saved; the original request remains."); }
+      const previous = draft, previousMaterials = draftMaterials, revision = draftRevision;
+      draftRevision++; draft = old.message; input.value = draft; draftMaterials = materialRefs(old.material_refs); pending = null;
+      if (!save()) { pending = old; draft = previous; draftMaterials = previousMaterials; draftRevision = revision; input.value = draft; errorText = tr("原稿恢复未能保存；原请求仍保留。", "Draft recovery could not be saved; the original request remains."); }
       else notice = tr("未发送附件已放弃，原消息和材料已取回草稿；不会自动重发。", "Unsent attachments discarded. Original message and materials restored to the draft; no resend.");
     }
     function ready() { return enabled && !destroyed && readable && snapshot?.connection.state === "ready"; }
     function unsettled() { return (snapshot?.operations || []).some(r => ["accepted", "submitted_unknown"].includes(r.status)) || snapshot?.operation && ["accepted", "submitted_unknown"].includes(snapshot.operation.status); }
     function active() { return snapshot?.native_state?.running === true; }
     function configurationBarrier() { return snapshot?.configuration_pending === true; }
+    function canOpenConnection() { return enabled && !destroyed && readable && snapshot?.connection.state !== "failed" && !writing && !configurationWriting && !openingForSend && !pending && !storageInvalid && !unsettled() && !active() && !configurationBarrier() && !attachmentBarrier() && snapshot?.disconnect_unconfirmed !== true && !snapshot?.requests.some(row => ["pending", "unknown"].includes(row.state)); }
     function nativeIdle() { const b = snapshot?.binding; return ready() && snapshot?.native_state?.running === false && typeof b?.session_key === "string" && !!b.session_key && typeof b?.runtime_session_id === "string" && !!b.runtime_session_id && !unsettled() && !snapshot.requests.some(r => ["pending", "unknown"].includes(r.state)); }
     function idle() { return nativeIdle() && !configurationBarrier() && !attachmentBarrier(); }
     function eventOwned(event, binding) { return object(event) && typeof event.type === "string" && !!event.type && (!event.session_id || event.session_id === binding?.runtime_session_id); }
@@ -628,8 +650,8 @@
     async function send() {
       syncWorkspace(); if (configurationWriting || openingForSend || writing || pending || storageInvalid || !visible || root.hidden || document.hidden || !validText(draft) || !draft.trim() || draft.length > 200000 || !(sendStateReady() || canOpenForSend())) return;
       followLatest = true;
-      const sendGeneration = generation, sendVersion = composerVersion, sendDraft = draft, sendChoice = canonical(selectedProfile), sendMemory = canonical(selectedMemory), sendMaterials = encode(draftMaterials);
-      const sameSendView = () => sameScope(sendGeneration) && visible && !root.hidden && !document.hidden && !textPicker?.busy() && composerVersion === sendVersion && draft === sendDraft && canonical(selectedProfile) === sendChoice && canonical(selectedMemory) === sendMemory && encode(draftMaterials) === sendMaterials;
+      const sendGeneration = generation, sendView = viewVersion, sendDraft = draft, sendRevision = draftRevision, sendChoice = canonical(selectedProfile), sendMemory = canonical(selectedMemory), sendMaterials = encode(draftMaterials);
+      const sameSendView = () => sameScope(sendGeneration) && visible && !root.hidden && !document.hidden && !textPicker?.busy() && viewVersion === sendView && canonical(selectedProfile) === sendChoice && canonical(selectedMemory) === sendMemory && encode(draftMaterials) === sendMaterials;
       if (!sendStateReady()) {
         openingForSend = true; render();
         try {
@@ -639,13 +661,13 @@
         } finally { if (sameScope(sendGeneration)) { openingForSend = false; render(); } }
       }
       if (!sameSendView() || !sendStateReady()) return;
-      const stamp = generation, message = draft, refs = materialRefs(draftMaterials), selected = selectedProfile === null ? null : profile(selectedRow()), memory = selectedMemory === null ? null : selectedMemoryChoice(selectedMemory), clientId = window.crypto?.randomUUID?.(); if (!uuid(clientId)) { errorText = "无法生成稳定Hermes请求编号，尚未发送。"; render(); return; }
+      const stamp = generation, message = sendDraft, refs = materialRefs(draftMaterials), selected = selectedProfile === null ? null : profile(selectedRow()), memory = selectedMemory === null ? null : selectedMemoryChoice(selectedMemory), clientId = window.crypto?.randomUUID?.(); if (!uuid(clientId)) { errorText = "无法生成稳定Hermes请求编号，尚未发送。"; render(); return; }
       writing = true; render();
       try {
         const body = sendBody(clientId, message, selected, refs, memory), bodyJson = encode(body);
         if (typeof TextEncoder !== "function" || new TextEncoder().encode(message).length > 128 * 1024 || new TextEncoder().encode(bodyJson).length > 256 * 1024) throw Error("消息超过单次发送容量，原稿保留，请缩短后发送。");
         const hash = refs.length || memory ? null : await promptHash(message), intentHash = await digest(canonical(body)), journalHash = await digest(canonical(journalBody(body, selected, memory))); if (!sameSendView() || !sameScope(stamp) || !sendStateReady() || pending || encode(refs) !== encode(draftMaterials) || canonical(memory) !== canonical(selectedMemory)) return;
-        pending = { client_id: clientId, message, request_sha256: hash, status: "submitted_unknown", body_json: bodyJson, intent_sha256: intentHash, journal_sha256: journalHash, profile_snapshot: selected };
+        pending = { client_id: clientId, message, draft_revision: sendRevision, request_sha256: hash, status: "submitted_unknown", body_json: bodyJson, intent_sha256: intentHash, journal_sha256: journalHash, profile_snapshot: selected };
         if (refs.length || memory) pending.material_refs = refs;
         if (memory) pending.memory_profile = memory;
         if (!save()) { pending = null; throw Error("浏览器不能保存Hermes发送回执，尚未发送；原稿保留。"); }
@@ -665,8 +687,8 @@
         const application = matchingApplication(snapshot); if (!application) return;
         if (application.phase === "failed") {
           if (draft && draft !== original.message) { errorText = tr("草稿里已有新内容，请先保存或清空，再恢复原消息；两份文字均保留。", "A newer draft exists. Save or clear it before restoring the original; both texts remain."); return; }
-          const previous = draft, previousMaterials = draftMaterials; draft = original.message; draftMaterials = materialRefs(original.material_refs); input.value = draft; pending = null;
-          if (!save()) { pending = original; draft = previous; draftMaterials = previousMaterials; input.value = previous; errorText = tr("浏览器不能保存恢复结果，原请求和草稿仍保留。", "The browser could not save recovery; the original request and draft remain."); }
+          const previous = draft, previousMaterials = draftMaterials, revision = draftRevision; draftRevision++; draft = original.message; draftMaterials = materialRefs(original.material_refs); input.value = draft; pending = null;
+          if (!save()) { pending = original; draft = previous; draftMaterials = previousMaterials; draftRevision = revision; input.value = previous; errorText = tr("浏览器不能保存恢复结果，原请求和草稿仍保留。", "The browser could not save recovery; the original request and draft remain."); }
           else notice = tr("配置准备已失败，原消息尚未发送；已放回草稿。再次发送会使用新编号。", "Configuration preparation failed before sending. The original is back in the draft; a new send uses a new ID.");
           return;
         }
@@ -693,6 +715,8 @@
     function rich(parent, text) { if (window.OneAIRichText?.render) window.OneAIRichText.render(parent, text, { openDocument }); else parent.textContent = text; }
     function textParts(content) { return typeof content === "string" ? content : Array.isArray(content) ? content.filter(p => object(p) && p.type === "text" && typeof p.text === "string").map(p => p.text).join("\n") : ""; }
     function renderMessages() {
+      // A disconnected owner's empty RAM projection is not an empty native history.
+      if (!ready() && !(snapshot?.native_messages || []).length) { messages.replaceChildren(); historyTools.replaceChildren(); originalsRoot.replaceChildren(); return; }
       if (historyView && snapshot) { historyView.render(snapshot, { language, before: historyBefore }); return; }
       const expanded = new Map();
       for (const box of [...messages.children, ...historyTools.children]) { const key = box.getAttribute("data-hermes-message-key"), last = box.children[box.children.length - 1]; if (key) expanded.set(key, { outer: box.open === true, raw: last?.open === true }); }
@@ -803,6 +827,7 @@
     }
     function render() {
       syncConfigurationSelection();
+      if (draftToken && draftToken.selection !== canonical([selectedProfile, selectedMemory])) draftToken = null;
       renderProfileStatus();
       moreSummary.textContent = tr("更多", "More"); operationSummary.textContent = tr("操作记录", "Operation records");
       const scope = encode([workspace, snapshot?.epoch ?? null, snapshot?.binding?.session_key ?? null, snapshot?.binding?.runtime_session_id ?? null]);
@@ -832,7 +857,14 @@
       memoryInfo.textContent = [memorySelection?.message(language), memorySelectionUnsupported ? tr("记忆配置状态组件未就绪；原草稿保留。", "Memory configuration state is unavailable; the original draft remains.") : "", tr("Hermes 原生记忆照常；这里只为下一次发送附加只读资料，不保存本轮交互。不附加不会清除原生上文。", "Hermes native memory stays unchanged. Selected read-only context is added for the next send without saving this interaction. Choosing none does not erase earlier context."), memoryStale ? tr("原选版本已变化或尚未核实，请重新选择；原稿保留。", "The saved version changed or is unverified. Choose explicitly; the draft remains.") : "", memoryReading ? tr("正在读取保存的参数…", "Reading saved parameters…") : "", memoryError].filter(Boolean).join(" ");
       memoryRefresh.hidden = memoryInfo.hidden = !Object.hasOwn(snapshot || {}, "memory_intents") && !selectedMemory && !pending?.memory_profile && !memoryControlled();
       memoryLabel.hidden = memoryRefresh.hidden || memoryControlled();
-      openButton.hidden = ready(); openButton.disabled = !enabled || destroyed || !readable || writing || openingForSend || attachmentBarrier(); 
+      const restoreSession = readable && ["closed", "not_open"].includes(snapshot?.connection.state) && typeof snapshot?.binding?.session_key === "string" && !!snapshot.binding.session_key;
+      const restoreBound = restoreSession && !(snapshot.native_messages || []).length;
+      openButton.hidden = ready(); openButton.disabled = !canOpenConnection();
+      openButton.textContent = restoreSession ? tr("恢复原会话", "Restore original session") : tr("连接 Hermes", "Connect Hermes");
+      // Move the existing control; reconnecting is explicit and may resume native work.
+      const openHome = restoreBound ? restoreEmpty : openButtonHome;
+      if (openButton.parentNode !== openHome) openHome.append(openButton);
+      restoreNote.textContent = tr("恢复连接后可查看历史；也可能继续原程序未完成的工作。", "Restore the connection to view history; the native program may also continue unfinished work.");
       let preparation = null; try { if (readable && pending?.configuration_preparation) preparation = matchingApplication(snapshot); } catch (_) { /* Only checked matching proof can authorize recovery. */ }
       const failedPreparation = preparation?.phase === "failed";
       configurationButton.hidden = !!pending?.memory_profile || !pending?.attachment_discarded && (!pending?.configuration_preparation || snapshot?.native_draft?.phase === "started");
@@ -846,8 +878,8 @@
         for (const ref of draftMaterials) {
           if (nativeMaterials) materialBox.append(nativeMaterials.card(ref, { language, disabled: blocked, remove: () => {
             if (materialStamp !== generation || writing || pending || configurationBarrier() || attachmentBarrier() || storageInvalid || !enabled || destroyed) return;
-            const previous = draftMaterials; draftMaterials = draftMaterials.filter(item => item.kind !== ref.kind || item.id !== ref.id);
-            if (!save()) { draftMaterials = previous; errorText = tr("材料移除未保存；原引用保留。", "Removal was not saved; the original reference remains."); } render();
+            const previous = draftMaterials, revision = draftRevision; draftMaterials = draftMaterials.filter(item => item.kind !== ref.kind || item.id !== ref.id); draftRevision++;
+            if (!save()) { draftMaterials = previous; draftRevision = revision; errorText = tr("材料移除未保存；原引用保留。", "Removal was not saved; the original reference remains."); } render();
           } }));
           else materialBox.append(node("p", "rbs-error", tr("材料组件未就绪，原引用保留。", "Material component unavailable; original references remain.")));
         }
@@ -872,9 +904,12 @@
       if (attachmentBarrier()) notices.append(node("p", "rbs-note", tr("原图阶段：", "Image stage: ") + tx.phase + ` · ${tx.confirmed_count}/${tx.images.length} ` + tr("张已核对。消息是否发送只看独立回执；不会自动重附或补发。", "verified. Submission is proven only by its separate receipt; images/messages are never automatically retried.")));
       if (pending?.attachment_discarded) notices.append(node("p", "rbs-note", tr("附件已放弃；请先保存或清空当前不同的草稿，再取回保留的原消息。", "Attachments were discarded. Save or clear the different current draft before recovering the preserved original message.")));
       if (configurationBarrier() && !pending?.body_json) notices.append(node("p", "rbs-note", tr("这段对话有配置准备待核对，但本浏览器没有完整原请求；请回到原浏览器继续。应用状态保留，不会猜测原文或重新发送。", "This chat has pending configuration preparation, but this browser has no complete original request. Continue in the original browser. State remains; no message is guessed or sent.")));
-      if (snapshot?.connection.problem) notices.append(node("p", "rbs-note", tr("连接问题：", "Connection issue: ") + (typeof snapshot.connection.problem === "string" ? snapshot.connection.problem : encode(snapshot.connection.problem))));
+      if (snapshot?.connection.problem) notices.append(node("p", "rbs-note", snapshot.connection.state === "failed" && snapshot.connection.problem === "event_stream_closed"
+        ? tr("目前显示的是已读取的文字。请先核对上次回执，确认结束后从“更多 → 连接与恢复”断开旧连接，再明确恢复原会话；恢复可能继续原生未完成的工作。", "The text shown was already read. Check the previous receipt first. After confirming the request has ended, disconnect the old connection under More → Connection and recovery, then explicitly restore the original session. Restoration may continue unfinished native work.")
+        : tr("连接问题：", "Connection issue: ") + (typeof snapshot.connection.problem === "string" ? snapshot.connection.problem : encode(snapshot.connection.problem))));
       if (snapshot?.events.some(event => event.display_truncated === true)) notices.append(node("p", "rbs-note", tr("部分Hermes实时事件超出显示容量，不能视为完整过程。", "Some Hermes live events exceed display limits. This is not the complete process.")));
       if (memorySourcesError) notices.append(node("p", "rbs-note", memorySourcesError));
+      if (restoreBound) notices.append(restoreEmpty);
       renderMessages(); renderMemorySources(); renderTools(); renderRequests(); operationRecords.hidden = historyTools.children.length === 0 && tools.children.length === 0; eventSummary.textContent = tr("Hermes显示记录与原生事件", "Hermes display records and native events"); eventPre.textContent = JSON.stringify({ native_messages: snapshot?.native_messages || [], events: snapshot?.events || [] }, null, 2);
       if (sharedComposer) {
         const view = getComposerView();
@@ -887,7 +922,7 @@
       textPicker?.update(language);
       if (followLatest && conversationBody && visible && !root.hidden) conversationBody.scrollTop = conversationBody.scrollHeight;
     }
-    input.addEventListener("input", () => { composerVersion++; draft = input.value; save(); render(); });
+    input.addEventListener("input", () => { composerVersion++; draftRevision++; draft = input.value; save(); render(); });
     if (sharedComposer) input.addEventListener("keydown", event => {
       if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229 && !event.shiftKey
           && (getSendShortcut() === "ctrl-enter" ? event.ctrlKey || event.metaKey : !event.ctrlKey && !event.metaKey)) {
@@ -977,7 +1012,7 @@
         if (generation === stamp && workspace === scope) { configurationWriting = false; render(); if (visible && enabled) await refresh(); }
       }
     }
-    render(); return { getComposerView, chooseConfiguration, applyConfigurationReadback, focusComposer: () => input.focus({ preventScroll: true }), sendDraft: send, show, showSettings, hide, destroy, refresh, setLanguage, setEnabled, setMaterialInputs, getConfigurationContext, selectSavedProfile, putDraft, captureQuoteDraft, applyQuoteDraft, getTextSnapshot };
+    render(); return { getComposerView, chooseConfiguration, applyConfigurationReadback, focusComposer: () => input.focus({ preventScroll: true }), sendDraft: send, show, showSettings, hide, destroy, refresh, setLanguage, setEnabled, setMaterialInputs, getConfigurationContext, captureDraftRevision, adoptTextDraft, selectSavedProfile, putDraft, captureQuoteDraft, applyQuoteDraft, getTextSnapshot };
   }
   window.RabbitHermesNative = Object.freeze({ create });
 })();

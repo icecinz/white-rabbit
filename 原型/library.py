@@ -10,6 +10,7 @@ import datetime as dt
 from functools import lru_cache
 import hashlib
 import json
+import re
 import sqlite3
 from urllib.parse import quote
 
@@ -17,7 +18,13 @@ from chat_store import BusyError, ChatStore
 from agent_registry import has as registered_agent
 from native_catalogue import CATALOGUE_TABLES, MAX_CHATS, chat_id as native_chat_id, _title as native_title
 from history_view import (_agent, _query, _integer, _excerpt, _INTERNAL_SESSION_SQL, history_order, history_position,
-                          _is_approval_context, display_message, NATIVE_ATTACHMENT_SOURCE_FIELDS)
+                          _is_approval_context, display_message, NATIVE_ATTACHMENT_SOURCE_FIELDS, HistoryView)
+
+
+class NativeTextError(ValueError):
+    def __init__(self, status, code, message):
+        super().__init__(message)
+        self.status, self.code = status, code
 
 
 def _object(value):
@@ -309,6 +316,75 @@ class LibraryView:
         value = json.dumps(parts, separators=(',', ':'))
         return hashlib.sha256(value.encode('utf-8')).hexdigest()[:24]
 
+    def _native_text_revision(self, key, *, native_rows=None, native_bindings=None, history_state=None):
+        # Reading one indexed conversation must not be invalidated by another
+        # chat's answer/activity or by enabling a runtime. Identity changes do.
+        if native_bindings is None:
+            native_bindings = self._native_bindings()
+        if native_rows is None:
+            with self.store.lock, self.store._open(readonly=True) as connection:
+                connection.execute('BEGIN')
+                native_rows, _, _ = self._native_catalogue(connection, ())
+        rows = [{field: row[field] for field in ('agent', 'id', 'title', 'created_at')}
+                for row in native_rows if 'native:' + row['agent'] + ':' + row['id'] == key]
+        bindings = [{field: row[field] for field in ('agent', 'chat_id', 'session_id', 'adopted')}
+                    for row in native_bindings or () if 'native:' + row['agent'] + ':' + row['chat_id'] == key]
+        return self._revision('native_index_text', None, native_rows=rows,
+            native_bindings=bindings, history_state=history_state, keys=(key,))
+
+    def native_text(self, agent, chat_id, *, source_session_id=None, message_id=None,
+                    offset=None, limit=100, revision=None):
+        try:
+            agent = _agent(agent, allow_all=False)
+            chat_id = native_chat_id(chat_id)
+            limit = _integer(limit, 'limit', 1, 100)
+            if offset is not None:
+                offset = _integer(offset, 'offset', 0, 1000000)
+            if source_session_id is not None:
+                self._source_pair((agent, source_session_id))
+            if revision is not None and (type(revision) is not str or not re.fullmatch(r'[0-9a-f]{24}', revision)):
+                raise ValueError('Invalid revision')
+            if offset and revision is None:
+                raise ValueError('分页需要上次读取的版本。')
+            if message_id is not None and (source_session_id is None or offset is not None
+                    or type(message_id) is not str or not 1 <= len(message_id) <= 512
+                    or any(ord(char) < 32 or ord(char) == 127 for char in message_id)):
+                raise ValueError('消息定位需要明确来源，且不能同时指定分页位置。')
+            if message_id is not None:
+                message_id.encode('utf-8')
+        except (ValueError, TypeError, UnicodeError) as error:
+            raise NativeTextError(400, 'native_text_invalid', str(error)) from None
+        key = 'native:' + agent + ':' + chat_id
+        try:
+            directory = self.list(keys=[key], limit=1, _native_text_key=key)
+            current = directory['revision']
+            if revision is not None and revision != current:
+                raise NativeTextError(409, 'native_text_changed', '这段对话的来源或索引已更新，请重新读取。')
+            rows = directory['items']
+            if len(rows) != 1 or rows[0]['kind'] != 'native' or rows[0]['key'] != key:
+                raise NativeTextError(404, 'native_text_unavailable', '这段原生对话尚无可核实的目录记录。')
+            sources = rows[0].get('index_sources', [])
+            if not sources:
+                raise NativeTextError(404, 'native_text_unavailable', '这段原生对话尚无已核实绑定的文字索引。')
+            source_session_id = source_session_id if source_session_id is not None else rows[0]['index_source']['session_id']
+            if {'agent': agent, 'session_id': source_session_id} not in sources:
+                raise NativeTextError(404, 'native_text_unavailable', '这段文字索引不属于当前原生对话。')
+            reader = HistoryView(self.history.index_path, materializer=None)
+            position = reader.indexed_message_position(agent, source_session_id, message_id) if message_id is not None else None
+            if message_id is not None and position is None:
+                raise NativeTextError(404, 'native_text_unavailable', '所选消息已不在这段文字索引中。')
+            page_offset = (position // limit) * limit if position is not None else offset or 0
+            page = reader.get_session(agent, source_session_id, offset=page_offset, limit=limit)
+            if self._native_text_revision(key) != current or page['session'] is None:
+                raise NativeTextError(409, 'native_text_changed', '这段对话的来源或索引已更新，请重新读取。')
+            return dict(scope='native_index_text', agent=agent, chat_id=chat_id, title=rows[0]['title'], sources=sources,
+                source_session_id=source_session_id, revision=current, read_only=True, offset=page_offset,
+                located_message_id=message_id, located_message_index=position, **page)
+        except NativeTextError:
+            raise
+        except (BusyError, ValueError, OSError, sqlite3.Error):
+            raise NativeTextError(409, 'native_text_changed', '文字索引或原生绑定暂不能核对，请稍后重新读取。') from None
+
     @staticmethod
     def _register(connection):
         # The connection belongs to one list snapshot. Reuse parsed metadata
@@ -332,13 +408,15 @@ class LibraryView:
         connection.create_function('native_signature', 1, native_reader)
         connection.create_aggregate('collect_native_descriptors', len(NATIVE_ATTACHMENT_SOURCE_FIELDS), _CollectNativeDescriptors)
 
-    def list(self, query='', agent='all', offset=0, limit=50, include_internal=False, *, keys=None):
+    def list(self, query='', agent='all', offset=0, limit=50, include_internal=False, *, keys=None, _native_text_key=None):
         agent, words = _agent(agent), _query(query)
         offset, limit = (_integer(offset, 'offset', 0, 1000000000),
                          _integer(limit, 'limit', 1, 100))
         if not isinstance(include_internal, bool):
             raise ValueError('include_internal must be boolean')
         keys = _library_keys(keys)
+        if _native_text_key is not None and (keys != (_native_text_key,) or not _native_text_key.startswith('native:')):
+            raise ValueError('Invalid native text target')
         excluded_source, excluded_sources = self._excluded_source(), self._excluded_sources()
         enabled_agents = self._enabled_native_agents()
         native_bindings = self._native_bindings()
@@ -365,6 +443,9 @@ class LibraryView:
                 store_revision = str(connection.execute("SELECT value FROM common.store_meta WHERE key='revision'").fetchone()[0])
                 revision = self._revision(store_revision, excluded_source, excluded_sources, native_rows,
                                           history_state=history_state, native_bindings=native_bindings, keys=keys)
+                if _native_text_key is not None:
+                    revision = self._native_text_revision(_native_text_key, native_rows=native_rows,
+                        native_bindings=native_bindings, history_state=history_state)
                 base_revision = self._revision(store_revision, excluded_source, excluded_sources, native_rows,
                     history_state=history_state, native_bindings=native_bindings) if keys is not None else revision
                 if keys is not None:
@@ -612,7 +693,8 @@ class LibraryView:
         # Release both the common read transaction and ChatStore.lock before
         # re-reading native metadata. This retains the existing change fence
         # without the Library -> native-manager lock order.
-        if revision != self.revision(keys=keys):
+        after = self._native_text_revision(_native_text_key) if _native_text_key is not None else self.revision(keys=keys)
+        if revision != after:
             raise BusyError('历史刚刚更新了，请稍后刷新列表。')
         following = offset + len(items)
         result = {'items': items, 'total': total,

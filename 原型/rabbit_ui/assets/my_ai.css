@@ -1,0 +1,43 @@
+.my-ai-panel { flex: 1; min-height: 0; overflow-y: auto; padding: 20px clamp(20px, 4vw, 64px) 40px; }
+.my-ai-body { max-width: 1120px; margin: 0 auto; }
+.my-ai-hero { padding: 14px 0 34px; border-bottom: 1px solid var(--line, #d7d0c3); }
+.my-ai-kicker, .my-ai-resource-note, .my-ai-facts-note, .my-ai-empty-note { font-size: 13px; color: var(--muted, #756c76); line-height: 1.7; }
+.my-ai-kicker { margin: 0 0 10px; letter-spacing: .12em; }
+.my-ai-hero h3 { margin: 0 0 22px; font-family: "Songti SC", "Noto Serif CJK SC", serif; font-weight: 500; font-size: clamp(23px, 2.6vw, 34px); line-height: 1.5; }
+.my-ai-actions, .my-ai-work-actions { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.my-ai-primary, .my-ai-secondary, .my-ai-link { font: inherit; cursor: pointer; }
+.my-ai-primary { background: var(--accent, #634d6d); color: #fff9ef; border: 1px solid transparent; border-radius: 5px; padding: 10px 26px; }
+.my-ai-secondary { padding: 9px 17px; border: 1px solid var(--line, #d7d0c3); border-radius: 5px; background: transparent; color: inherit; }
+.my-ai-link { color: var(--accent, #634d6d); border: 0; padding: 0; background: transparent; text-decoration: none; text-align: left; line-height: 1.7; }
+.my-ai-link:hover { text-decoration: underline; text-underline-offset: 4px; }
+.my-ai-resource-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 8px 0 32px; }
+.my-ai-resource { min-width: 0; border: 1px solid var(--line, #d7d0c3); border-radius: 6px; background: var(--paper, #fbf9f4); }
+.my-ai-resource > .my-ai-section-heading { padding: 16px 18px 12px; border-bottom: 1px solid var(--line, #d7d0c3); }
+.my-ai-resource > .my-ai-section-heading .my-ai-link { font-size: 11px; white-space: nowrap; }
+.my-ai-section-heading { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+.my-ai-section-heading h3 { font-family: "Songti SC", "Noto Serif CJK SC", serif; font-size: 19px; font-weight: 500; margin: 0; }
+.my-ai-count { font-size: 12px; color: var(--muted, #756c76); }
+.my-ai-resources, .my-ai-work-list { list-style: none; padding: 0; margin: 12px 0 0; }
+.my-ai-resources { margin-top: 0; padding: 3px 17px 8px; }
+.my-ai-resource-row { padding: 13px 0 11px; border-bottom: 1px solid var(--line, #d7d0c3); }
+.my-ai-resource-row:last-child { border-bottom: 0; }
+.my-ai-resource-row .my-ai-link { max-width: 100%; overflow-wrap: anywhere; }
+.my-ai-resource-note { margin: 5px 0 0; }
+.my-ai-status { display: inline-block; margin: 0 0 0 9px; font-size: 11px; color: var(--muted, #756c76); }
+.my-ai-status[data-state="running"], .my-ai-status[data-state="checked"], .my-ai-status[data-state="configured"] { color: #68764c; }
+.my-ai-status[data-state="needs_user"] { color: #9b6539; }
+.my-ai-recent { border-top: 1px solid var(--line, #d7d0c3); padding-top: 25px; }
+.my-ai-work { display: flex; align-items: center; gap: 20px; padding: 20px 0; border-bottom: 1px solid var(--line, #d7d0c3); }
+.my-ai-work-copy { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.my-ai-work-copy strong { font-weight: 500; }
+.my-ai-actions { justify-content: flex-end; gap: 9px; }
+.my-ai-actions button { font-size: 13px; padding: 8px 15px; }
+.my-ai-work-actions { font-size: 13px; }
+.my-ai-notice { font-size: 13px; padding: 12px; border-left: 2px solid #8d7851; line-height: 1.7; }
+.my-ai-notice button { margin-left: 14px; }
+.my-ai-facts-note { margin-top: 25px; font-size: 12px; }
+.my-ai-report:empty { display: none; }
+.brand-home { background: transparent; border: 0; border-radius: 8px; padding: 0; cursor: pointer; }
+.brand-home:focus-visible { outline: 2px solid var(--accent, #634d6d); outline-offset: 3px; }
+@media (max-width: 950px) { .my-ai-resource-grid { gap: 18px; } .my-ai-work { align-items: flex-start; flex-direction: column; gap: 10px; } }
+@media (max-width: 640px) { .my-ai-panel { padding: 12px 22px 30px; } .my-ai-resource-grid { grid-template-columns: 1fr; gap: 28px; } .my-ai-resources { max-height: none; } .my-ai-hero { padding-bottom: 25px; } }

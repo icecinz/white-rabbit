@@ -2,7 +2,7 @@
   "use strict";
   const VERSION = 1, MAX_ITEMS = 100, MAX_TEXT = 30000, MAX_CHARACTERS = 512 * 1024;
   const MAX_RAW = 2 * 1024 * 1024, MAX_LANES = 8, RETENTION = 30 * 86400000;
-  const agents = window.RabbitAgents, pages = new Set(["conversations", "management", "settings", "specialist", "native-chats", "continuation"]);
+  const agents = window.RabbitAgents, pages = new Set(["my-ai", "conversations", "management", "settings", "specialist", "native-chats", "continuation"]);
   const forbidden = new Set(["__proto__", "prototype", "constructor"]);
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   function invalid() { throw new Error("invalid-browser-snapshot"); }
@@ -307,6 +307,18 @@
       } else invalid();
     }
     if (own(input, "page")) { if (!pages.has(input.page)) invalid(); result.page = input.page; }
+    if (own(input, "historyReadOnly")) { if (typeof input.historyReadOnly !== "boolean") invalid(); result.historyReadOnly = input.historyReadOnly; }
+    if (own(input, "workspaceSections")) {
+      const sections = exact(input.workspaceSections, ["management", "settings"]);
+      const allowed = { management: [null, "ai-profiles", "memory-profiles", "agents", "models", "devices"], settings: ["general", "native-chats", "specialist", "ai-settings", "about"] };
+      if (Object.keys(allowed).some(key => !allowed[key].includes(sections[key]))) invalid();
+      result.workspaceSections = { ...sections, management: sections.management === "devices" ? "agents" : sections.management };
+    }
+    if (own(input, "managementTarget") && input.managementTarget !== null) {
+      const target = object(input.managementTarget);
+      if (!["agent", "model", "memory"].includes(target.kind) || !text(target.id, 512, false)) invalid();
+      result.managementTarget = { kind: target.kind, id: target.id };
+    }
     if (own(input, "continuations")) {
       if (!Array.isArray(input.continuations) || input.continuations.length > MAX_ITEMS) invalid();
       const ids = new Set(), sources = new Set();
@@ -427,9 +439,8 @@
       const location = object(options.location), origin = text(location.origin, 300, false), parsed = new URL(origin);
       if (!["http:", "https:"].includes(parsed.protocol) || parsed.origin !== origin || parsed.username || parsed.password) invalid();
       const pathname = text(location.pathname || "/", 4096, false);
-      const proxy = /^\/api\/server\/([A-Za-z0-9_-]{1,128})\/local-web(?:\/|$)/.exec(pathname);
-      if (pathname.startsWith("/api/server/") && !proxy) invalid();
-      prefix = `rabbit-browser-state:v${VERSION}:${options.workspaceId}:${encodeURIComponent(origin)}:${proxy ? proxy[1] : "direct"}:`;
+      if (pathname.startsWith("/api/server/")) invalid();
+      prefix = `rabbit-browser-state:v${VERSION}:${options.workspaceId}:${encodeURIComponent(origin)}:direct:`;
       sessionKey = prefix + "session";
       laneKey = prefix + "lane:" + uuid();
       try { local = options.localStorage; localAccessible = !!local && typeof local.getItem === "function" && typeof local.setItem === "function"; } catch (_) { localAccessible = false; }

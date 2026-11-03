@@ -53,7 +53,7 @@ RUNTIME_FILES = (
     "server.py", "chat_store.py", "rabbit_specialist/status_checks.py", "rabbit_specialist/status_analysis.py", "rabbit_specialist/model_guide_history.py", "status_check_service.py", "native_chat_selection.py", "native_memory_selection.py", "rabbit_preparation/context.py", "rabbit_preparation/text_file_context.py", "history_view.py", "library.py", "preferences.py", "app_management.py", "app_settings.py",
     "native_startup.py", "codex_history_adoption.py", "codex_history_metadata.py", "codex_history_service.py", "native_history_service.py", "hermes_history_adoption.py", "hermes_history_guard.py",
     "admission_gate.py", "service_admission.py", "service_maintenance.py", "native_maintenance.py",
-    'rabbit_specialist/interface_tasks.py', 'rabbit_specialist/interface_task_coordinator.py', 'rabbit_specialist/draft_configuration.py', "native_model_management.py", "native_chat_management.py", "native_work_status.py", "external_work.py", "rabbit_runtime/hapi_work.py",
+    'rabbit_specialist/interface_tasks.py', 'rabbit_specialist/interface_task_coordinator.py', 'rabbit_specialist/draft_configuration.py', 'rabbit_specialist/core_conversation.py', "native_model_management.py", "native_chat_management.py", "native_work_status.py", "my_ai_overview.py", "external_work.py", "rabbit_runtime/hapi_work.py",
     "native_task_input.py", "native_task_result.py",
     'rabbit_runtime/codex_rpc.py', 'rabbit_runtime/native_rpc_transport.py', 'rabbit_runtime/native_json.py', 'rabbit_runtime/native_session_store.py', 'rabbit_runtime/native_session_lease.py', 'rabbit_runtime/codex_native_session.py',
     'rabbit_runtime/specialist_service.py', 'rabbit_runtime/specialist_tool_status.py', "specialist_http.py", "specialist_memory.py", 'rabbit_specialist/specialist_workspace.py', 'rabbit_specialist/specialist_connection.py', 'rabbit_runtime/codex_connection.py', "native_chats.py", "native_catalogue.py", "native_http_common.py", "rabbit_preparation/handoff.py", "native_profile_intents.py", "native_profile_catalog.py",
@@ -87,11 +87,11 @@ RUNTIME_FILES = (
     "rabbit_content/markdown_chat_document.py", "rabbit_content/markdown_chat_directory.py", "rabbit_content/markdown_chat_registry.py", "native_markdown_source.py", "rabbit_content/history_markdown_reference.py",
     "rabbit_content/markdown_chat_sync.py", "rabbit_content/markdown_sync_files.py",
     "rabbit_ui/assets/index.html", "rabbit_ui/assets/app.js", "rabbit_ui/assets/style.css", "agent_definitions.json", "rabbit_ui/assets/agents.js",
-    "rabbit_ui/assets/workspace.js", "rabbit_ui/assets/workspace.css", "rabbit_ui/assets/browser_state.js", "rabbit_ui/assets/history_quotes.js", "rabbit_ui/assets/continuations.js",
+    "rabbit_ui/assets/workspace.js", "rabbit_ui/assets/workspace.css", "rabbit_ui/assets/my_ai.js", "rabbit_ui/assets/my_ai_page.js", "rabbit_ui/assets/my_ai.css", "rabbit_ui/assets/browser_state.js", "rabbit_ui/assets/history_quotes.js", "rabbit_ui/assets/continuations.js",
     "rabbit_ui/assets/work_status.js", "rabbit_ui/assets/work_status.css",
     "rabbit_ui/assets/composer_shell.js", "rabbit_ui/assets/composer_shell.css",
-    "rabbit_ui/assets/soft_paper.css", "rabbit_ui/assets/soft-paper.jpg",
-    "rabbit_ui/assets/manual.md", "rabbit_ui/assets/specialist-guide.md", "rabbit_ui/assets/status_checks.js",
+    "rabbit_ui/assets/soft_paper.css", "rabbit_ui/assets/soft-paper.jpg", "rabbit_ui/assets/native_index_text.js",
+    "rabbit_ui/assets/manual.md", "rabbit_ui/assets/specialist-guide.md", "rabbit_ui/assets/old-letter.md", "rabbit_ui/assets/status_checks.js",
     "rabbit_ui/assets/specialist_context.js", "rabbit_ui/assets/specialist_tools.js", "rabbit_ui/assets/specialist.js", "rabbit_ui/assets/specialist.css", "rabbit_ui/assets/native_chats.js", "rabbit_ui/assets/native_handoff.js", "rabbit_ui/assets/native_adoption.js", "rabbit_ui/assets/native_text_quote.js", "rabbit_ui/assets/native_file_quote.js", "rabbit_ui/assets/handoff_view.js", "rabbit_ui/assets/native_materials.js",
     "rabbit_ui/assets/pi_native_history.js", "rabbit_ui/assets/pi_native.js",
     "rabbit_ui/assets/hermes_native_history.js", "rabbit_ui/assets/hermes_attachment_state.js", "rabbit_ui/assets/hermes_native.js",
@@ -125,9 +125,11 @@ class MaintenanceClient:
     ROOT = '/api/maintenance'
     IDENTIFIER = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z')
 
-    def __init__(self, state, csrf):
+    def __init__(self, state, csrf, workspace):
         self.instance_id = state['instance_id']
         self.csrf = csrf
+        self.workspace = workspace
+        self.work_status_unavailable = False
         self.identity = {'instance_id': self.instance_id,
                          'maintenance_id': secrets.token_hex(16),
                          'token': secrets.token_hex(32),
@@ -158,7 +160,7 @@ class MaintenanceClient:
             raise InstallError('维护回应格式无法确认；没有继续替换程序。') from None
 
     @classmethod
-    def _wire(cls, method, path, *, body=None, csrf=None, allow_absent=False):
+    def _wire(cls, method, path, *, body=None, csrf=None, allow_absent=False, allow_unsupported=False):
         # Fixed loopback endpoint, without urllib/proxy environment or redirects.
         connection = http.client.HTTPConnection('127.0.0.1', PORT, timeout=10)
         try:
@@ -179,6 +181,8 @@ class MaintenanceClient:
             # An old local service may return an HTML 404. This is an explicit
             # unsupported protocol, never evidence that there is no live service.
             if response.status == 404:
+                if allow_unsupported:
+                    return 404, {}
                 raise InstallError('现有入口尚不支持安全维护协议；未停止服务，也未部署。')
             length = response.getheader('Content-Length')
             if length is not None and (not length.isascii() or not length.isdigit()
@@ -249,7 +253,104 @@ class MaintenanceClient:
             raise InstallError('入口已由另一维护操作关门；没有接管或重置。需单独核对维护状态。')
         if state['generation'] == 2 ** 53 - 1:
             raise InstallError('维护编号已到上限；没有继续操作。')
-        return cls(state, csrf)
+        return cls(state, csrf, workspace)
+
+    def release_idle_connections(self):
+        """Use the existing explicit disconnects; cached idle never grants maintenance."""
+        status, value = self._wire('GET', '/api/management/work-status', allow_unsupported=True)
+        if status == 404:
+            self.work_status_unavailable = True
+            return  # An older entry must still pass the original prepare probe.
+        labels = {'codex': 'Codex', 'pi': 'Pi', 'hermes': 'Hermes', 'claude': 'Claude Code', 'dsh': 'DSH'}
+        paths = {'codex': 'native-chats', 'pi': 'pi-chats', 'hermes': 'hermes-chats',
+                 'claude': 'claude-chats', 'dsh': 'dsh-chats'}
+        invalid = '连接状态未完整核实；请先在原对话核对，没有断开连接或部署。'
+        if (status != 200 or type(value) is not dict or value.keys() !=
+                {'schema_version', 'workspace_id', 'scope', 'snapshot_at', 'external_work', 'complete', 'agents', 'works'}
+                or type(value['schema_version']) is not int or value['schema_version'] != 1
+                or value['workspace_id'] != self.workspace or value['scope'] != 'rabbit_owned_cache'
+                or value['external_work'] != 'not_observed' or type(value['complete']) is not bool
+                or type(value['snapshot_at']) is not str or not 1 <= len(value['snapshot_at']) <= 64
+                or type(value['agents']) is not list or len(value['agents']) != len(labels)
+                or type(value['works']) is not list or len(value['works']) > 8):
+            raise InstallError(invalid)
+        agents = {}
+        for row in value['agents']:
+            if (type(row) is not dict or row.keys() != {'agent', 'enabled', 'complete', 'reason'}
+                    or type(row['agent']) is not str or row['agent'] not in labels or row['agent'] in agents
+                    or type(row['enabled']) is not bool or type(row['complete']) is not bool
+                    or row['reason'] is not None and (type(row['reason']) is not str
+                        or re.fullmatch(r'[a-z][a-z_]{0,47}', row['reason']) is None)):
+                raise InstallError(invalid)
+            agents[row['agent']] = row
+        if not value['complete'] or any(not row['complete'] or row['reason'] is not None for row in agents.values()):
+            names = '、'.join(labels[key] for key, row in agents.items() if not row['complete'] or row['reason'] is not None)
+            raise InstallError((names + ' 的' if names else '') + invalid)
+        actions, seen, action_paths = [], set(), set()
+        for row in value['works']:
+            if (type(row) is not dict or row.keys() != {'agent', 'role', 'chat_id', 'owner', 'complete', 'reason',
+                    'status', 'connection_state', 'epoch', 'native_session_id', 'pending_requests'}
+                    or type(row['agent']) is not str or row['agent'] not in labels
+                    or not agents[row['agent']]['enabled'] or row['owner'] != 'rabbit'
+                    or row['role'] not in ('chat', 'specialist')
+                    or row['role'] == 'specialist' and (row['agent'] not in ('codex', 'dsh') or row['chat_id'] is not None)
+                    or row['role'] == 'chat' and (type(row['chat_id']) is not str or re.fullmatch(
+                        r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', row['chat_id']) is None)):
+                raise InstallError(invalid)
+            identity = (row['agent'], row['role'], row['chat_id'])
+            if identity in seen:
+                raise InstallError(invalid)
+            seen.add(identity)
+            label = '小白兔专员' if row['role'] == 'specialist' else labels[row['agent']] + ' 对话 ' + row['chat_id'][:8]
+            if row['complete'] is not True:
+                raise InstallError(label + ' 的状态待核对；没有断开连接或部署。')
+            if row['status'] == 'running':
+                raise InstallError(label + ' 仍在运行；请等任务结束后再更新，没有强行断开。')
+            if row['status'] == 'needs_user':
+                raise InstallError(label + ' 正在等待你的确认；请处理原请求后再更新，没有代答或断开。')
+            if (row['status'] != 'idle' or row['reason'] is not None or row['connection_state'] != 'ready'
+                    or type(row['pending_requests']) is not int or row['pending_requests'] != 0
+                    or type(row['epoch']) is not str or re.fullmatch(r'[0-9a-f]{32}', row['epoch']) is None
+                    or type(row['native_session_id']) is not str
+                    or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}', row['native_session_id']) is None):
+                raise InstallError(label + ' 的状态或上次结果待核对；没有断开连接或部署。')
+            path = '/api/specialist/disconnect' if row['role'] == 'specialist' else (
+                '/api/' + paths[row['agent']] + '/' + row['chat_id'] + '/disconnect')
+            # Both specialist cores share one coordinator. Its existing close
+            # endpoint rechecks and releases both; validate both rows before
+            # dispatching it once, rather than repeating the same mutation.
+            if path not in action_paths:
+                actions.append((label, path))
+                action_paths.add(path)
+        # Validate every row first. Each existing endpoint rechecks its own
+        # current owner under its action lock before releasing an executor.
+        for label, path in actions:
+            try:
+                status, receipt = self._wire('POST', path, body={}, csrf=self.csrf)
+            except InstallError:
+                raise InstallError(label + ' 的断开结果未确认；未重试、未停止服务或部署，请核对原连接。') from None
+            if (status != 200 or type(receipt) is not dict
+                    or receipt.keys() != {'disconnected', 'background_tools_exit_verified'}
+                    or receipt['disconnected'] is not True or receipt['background_tools_exit_verified'] is not False):
+                raise InstallError(label + ' 未确认正常断开；可能有新任务或待确认请求，未重试、未部署。')
+
+    def _busy_description(self, state):
+        busy = state['busy']
+        if any(key.endswith('_unknown') or key in ('cleanup_blockers', 'cleanup_unknown') for key in busy):
+            reason = '仍有状态或退出结果待核对'
+        elif any(key in busy for key in ('workers', 'runs_pending', 'memory_pending', 'memory_claims',
+                'file_tasks_pending', 'file_sources_publishing', 'file_artifacts_publishing',
+                'publication_publishing', 'refresh_busy', 'interface_tasks_pending')):
+            reason = '仍有回答、资料或记忆任务未结束'
+        elif any(key.endswith('_busy') for key in busy):
+            reason = '仍有原生连接未正常释放'
+        elif state['leases']['total']:
+            reason = '仍有操作正在进行'
+        else:
+            reason = '维护尚未准备好'
+        if self.work_status_unavailable:
+            reason += '；旧入口不能核对连接状态，请在原界面正常断开空闲连接后再试'
+        return reason + '；没有停止服务或部署。'
 
     def _post(self, action):
         self.confirmed = None  # A previous response cannot prove a later POST's outcome.
@@ -282,7 +383,7 @@ class MaintenanceClient:
         status, state = self._control('prepare')
         if (status != 200 or state['state'] != 'prepared' or state['phase'] != 'prepared'
                 or state['leases']['total'] or state['busy']):
-            raise InstallError('入口仍有任务或维护未准备好；没有停止服务或部署。')
+            raise InstallError(self._busy_description(state))
 
     def commit(self):
         status, state = self._control('commit')
@@ -457,11 +558,22 @@ def native_configuration(layout, config_file=None):
         raise InstallError(str(error)) from None
 
 
+def _historical_project_document(parts):
+    """Current product guidance excludes archives and user work products."""
+    return (parts[0] in ('归档', '发布', '对话', '交付')
+            or parts[:2] == ('文档', '记录')
+            or len(parts) == 2 and parts[0] == '文档'
+                and parts[1].startswith('接手-') and parts[1].endswith('.md')
+            or any(parts[index:index + 2] == ('docs', 'history')
+                   for index in range(len(parts) - 1)))
+
+
 def refresh_document_cache(layout, source):
     """Publish a bounded text-only project mirror from the user's entry process.
 
     Background launchd jobs can be denied access to iCloud while this foreground
     entry can read it. The mirror never scans a home or copies chat databases.
+    Historical records remain in the source project, outside the active mirror.
     Immutable generation contents and an atomic manifest swap avoid mixed reads.
     """
     try:
@@ -484,6 +596,10 @@ def refresh_document_cache(layout, source):
                 if name.startswith('.'):
                     continue
                 parts = prefix + (name,)
+                if _historical_project_document(parts):
+                    continue
+                if parts[-3:] == ('rabbit_ui', 'assets', 'old-letter.md'):
+                    continue  # The About page reads its bundled letter directly.
                 try:
                     metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
                     if stat.S_ISDIR(metadata.st_mode):
@@ -836,6 +952,10 @@ def stopped_service(layout, activate_service, *, before_stop=None):
         return
     if not activate_service:
         raise InstallError('入口仍在线；--no-activate 不会停止在线服务，没有部署。')
+    # No maintenance identity has been submitted yet. A failed observation or
+    # disconnect must retain its specific reason, without trying gate cancel.
+    require_idle(layout)
+    client.release_idle_connections()
     try:
         client.prepare()
         require_idle(layout)
@@ -1161,7 +1281,7 @@ def local_status():
     # Ignore proxy settings for the loopback request.
     import urllib.request
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    request = Request("http://127.0.0.1:" + str(PORT) + "/api/status")
+    request = Request("http://127.0.0.1:" + str(PORT) + "/api/status?cached=1")
     try:
         with opener.open(request, timeout=10) as response:
             value = json.loads(response.read(1024 * 1024))

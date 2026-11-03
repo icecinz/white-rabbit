@@ -6,44 +6,52 @@
 
 <img src="assets/icon.png" alt="White Rabbit" width="80">
 
-**One entry for your AI work. A path toward working across your devices.**
+**All your AI, in one place.**
 
-White Rabbit brings native-agent work, conversations, materials, and memory into a local workspace. Choose the agent and model for the task, continue a supported session, inspect its progress, and keep the work organized without starting from scratch each time.
+White Rabbit brings agents, models, conversations, materials, and memory into a local workspace. It is for people who use several AI tools: find yesterday's work, choose who to work with next, and carry selected material forward without explaining the whole project again.
 
-The longer-term aim is one place to reach your AI agents and the devices where they work. The current application focuses on **one online Mac** and the native connections it owns. Connecting arbitrary work already running in external desktop applications is still an open part of that goal.
+“All” describes the direction. The current application has experimental native routes for **Codex, Hermes, Pi, Claude Code, and DeepSeek Harness (DSH)** on one Mac. Each keeps its own supported models, tools, sessions, and approvals; the application does not make every model interchangeable with every agent.
+
+**0.2.0-alpha.1 · Blueprint 2.0 early source snapshot.** My AI brings resources and recent work together; the specialist can use Codex or DSH within one application history. Connection requirements and supported operations remain agent-specific. Configure a native agent you already use, then verify a real reply and same-conversation continuation in your own environment.
 
 **Early development release · macOS/POSIX · Python 3.11+**. The interface is still mainly Chinese; English covers basic navigation, management, and settings labels. Documentation is available in both languages.
 
 **Installing for the first time?** Give [this repository](https://github.com/icecinz/white-rabbit) to your agent and ask it to follow the [installation checklist](docs/install-agent.md). The root [AGENTS.md](AGENTS.md) points to the same checklist. The fictional demo below is a separate interface preview.
 
-![White Rabbit with fictional demo conversations](assets/demo.png)
+![My AI overview in the running application](assets/home.png)
 
-*Invented demo conversations and explicitly marked, rule-based replies. This screenshot is not evidence of real model performance.*
+*Running application with invented resources and work, not a design mockup. Configure and verify it in your own environment.*
 
 ## What you can do
 
+- **See your AI and recent work:** My AI summarizes agents, discovered models, memory profiles, and recent work. Open a resource's management details, continue a supported conversation, or read its exactly bound saved text.
 - **Continue native-agent work:** use experimental connections for Codex, Hermes, Pi, Claude Code, and DeepSeek Harness, preserving their native sessions, tools, and approval rules.
 - **Find and organize project material:** search indexed histories, group related conversations, and keep Markdown references or snapshots alongside files and results.
 - **Continue between Codex and Hermes:** preview selected text, complete registered files, and original images as fixed snapshots. Prepare a draft first; only Send creates the new native conversation, with a route back to its source.
 - **Choose AI and memory separately:** saved AI profiles describe agent/model settings; memory profiles independently select additional long-term material.
-- **Ask the Rabbit specialist:** use a dedicated management conversation to change supported settings, organize work, or hand a task to an existing native conversation.
+- **Ask the Rabbit specialist:** enable one management conversation and choose Codex or DSH as its core. Both use the application's supported management interfaces; ordinary-agent support and specialist-core support are tracked separately.
 - **Reuse the parts:** take an independently packaged core into another Python application without adopting the entire White Rabbit host.
 
-Codex, Hermes, and Pi now keep the same composer path from the home draft into a native conversation: saved AI/memory choices, files, sending, and continuation after refresh. Codex also has per-draft/per-conversation model and reasoning adjustments; a specialist suggestion counts as applied only after the originating page saves it and returns a receipt. Claude Code and DSH retain their existing entries; their unified-composer migration is not included in this release. [Daily workflow](docs/native-agents.md#daily-workflow)
+Each route retains its own sending, approval, and recovery protocol. Codex supports per-draft/per-conversation model and reasoning adjustments; a specialist suggestion counts as applied only after the originating browser saves it and returns a receipt. Claude selects models without overriding native reasoning; DSH model changes remain unavailable, while its read-only memory selection is supported. [Daily workflow](docs/native-agents.md#daily-workflow)
 
 ## The idea and the current scope
 
 | Area | Available in the current implementation | Still a goal or limited |
 | --- | --- | --- |
-| One entry for AI work | Five native-agent routes; status and navigation for White Rabbit's own connected work | Direct control of ongoing Codex desktop or WorkBuddy tasks is not connected |
+| Ordinary AI conversations | Native routes for Codex, Hermes, Pi, Claude Code, and DSH | Login, model access, tools, attachments, and recovery are agent-specific; this is not universal support |
+| Specialist core | Codex and DSH share one application history while retaining separate native sessions; both use supported management interfaces | Tool/model availability depends on the native setup. DSH specialist shared-memory selection is unconnected; Hermes is a later option. Switching is not complete native-state migration |
+| Find existing work | My AI resource summaries and exact-item navigation; supported continuation and saved-text reading | Overview uses saved/cached facts and can remain unverified; direct control of ongoing external desktop tasks is not connected |
+| Open in the original application | Existing local Codex links identify the original thread | System handoff and the installed target application need verification in each environment. Other agents have no general opening guarantee; opening is navigation, not control of a live task |
 | External work discovery | Optional, manual HAPI Hub discovery and links to the original session page | HAPI sending, approvals, and stopping remain in HAPI; discovery is not control |
 | Context and memory | Codex ↔ Hermes continuation with selected materials; Hindsight and separate Hermes document-memory routes | Continuation does not migrate internal agent state; Mem0 still needs configuration and has no automatic saving |
 | Human and AI operations | Shared application interfaces, versioned settings, and the dedicated specialist | GUI-only application operation and AI/mixed interface modes are not connected |
-| Devices | Local Mac; phone access through a separately configured IM.codes route | Cross-computer routing, device management, and remote wake-up remain future work |
+| Product scope | Local Mac; device, wake-up, phone-preview entries and IM.codes-specific compatibility removed from this source snapshot | Historical phone access was not cross-device AI control; cross-computer takeover and wake-up were never implemented |
+
+Opening **My AI** reads existing directories, indexes, and cached execution facts. It does not start an agent, send a probe message, or read memory content. A discovered model is not a tested model, and unobserved external work is not assumed idle. Start with **New conversation**, or use **Connect your first agent** when nothing is connected; the rabbit icon returns to the overview.
 
 ```mermaid
 flowchart TD
-    YOU["You: one entry"] --> UI["5 · Interface"]
+    YOU["You: one place for your AI"] --> UI["5 · Interface"]
     UI --> HOST["Local application host"]
     UI --> SPECIALIST["7 · Rabbit specialist"]
     SPECIALIST --> HOST
@@ -52,16 +60,20 @@ flowchart TD
     HOST --> MEMORY["4 · Memory"]
     HOST --> RUNTIME["3 · Native runtime"]
     RUNTIME --> AGENTS["Codex · Hermes · Pi · Claude Code · DSH"]
-    AGENTS --> MAC["Current: online Mac"]
-    HOST -.-> REMOTE["6 · Remote I/O"]
-    REMOTE -.-> DEVICES["Goal: your other devices"]
+    AGENTS --> MAC["Current scope: local Mac"]
 ```
 
-*Dotted lines show the broader device goal. The existing mobile route opens the same Mac service through IM.codes.*
+*Six active core responsibilities keep their existing numbers. Former module 6, Remote I/O, is historical; it is not another runtime package.*
 
 ## A specialist instead of more settings buttons
 
-The **Rabbit specialist** has one fixed native Codex conversation. It uses the same application interfaces as the UI; each module still owns its data and rules. It does not maintain a second settings system.
+The **Rabbit specialist** manages White Rabbit through the same application interfaces as the UI; each module still owns its data and rules. Its continuous application history can use **Codex or DSH**, with a separate native session and received-text position for each core. It uses the existing native login and configuration, not a second settings system.
+
+Choose the core in **Settings → Rabbit specialist**. Missing conversation prose is supplied to the selected core; historical tool calls remain records and are not replayed as commands. A successful switch adds one boundary in the same history. Busy, pending-approval, unknown-result, and capacity conditions block switching; a failed target connection retains the previous core, history, and draft. Keep the original operation ID when a switch or send is uncertain; do not replay a command to discover its outcome.
+
+![Specialist core selection in settings](assets/specialist.png)
+
+*Running application with invented resources and work, not a design mockup. Configure and verify it in your own environment.*
 
 You can ask, for example:
 
@@ -72,7 +84,7 @@ You can ask, for example:
 
 Some infrequent settings are presented as a readable catalog with current values and examples, rather than another row of switches. Ask the specialist to apply a supported change. It reads the current version, uses the bounded interface, and reports the outcome. Login, authorization, and native approvals still belong to the person using the application.
 
-**Check and update** is a separate manual report: the program gathers four scoped metadata facts, an available tool-free text connection analyzes that frozen evidence once, and the application saves the report with its sources. Refreshing reads that report instead of rerunning the analysis; changed or missing evidence remains marked. The management specialist is still Codex; the current report-analysis route uses the existing Claude-configured text adapter, with its execution source shown separately. This check does not change settings or test every model/tool. [How the report works](docs/specialist.md#manual-status-report)
+**Check and update** is a separate manual report: the program gathers four scoped metadata facts, an available tool-free text connection analyzes that frozen evidence once, and the application saves the report with its sources. Refreshing reads that report instead of rerunning the analysis; changed or missing evidence remains marked. Analysis uses the existing Claude-configured text adapter, separately from the chosen management core. The current specialist-tool fact observes the Codex-side holder; it does not certify all DSH tools. The report does not change settings or test every model/tool. [How the report works](docs/specialist.md#manual-status-report)
 
 [Meet the specialist](docs/specialist.md)
 
@@ -103,7 +115,7 @@ RABBIT_PYTHON="/absolute/path/to/python3.11"
 "$RABBIT_PYTHON" -B 原型/install_local.py check --source-dir "$PWD/原型"
 ```
 
-A fresh check normally asks for a connection configuration. Follow the [checklist](docs/install-agent.md) and [connection examples](docs/native-agents.md) to configure one agent, check, install, and open. The existing local installer provides login startup, a private runtime copy, persistent data, and a reusable entry. **The specialist, extra memory services, and mobile access are optional later steps.**
+A fresh check normally asks for a connection configuration. Follow the [checklist](docs/install-agent.md) and [connection examples](docs/native-agents.md) to configure one agent, check, install, and open. The existing local installer provides login startup, a private runtime copy, persistent data, and a reusable entry. **The specialist and extra memory services are optional later steps.**
 
 Next time, double-click `~/.imcodes/one-ai/打开小白兔.command`; no terminal variable needs to persist. Alternatively use the Python absolute path selected at installation (replace the example):
 
@@ -114,6 +126,10 @@ Next time, double-click `~/.imcodes/one-ai/打开小白兔.command`; no terminal
 Data lives in `~/.imcodes/one-ai`; this legacy directory name does not require IM.codes. Preserve existing settings and records during updates, and identify an existing service before resolving port conflicts. Persistent installation currently supports macOS; other POSIX systems have only the manual foreground route. Windows is unsupported.
 
 ## Interface preview only: fictional demo
+
+![Fictional rule-based interface demo](assets/demo.png)
+
+*A separate rule-based preview; it does not call a real agent.*
 
 ```sh
 git clone https://github.com/icecinz/white-rabbit.git
@@ -131,7 +147,7 @@ The demo does not read native histories or contact a model. It uses a temporary 
 
 ## Use a core in your own project
 
-There are **seven responsibilities and six extracted, installable cores**. Content, preparation, runtime, memory, UI, and specialist each have their own directory and `pyproject.toml`; the remaining host assembly is explicit. Remote I/O is not a seventh extracted package.
+There are **six extracted, installable cores**: content, preparation, runtime, memory, UI, and specialist. Each has its own directory and `pyproject.toml`; the remaining host assembly is explicit. The original numbering is retained, with Remote I/O as historical module 6, not a seventh installable package. The new application-specific specialist coordinator still requires host adapters; independently reusable interfaces and host integration are listed separately.
 
 For example, install only the content core from this checkout:
 
@@ -150,5 +166,7 @@ It provides file snapshots, content storage, publication receipts, and Markdown 
 - Windows, automatic Markdown-body synchronization, and complete native feature/performance equivalence are not current release promises.
 
 [Architecture](ARCHITECTURE.md) · [Design](docs/design.md) · [Specialist](docs/specialist.md) · [Native agents](docs/native-agents.md) · [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
+
+[A note from the remote-access experiment](docs/history/remote/README.md)
 
 White Rabbit's own code uses the [MIT License](LICENSE). Bundled components retain their original notices; see [third-party notices](THIRD_PARTY_NOTICES.md).

@@ -652,6 +652,22 @@ class HistoryView:
             raise ValueError('History index changed during snapshot')
         return {'agent': agent, 'session_ids': identities, 'indexed_at': indexed_at, 'sources': sources}
 
+    def indexed_message_position(self, agent, session_id, message_id):
+        """Position of one exact indexed message; never inspect native files."""
+        agent = _agent(agent, allow_all=False)
+        if (type(session_id) is not str or not 1 <= len(session_id) <= 256
+                or type(message_id) is not str or not 1 <= len(message_id) <= 512):
+            raise ValueError('Invalid indexed message identity')
+        with closing(self._open()) as connection:
+            row = connection.execute('SELECT * FROM app_history_messages WHERE agent=? AND session_id=? AND message_id=?',
+                (agent, session_id, message_id)).fetchone()
+            if row is None:
+                return None
+            position = history_position(agent, row)
+            return connection.execute('SELECT COUNT(*) FROM app_history_messages WHERE agent=? AND session_id=? AND ('
+                + history_order(agent) + ')<(' + ','.join('?' for _ in position) + ')',
+                (agent, session_id, *position)).fetchone()[0]
+
     def get_session(self, agent, session_id, offset=0, limit=100, *, for_context=False):
         agent = _agent(agent, allow_all=False)
         if not isinstance(session_id, str) or not session_id or len(session_id) > 256:

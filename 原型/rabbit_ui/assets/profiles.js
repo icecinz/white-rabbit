@@ -447,9 +447,14 @@
       captured.saving = true; captured.error = ""; renderPicker();
       try {
         const ok = await onChooseNative(agent, captured.view, isCurrent, selected);
+        if (ok === true) {
+          // Applying this choice advances Home's view; only this picker and
+          // workspace still own its successful dismissal.
+          if (picker === captured && String(getWorkspace() || "") === scope) close(false);
+          return;
+        }
         if (!isCurrent()) { if (sameView()) captured.error = changedNotice; return; }
-        if (ok === true) close(false);
-        else captured.error = "所选配置尚未采用，请重新选择。";
+        captured.error = "所选配置尚未采用，请重新选择。";
       } catch (error) {
         if (sameView()) captured.error = isCurrent() ? readable(error, "所选配置尚未采用，请重新选择。") : changedNotice;
       } finally { captured.saving = false; if (picker === captured) renderPicker(); }
@@ -678,10 +683,18 @@
       syncWorkspace();
       if (editor?.kind === "memory" && memoryEditorBusy(editor)) return;
       const original = existing ? memoryProfile(existing) : null;
-      const connection = data?.memory_connections.find(row => row.available) || data?.memory_connections[0];
-      editor = { kind: "memory", workspace, original, copy, document: null, lockedMode: !copy && original?.locked_mode === true, saving: false, error: "", uncertain: false, value: original ? memoryEditFields(original) : { name: "", description: "", habits: "", program: connection?.program || "hindsight", connection_id: connection?.id || "local/hindsight", mode: "read_only" } };
+      const connection = data?.memory_connections.find(row => row.available);
+      editor = { kind: "memory", workspace, original, copy, document: null, lockedMode: !copy && original?.locked_mode === true, saving: false, error: "", uncertain: false, value: original ? memoryEditFields(original) : { name: "", description: "", habits: "", program: connection?.program || "", connection_id: connection?.id || "", mode: "read_only" } };
       if (copy && original?.source_kind === nativeMemoryKind && original.description === "只读Hermes原有记忆内容；Hermes仍可按原设置更新，本入口不提交保存。") editor.value.description = "";
       if (copy) editor.value.name = Array.from(editor.value.name + " 副本").slice(0, 40).join(""); renderManager(); manager?.querySelector("input")?.focus();
+    }
+    async function openMemoryDocuments(row) {
+      openMemoryEditor(row);
+      const captured = editor;
+      if (captured?.kind !== "memory" || captured.original?.id !== row.id || captured.original?.program !== "hermes_files" || captured.copy || captured.document) return;
+      await readMemoryDocument(captured, "MEMORY.md");
+      if (editor === captured && sameWorkspace(captured.workspace) && captured.document?.sha256 && !captured.document.loading)
+        manager?.querySelector(".profile-memory-document")?.focus();
     }
     function validMemoryEditor(value) {
       return !!(typeof value.name === "string" && value.name.trim() && Array.from(value.name).length <= 40 && !/[\x00-\x1f\x7f]/.test(value.name) && typeof value.description === "string" && Array.from(value.description).length <= 200 && !value.description.includes("\0") && typeof value.habits === "string" && Array.from(value.habits).length <= 4000 && !value.habits.includes("\0") && validMemoryProgram(value));
@@ -762,7 +775,7 @@
     function memoryEditorPanel() {
       const captured = editor, value = captured.value, panel = aiControl(node("section", "profile-editor")), head = node("div", "rbw-title-row");
       const close = humanControl(action("收起", () => { if (!memoryEditorBusy(captured)) { editor = null; renderManager(); } }));
-      close.dataset.memoryEditorClose = "true"; close.disabled = memoryEditorBusy(captured); head.append(node("h3", "", captured.copy ? "复制为新空记忆库" : captured.original ? "编辑记忆配置" : "新建记忆配置"), close); panel.append(head);
+      close.dataset.memoryEditorClose = "true"; close.disabled = memoryEditorBusy(captured); head.append(node("h3", "", captured.original && !captured.copy ? "编辑记忆配置" : "新建独立记忆"), close); panel.append(head);
       const grid = node("div", "profile-editor-grid");
       function textField(label, field, limit, multiline = false, mount = grid) {
         const wrapper = node("label", "profile-field profile-wide"), control = node(multiline ? "textarea" : "input"); control.value = value[field]; control.maxLength = limit * 2; if (multiline) control.rows = field === "habits" ? 5 : 2; control.setAttribute("aria-label", label); wrapper.append(node("span", "", `${label}${field === "name" ? "" : "（可选）"}`), control);
@@ -771,6 +784,7 @@
       textField("名称", "name", 40); textField("备注", "description", 200, true);
       const programs = data?.memory_connections.map(row => [row.program, memoryProgramLabel(row.program) + (row.available ? "" : "（待配置）")]) || [];
       if (captured.original && !programs.some(row => row[0] === value.program)) programs.push([value.program, memoryProgramLabel(value.program)]);
+      if (programs.length && !value.program) programs.unshift(["", "选择记忆程序", true]);
       const program = selectField("记忆程序", programs.length ? programs : [["", "尚未接入记忆程序", true]], programs.length ? value.program : "", next => {
         if (captured.original || captured.saving) return;
         const selected = data?.memory_connections.find(row => row.program === next);
@@ -779,20 +793,22 @@
       program.querySelector("select").setAttribute("aria-label", "记忆程序"); program.querySelector("select").disabled = !!captured.original || captured.saving || !programs.length;
       grid.append(program); panel.append(grid);
       const settings = node("fieldset", "profile-program-config"), settingsGrid = node("div", "profile-editor-grid"); settings.append(node("legend", "", "程序配置"), settingsGrid);
-      const connection = data?.memory_connections.find(row => row.id === value.connection_id), connectionField = node("div", "profile-field profile-wide"); connectionField.append(node("span", "", "服务连接"), node("strong", "", connection?.label || memoryProgramLabel(value.program))); if (connection && !connection.available) connectionField.append(node("p", "profile-note", "待配置" + (connection.reason ? " · " + connection.reason : ""))); settingsGrid.append(connectionField);
+      const connection = data?.memory_connections.find(row => row.id === value.connection_id), connectionField = node("div", "profile-field profile-wide");
+      if (value.program) { connectionField.append(node("span", "", "服务连接"), node("strong", "", connection?.label || memoryProgramLabel(value.program))); if (!connection?.available) connectionField.append(node("p", "profile-note", "待配置" + (connection?.reason ? " · " + connection.reason : ""))); settingsGrid.append(connectionField); }
       if (captured.lockedMode || value.program !== "hindsight") {
         const modeField = node("div", "profile-field profile-wide"); modeField.append(node("span", "", "使用方式"), node("strong", "", captured.lockedMode ? "只读取（原有记忆固定只读）" : "只读取")); settingsGrid.append(modeField);
       } else { const mode = selectField("使用方式", [["read_only", "只读取"], ["read_write", "读取并记住"]], value.mode, next => { value.mode = next; renderManager(); }); mode.querySelector("select").setAttribute("aria-label", "使用方式"); settingsGrid.append(mode); }
-      if (value.program !== "hermes_files") textField("身份与习惯", "habits", 4000, true, settingsGrid); panel.append(settings);
+      if (value.program && value.program !== "hermes_files") textField("身份与习惯", "habits", 4000, true, settingsGrid); if (value.program) panel.append(settings);
       if (value.program === "hermes_files") {
+        settings.append(node("p", "profile-note", "这份配置使用独立文档，不改 Hermes 自身文件。"));
         if (captured.original && !captured.copy) settings.append(memoryDocumentPanel(captured));
         else settings.append(node("p", "profile-note", "保存配置后可编辑 MEMORY.md 和 USER.md。"));
       }
-      if (captured.copy) settings.append(node("p", "profile-note", "新建独立空库，不复制原库的数据。"));
+      if ((!captured.original || captured.copy) && value.program !== "hermes_files") settings.append(node("p", "profile-note", "新建独立内容，不复制原库的数据。"));
       if (captured.lockedMode) settings.append(node("p", "profile-note", "Hermes原有记忆只读；Hermes仍可按原设置更新。"));
       if (value.mode === "read_write") settings.append(node("p", "profile-note", connection?.processing_notice || "保存新交互会提交给已配置的外部提取服务。"));
       const error = node("p", "profile-error", captured.error); error.hidden = !captured.error; error.setAttribute("role", "alert"); panel.append(error);
-      const actions = humanControl(node("div", "profile-actions")), save = aiControl(action(captured.saving ? "正在保存…" : captured.copy ? "保存新空库配置" : "保存记忆配置", () => saveMemoryEditor(captured), "rbw-button rbw-primary"));
+      const actions = humanControl(node("div", "profile-actions")), save = aiControl(action(captured.saving ? "正在保存…" : "保存记忆配置", () => saveMemoryEditor(captured), "rbw-button rbw-primary"));
       const cancel = action("取消", () => { if (!memoryEditorBusy(captured)) { editor = null; renderManager(); } }); cancel.dataset.memoryEditorClose = "true"; cancel.disabled = memoryEditorBusy(captured);
       save.dataset.memoryProfileSave = "true";
       const refreshSave = () => { save.disabled = memoryProfileSaveBlocked(captured); }; refreshSave(); actions.append(cancel, save); panel.append(actions); return panel;
@@ -858,44 +874,53 @@
     }
     function renderMemoryManager() {
       if (editor?.kind === "memory") { manager.append(memoryEditorPanel()); return; }
-      const cards = node("div", "profile-card-grid");
-      const none = aiControl(node("article", "rbw-card")); none.append(node("h3", "", "不使用长期记忆"), node("p", "profile-note", "当前聊天上文照常保留。")); cards.append(none);
+      const sources = data?.native_memory_sources.filter(source => !source.linked_profile_id) || [];
+      const cards = node("div", "profile-card-grid"), sourceCards = node("div", "profile-card-grid");
       function appendNativeCounts(card, source) {
         const counts = [source.facts === null ? "事实数未确认" : `${source.facts} 条事实`, source.documents === null ? "文档数未确认" : `${source.documents} 份文档`];
         card.append(node("p", "rbw-card-meta", `服务统计：${counts.join(" · ")}。不表示已全部读取。`));
       }
-      for (const source of data?.native_memory_sources || []) {
-        if (source.linked_profile_id) continue;
+      for (const source of sources) {
         const card = aiControl(node("article", "rbw-card")); card.dataset.nativeMemorySourceId = source.id;
-        card.append(node("h3", "", source.name), node("p", "profile-note", "接入后可给不同AI使用。小白兔只读取原有内容；Hermes仍可按原设置更新，不迁移或复制原库。"));
-        appendNativeCounts(card, source);
-        if (!source.available) card.append(node("p", "profile-note", source.reason || "原有记忆暂不可用，接入与草稿没有改变。"));
+        card.append(node("h3", "", source.name), node("p", "profile-note", "Hindsight · 已有来源 · 只读取"));
+        if (!source.available) card.append(node("p", "profile-note", source.reason || "原有记忆暂不可用。"));
         const linked = linkedNativeProfile(source), uncertain = nativeAttach.unknownSources.has(nativeSourceKey(source)), attach = action(linked ? "已接入Hermes原有记忆（只读）" : nativeAttach.saving ? "正在接入…" : "接入Hermes原有记忆（只读）", attachNativeMemory, "rbw-button rbw-primary"); attach.disabled = !!linked || !source.available || nativeAttach.saving || uncertain; card.append(attach);
         if (uncertain) card.append(node("p", "profile-note", "接入结果尚未确认；刷新只检查配置列表，不会重复提交。"));
         else if (nativeAttach.unknownSources.size) card.append(node("p", "profile-note", "之前来源的接入结果仍待确认。当前来源须明确接入，不会自动重复提交。"));
         if (nativeAttach.error && nativeAttach.errorSourceRef === source.source_ref) { const note = node("p", "profile-error", nativeAttach.error); note.setAttribute("role", "alert"); card.append(note); }
-        if (nativeAttach.notice && nativeAttach.confirmedSourceRef === source.source_ref) card.append(node("p", "profile-note", nativeAttach.notice)); cards.append(card);
+        const details = node("details", "profile-identifiers"); details.append(humanControl(node("summary", "", "更多")), node("p", "profile-note", "只读取已有来源，不迁移或复制；Hermes仍可按原设置更新。"));
+        appendNativeCounts(details, source);
+        if (nativeAttach.notice && nativeAttach.confirmedSourceRef === source.source_ref) details.append(node("p", "profile-note", nativeAttach.notice));
+        card.append(details); sourceCards.append(card);
       }
-      for (const row of data?.memory_profiles || []) {
-        if (row.id === "none") continue;
+      if (sources.length) manager.append(node("h3", "", "接入已有来源"), sourceCards);
+      const saved = data?.memory_profiles.filter(row => row.id !== "none") || [];
+      if (sources.length && saved.length) manager.append(node("h3", "", "已保存配置"));
+      for (const row of saved) {
         const card = aiControl(node("article", "rbw-card")); card.dataset.memoryProfileId = row.id;
         const bankLabel = row.program === "mem0" && !row.available ? "待配置" : { empty: "当前记忆库为空", ready: "已有记忆资料", unavailable: "记忆库暂不可用", unknown: "记忆库状态尚未确认" }[row.bank_state];
-        card.append(node("h3", "", row.name), node("p", "profile-note", `${current().memory_profile_id === row.id ? "本对话已选 · " : ""}第 ${row.revision} 版 · ${memoryProgramLabel(row.program)} · ${memoryModeLabel(row.mode)}`));
+        card.append(node("h3", "", row.name));
         if (row.description) card.append(node("p", "rbw-card-meta", row.description));
+        card.append(node("p", "profile-note", `${memoryProgramLabel(row.program)} · ${memoryModeLabel(row.mode)}`));
+        if (!row.available) card.append(node("p", "profile-note", row.program === "mem0" ? "待配置" : "暂不可用"));
+        const actions = humanControl(node("div", "profile-actions"));
+        actions.append(action(row.program === "hermes_files" ? "编辑记忆文档" : "打开程序配置", () => row.program === "hermes_files" ? openMemoryDocuments(row) : openMemoryEditor(row))); card.append(actions);
+        const details = node("details", "profile-identifiers"); details.append(humanControl(node("summary", "", "更多")), node("p", "profile-note", `配置第 ${row.revision} 版 · ${row.locked_mode ? "接入已有来源" : "独立记忆内容"}`));
         const connectionLabel = row.connection_label && row.connection_label !== memoryProgramLabel(row.program) ? row.connection_label : "";
-        card.append(node("p", "rbw-card-meta", [connectionLabel, row.bank_label || "独立记忆范围", bankLabel].filter(Boolean).join(" · ")));
-        if (row.locked_mode) card.append(node("p", "profile-note", "Hermes原有记忆，只读接入；Hermes仍可按原设置更新。"));
+        details.append(node("p", "rbw-card-meta", [connectionLabel, row.bank_label || "独立记忆范围", bankLabel].filter(Boolean).join(" · ")));
+        if (row.locked_mode) details.append(node("p", "profile-note", "Hermes原有记忆，只读接入；Hermes仍可按原设置更新。"));
         const nativeSource = row.source_kind === nativeMemoryKind && data?.native_memory_sources.find(source => source.linked_profile_id === row.id);
         if (nativeSource) {
-          appendNativeCounts(card, nativeSource);
-          if (nativeAttach.notice && nativeAttach.confirmedProfileId === row.id && nativeAttach.confirmedSourceRef === nativeSource.source_ref) card.append(node("p", "profile-note", nativeAttach.notice));
+          appendNativeCounts(details, nativeSource);
+          if (nativeAttach.notice && nativeAttach.confirmedProfileId === row.id && nativeAttach.confirmedSourceRef === nativeSource.source_ref) details.append(node("p", "profile-note", nativeAttach.notice));
         }
-        if (!row.available) card.append(node("p", "profile-note", row.reason || "当前不可用；配置和草稿仍保留。"));
-        const actions = humanControl(node("div", "profile-actions")); actions.append(action("编辑记忆配置", () => openMemoryEditor(row))); card.append(actions);
-        const details = node("details", "profile-identifiers"); details.append(humanControl(node("summary", "", "更多")));
-        const secondary = humanControl(node("div", "profile-actions")); secondary.append(action("复制为新空库", () => openMemoryEditor(row, true)), specialistAction("memory", row)); details.append(secondary); card.append(details); cards.append(card);
+        if (!row.available) details.append(node("p", "profile-note", row.reason || "当前不可用；配置和草稿仍保留。"));
+        const secondary = humanControl(node("div", "profile-actions"));
+        if (row.program === "hermes_files") secondary.append(action("编辑名称与备注", () => openMemoryEditor(row)));
+        secondary.append(action("从此配置新建独立记忆", () => openMemoryEditor(row, true)), specialistAction("memory", row)); details.append(secondary); card.append(details); cards.append(card);
       }
       manager.append(cards);
+      if (data && !saved.length && !sources.length) manager.append(node("p", "profile-note", "还没有记忆配置。"));
     }
     function renderManagement(container, kind = "ai") { if (manager !== container || managerKind !== kind) resetNativeRefresh(); manager = container; managerKind = kind; renderManager(true); if (!data) load().catch(error => { if (manager?.isConnected !== false) { manager.append(aiControl(node("p", "profile-error", readable(error, "配置列表暂时无法读取，已有配置仍保留。")))); } }); }
     function renderManager(force = false) {
@@ -905,7 +930,7 @@
       const refresh = aiControl(action("刷新配置", () => load(true).catch(error => { manager?.append(aiControl(node("p", "profile-error", readable(error, "配置列表暂时无法读取。")))); }))); top.append(refresh);
       if (typeof onMemoryManual === "function") top.append(aiControl(action("使用手册", () => onMemoryManual(managerKind === "memory" ? "memory" : "ai"))));
       if (managerKind === "ai") { const add = action("新建配置", () => openEditor(), "rbw-button rbw-primary"); add.disabled = !!pendingCreation || creationInvalid || creationBusy; top.append(add); } else {
-        if (memoryEnabled() && editor?.kind !== "memory") top.append(action("新建记忆配置", () => openMemoryEditor(), "rbw-button rbw-primary"));
+        if (memoryEnabled() && editor?.kind !== "memory") top.append(action("新建独立记忆", () => openMemoryEditor(), "rbw-button rbw-primary"));
       } manager.replaceChildren(top);
       if (managerKind === "memory") {
         renderMemoryManager(); return;

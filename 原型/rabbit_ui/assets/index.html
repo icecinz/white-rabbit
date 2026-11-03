@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="/work_status.css">
   <link rel="stylesheet" href="/composer_shell.css">
   <link rel="stylesheet" href="/soft_paper.css">
+  <link rel="stylesheet" href="/my_ai.css">
   <script src="/agents.js" defer></script>
   <script src="/markdown-it.min.js" defer></script>
   <script src="/rich_text.js" defer></script>
@@ -54,6 +55,9 @@
   <script src="/native_text_quote.js" defer></script>
   <script src="/native_file_quote.js" defer></script>
   <script src="/continuations.js" defer></script>
+  <script src="/native_index_text.js" defer></script>
+  <script src="/my_ai.js" defer></script>
+  <script src="/my_ai_page.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -61,7 +65,7 @@
     <button class="sidebar-backdrop" id="sidebar-backdrop" aria-label="关闭会话列表" hidden></button>
     <aside class="sidebar" id="sidebar" aria-label="对话与导航">
       <div class="brand">
-        <img class="brand-mark" src="/rabbit-app-1024.png" alt="" width="40" height="40">
+        <button type="button" id="home-logo" class="brand-home" aria-label="返回我的 AI"><img class="brand-mark" src="/rabbit-app-1024.png" alt="" width="40" height="40"></button>
         <div><h1>小白兔</h1><p id="brand-agents"></p></div>
         <button class="icon-button close-sidebar" id="close-sidebar" aria-label="关闭会话列表">×</button>
       </div>
@@ -70,7 +74,7 @@
         <div id="specialist-composer-mount"></div>
       </section>
       <nav class="main-navigation" aria-label="主要页面">
-        <button id="conversations-nav" class="page-nav active" data-page="conversations" aria-current="page">对话</button>
+        <button id="conversations-nav" class="page-nav" data-page="conversations">对话</button>
         <button id="management-nav" class="page-nav" data-page="management">管理</button>
         <button id="settings-nav" class="page-nav" data-page="settings">设置</button>
       </nav>
@@ -105,6 +109,7 @@
       </header>
 
       <p class="demo-mode-banner" id="demo-mode-banner" role="note" hidden>演示模式 · 仅虚构数据与模拟回答，不连接真实 AI；退出后清理本次数据。</p>
+      <section id="my-ai-panel" class="my-ai-panel" hidden aria-label="我的 AI"></section>
       <section id="workspace-panel" hidden aria-label="管理和设置"></section>
       <section id="native-chats-panel" hidden aria-label="原生对话"></section>
       <section id="continuation-panel" hidden aria-label="接续草稿"></section>

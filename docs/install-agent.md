@@ -24,6 +24,8 @@ Image support also needs Pillow in the service Python. Preflight reports `servic
 
 Use [native-agent setup](native-agents.md) to confirm this agent's paths and version requirements. Preserve its effective provider, model, tools, and permissions. For example, keep Claude Code's existing CC Switch configuration instead of replacing it with another default.
 
+The persistent connection JSON supports `home` only for Hermes and DSH. The login service does not automatically save `CODEX_HOME` or `CLAUDE_CONFIG_DIR`; setting them in a terminal does not establish that the login service uses the same home. If the original account and routing environment cannot be confirmed, pause that route or use another already verified existing agent. Do not fall back to defaults, migrate credentials, or copy secrets.
+
 If login, API access, or dependencies are missing, name the missing requirement and let the user complete necessary authentication locally. Do not ask for a key in chat. Mark unverified models or connections as needing setup.
 
 ## 3. Install and leave an opening method
@@ -59,14 +61,18 @@ Keep the source checkout for documentation and updates. An update retains the sa
 
 Keep White Rabbit's data separate from the agent's original files and record selected environments with absolute paths. Check that the page, launcher, and data directory exist and that the opening method still works after this terminal closes.
 
-Configure only the chosen agent first. Memory, phone access, the Rabbit specialist, and additional agents can follow after real chat works. A person without Codex can start with their existing Hermes or DSH; report that the Codex specialist remains unconfigured.
+Configure only the chosen ordinary agent first. Memory, an explicitly configured Rabbit specialist core, and additional agents can follow after real chat works. A person without Codex can start with their existing Hermes or DSH; ordinary DSH access does not automatically configure its specialist role. State which specialist core, if any, has actually been configured and verified. Phone-preview integration is historical, not an installation option.
 
 ## 4. Verify through the real interface
+
+A fresh configuration prefers an explicitly enabled native entry whose default parameters can be checked. Select one explicitly when none qualifies. Preserve an existing user's saved default; Codex is not an installation prerequisite.
 
 1. Open the installed application, select the configured real native agent, and create a new acceptance conversation.
 2. Send a short request with a random code, such as “This acceptance code is paperboat7318. Briefly confirm it; do not use tools.” Confirm an actual reply from the original agent. Record its reported model information; do not guess an unreported model or reasoning level.
 3. Reload the page and open the same conversation. Confirm the exchange remains, then ask “What was the acceptance code?” Check the continuing answer in the same native session.
 4. Reopen using the method you will give the user, without reconstructing a long command. If the service itself was not restarted, report page-reload verification rather than claiming restart recovery.
+
+If a reopened Hermes conversation shows “Restore original session,” explain that native recovery may also continue unfinished work. Let the user explicitly restore it, then check the existing content; do not resend a question to make history appear.
 
 When a send result is unknown, check its original identifier rather than resending to find out. Login, authorization, and native approvals belong to the user. If browser access or a required permission is unavailable, explicitly leave that acceptance step for them.
 

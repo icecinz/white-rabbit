@@ -53,8 +53,8 @@ class DemoAdapter:
 
 
 class DemoService(Service):
-    def status(self):
-        return dict(super().status(), demo_mode=True)
+    def status(self, *, cached_only=False):
+        return dict(super().status(cached_only=cached_only), demo_mode=True)
 
     def refresh(self):
         # The fixed invented index is already complete. Never discover HOME.

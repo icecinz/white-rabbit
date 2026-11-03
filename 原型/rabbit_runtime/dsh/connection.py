@@ -1,5 +1,6 @@
 """Trusted original DSH CLI/profile startup; no plugin or model startup here."""
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import re
@@ -57,7 +58,7 @@ class DshNativeConnection:
         if type(self.expected_version) is not str or re.fullmatch(r'\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?', self.expected_version) is None:
             raise ValueError('An explicit installed package version is required.')
 
-    def create_rpc(self, *, cwd, session_id, agent_preset=None, expected_native_path=None):
+    def create_rpc(self, *, cwd, session_id, agent_preset=None, expected_native_path=None, management=None):
         directory = _directory(cwd)
         identity = validate_session_id(session_id)
         if agent_preset is not None and (type(agent_preset) is not str or not agent_preset
@@ -76,6 +77,15 @@ class DshNativeConnection:
             if len(str(original)) > 8192:
                 raise ValueError('The original session path exceeds the native boundary.')
             argv += ['--expected-native-path', str(original)]
+        if management is not None:
+            if (type(management) is not dict or set(management) != {'python', 'script', 'port', 'workspace_id'}
+                    or type(management['port']) is not int or not 1 <= management['port'] <= 65535
+                    or type(management['workspace_id']) is not str
+                    or re.fullmatch(r'[a-f0-9]{64}', management['workspace_id']) is None):
+                raise ValueError('Invalid trusted specialist management scope.')
+            value = dict(management, python=str(_file(management['python'], True)),
+                         script=str(_file(management['script'])))
+            argv += ['--management', json.dumps(value, ensure_ascii=False, separators=(',', ':'))]
         env = dict(os.environ)
         if self.home is not None:
             env['DSH_HOME'] = str(self.home)

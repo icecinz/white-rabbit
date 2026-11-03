@@ -375,10 +375,10 @@ export default {
 async function parentMain() {
   const args = process.argv.slice(2), options = {}
   for (let i = 0; i < args.length; i += 2) {
-    if (!['--cli', '--root', '--session-id', '--cwd', '--version', '--preset', '--expected-native-path'].includes(args[i]) || own(options, args[i]) || typeof args[i + 1] !== 'string') throw new Error('invalid_worker_arguments')
+    if (!['--cli', '--root', '--session-id', '--cwd', '--version', '--preset', '--expected-native-path', '--management'].includes(args[i]) || own(options, args[i]) || typeof args[i + 1] !== 'string') throw new Error('invalid_worker_arguments')
     options[args[i]] = args[i + 1]
   }
-  if (![10, 12, 14].includes(args.length) || !['--cli', '--root', '--cwd'].every(k => isAbsolute(options[k] ?? '')) ||
+  if (![10, 12, 14, 16].includes(args.length) || !['--cli', '--root', '--cwd'].every(k => isAbsolute(options[k] ?? '')) ||
       !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(options['--session-id'] ?? '') || !statSync(options['--cwd']).isDirectory() ||
       options['--preset'] !== undefined && !token(options['--preset']) ||
       options['--expected-native-path'] !== undefined && !nativePath(options['--expected-native-path'])) throw new Error('invalid_worker_arguments')
@@ -392,10 +392,25 @@ async function parentMain() {
   }
   if (!members().some(row => Number(row[0]) === process.pid)) throw new Error('owned_worker_group_required')
   const temp = mkdtempSync(join(tmpdir(), 'rabbit-dsh-carrier-')), patch = join(temp, 'native.patch.json')
-  writeFileSync(patch, JSON.stringify([{ insert: [{ id: 'rabbit-owned-native', name: SELF,
+  let management = null
+  if (options['--management'] !== undefined) {
+    management = JSON.parse(options['--management'])
+    if (!exactKeys(management, ['python', 'script', 'port', 'workspace_id']) || Object.keys(management).length !== 4 ||
+        !nativePath(management.python) || !nativePath(management.script) || !Number.isInteger(management.port) ||
+        management.port < 1 || management.port > 65535 || !/^[a-f0-9]{64}$/u.test(management.workspace_id)) throw new Error('invalid_management_scope')
+    accessSync(management.python, constants.X_OK); accessSync(management.script, constants.R_OK)
+  }
+  const plugins = [{ id: 'rabbit-owned-native', name: SELF,
     config: { packageRoot: options['--root'], cwd: options['--cwd'], sessionId: options['--session-id'],
       ...(options['--preset'] === undefined ? {} : { agentPreset: options['--preset'] }),
-      ...(options['--expected-native-path'] === undefined ? {} : { expectedPath: options['--expected-native-path'] }) } }] }]), { mode: 0o600 })
+      ...(options['--expected-native-path'] === undefined ? {} : { expectedPath: options['--expected-native-path'] }) } }]
+  if (management) plugins.unshift({ id: 'rabbit-specialist-management',
+    name: join(options['--root'], 'node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js'),
+    config: { serverName: 'rabbit_management', transport: 'stdio', command: management.python,
+      args: ['-B', management.script, '--port', String(management.port), '--workspace-id', management.workspace_id],
+      cwd: resolve(management.script, '..'), failOnStartupError: true,
+      reconnect: { enabled: false }, toolCallTimeoutMs: 60000 } })
+  writeFileSync(patch, JSON.stringify([{ insert: plugins }]), { mode: 0o600 })
   const child = fork(options['--cli'], ['--profile', 'web', '--patch', patch, '--host', '127.0.0.1', '--port', '0'], {
     execPath: process.execPath, execArgv: [], cwd: options['--cwd'], env: { ...process.env },
     detached: false, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })

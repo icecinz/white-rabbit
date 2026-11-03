@@ -76,11 +76,12 @@ def _capture(service, agent, attribute, limit):
                     if len(entries) > limit:
                         raise _Incomplete('connection_limit')
     specialist = None
-    if agent == 'codex':
+    if agent in ('codex', 'dsh'):
         with try_locks(service._specialist_lock) as acquired:
             if not acquired:
                 raise _Incomplete('lock_busy')
-            specialist = service.specialist
+            specialist = (service.specialist if agent == 'codex' else
+                getattr(getattr(service, '_specialist_conversation', None), '_dsh', None))
     return manager, tuple(entries), specialist
 
 
@@ -110,7 +111,8 @@ def _observe(agent, manager, entries, specialist):
             value = _raw(native_maintenance.observe_work(holder, agent, **options))
         rows.append(dict(agent=agent, role='chat', chat_id=identity, owner='rabbit', **value))
     if specialist is not None:
-        value = _raw(specialist.observe_work())
+        value = _raw(specialist.observe_work() if agent == 'codex'
+                     else native_maintenance.observe_work(specialist, 'dsh'))
         if value['connection_state'] != 'not_open':
             rows.append(dict(agent=agent, role='specialist', chat_id=None, owner='rabbit', **value))
     return rows
@@ -121,7 +123,8 @@ def snapshot(service):
     agents, works = [], []
     for agent, attribute, limit in _AGENTS:
         enabled = getattr(service, attribute, None) is not None or (
-            agent == 'codex' and getattr(service, 'specialist', None) is not None)
+            agent == 'codex' and getattr(service, 'specialist', None) is not None) or (
+            agent == 'dsh' and getattr(getattr(service, '_specialist_conversation', None), 'dsh_factory', None) is not None)
         reason = None
         try:
             before = _capture(service, agent, attribute, limit)

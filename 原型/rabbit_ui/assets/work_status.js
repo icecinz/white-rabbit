@@ -53,7 +53,7 @@
         || value.external_work !== "not_observed" || typeof value.complete !== "boolean"
         || typeof value.snapshot_at !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)$/.test(value.snapshot_at)
         || !Number.isFinite(Date.parse(value.snapshot_at)) || !Array.isArray(value.agents) || value.agents.length !== 5
-        || !Array.isArray(value.works) || value.works.length > 7) fail();
+        || !Array.isArray(value.works) || value.works.length > 8) fail();
     const byAgent = new Map(), seen = new Set(), counts = {};
     for (const row of value.agents) {
       if (!exact(row, ["agent", "enabled", "complete", "reason"]) || typeof row.agent !== "string" || !Object.hasOwn(agents, row.agent)
@@ -67,7 +67,7 @@
           || !["running", "needs_user", "idle", "unknown"].includes(row.status)
           || !["not_open", "opening", "ready", "failed", "closed", "unknown"].includes(row.connection_state)
           || row.pending_requests !== null && (!Number.isInteger(row.pending_requests) || row.pending_requests < 0 || row.pending_requests > 129)) fail();
-      if (row.role === "specialist") { if (row.agent !== "codex" || row.chat_id !== null) fail(); }
+      if (row.role === "specialist") { if (!["codex", "dsh"].includes(row.agent) || row.chat_id !== null) fail(); }
       else if (!uuid(row.chat_id) || (counts[row.agent] = (counts[row.agent] || 0) + 1) > (row.agent === "codex" ? 2 : 1)) fail();
       const key = `${row.agent}/${row.role}/${row.chat_id}`;
       if (seen.has(key) || !byAgent.get(row.agent).complete && byAgent.get(row.agent).reason !== "partial_observation"
@@ -85,8 +85,9 @@
   const sameSnapshot = (left, right) => !!left && left.complete === right.complete && left.works.length === right.works.length
     && Object.keys(agents).every(agent => ["enabled", "complete", "reason"].every(key => left.agents.get(agent)[key] === right.agents.get(agent)[key]))
     && right.works.every((row, index) => Object.keys(row).every(key => row[key] === left.works[index][key]));
-  function create({ api, getWorkspace, onOpen, translate = value => value, getLabel = () => "" }) {
+  function create({ api, getWorkspace, onOpen, translate = value => value, getLabel = () => "", onSnapshot = null }) {
     if ([api, getWorkspace, onOpen, translate, getLabel].some(value => typeof value !== "function")) throw Error("work_status_entry_required");
+    if (onSnapshot !== null && typeof onSnapshot !== "function") throw Error("work_status_entry_required");
     const node = (tag, cls, content) => { const result = document.createElement(tag); result.className = cls; if (content !== undefined) result.textContent = content; return result; };
     const root = node("section", "rabbit-work-status"), heading = node("h3", "", translate("小白兔已连接的工作"));
     const list = node("ul", "rabbit-work-list"), notice = node("p", "rabbit-work-notice");
@@ -95,10 +96,21 @@
     externalNotice.setAttribute("role", "status"); externalNotice.setAttribute("aria-live", "polite");
     root.setAttribute("data-control-interface", "ai"); root.title = translate("仅观察小白兔已连接的工作；不包括原应用中的其他工作。");
     notice.setAttribute("role", "status"); notice.setAttribute("aria-live", "polite"); root.append(heading, list, notice, external); root.hidden = true;
-    let visible = false, suspended = false, workspace = "", generation = 0, timer = null, flight = null, value = null, receivedAt = null, rendered = null;
+    let visible = false, suspended = false, workspace = "", generation = 0, timer = null, flight = null, value = null, receivedAt = null, rendered = null, agentFilter = null;
     let externalValue = null, externalKnown = false, externalSeen = false, externalFlight = null, externalGeneration = 0, externalRendered = null, externalFocused = true;
     const currentWorkspace = () => { try { const id = getWorkspace(); return typeof id === "string" && id.length > 0 && id.length <= 128 ? id : ""; } catch (_) { return ""; } };
     const active = () => !!(visible && !suspended && !root.hidden && !document.hidden && root.isConnected !== false && workspace && workspace === currentWorkspace());
+    function publishSnapshot() {
+      if (!onSnapshot) return;
+      const age = Date.now() - receivedAt;
+      const current = value && active() && Number.isFinite(receivedAt) && Number.isFinite(age) && age >= 0 && age < MAX_AGE;
+      // Publish copies so a list consumer cannot mutate navigation's identity
+      // or freshness. A render itself never counts as another cache read.
+      const observation = current ? { workspace_id: workspace, scope: "rabbit_owned_cache", complete: value.complete,
+        agents: new Map([...value.agents].map(([agent, row]) => [agent, { ...row }])),
+        works: value.works.map(row => ({ ...row })), received_at: receivedAt } : null;
+      try { onSnapshot(observation); } catch (_) { /* A consumer cannot break this panel or its navigation. */ }
+    }
     function render() {
       const setText = (element, content) => { if (element.textContent !== content) element.textContent = content; };
       setText(heading, translate("小白兔已连接的工作"));
@@ -113,15 +125,16 @@
             if (!isCurrent()) return;
             try { const result = onOpen(captured, isCurrent); if (result?.catch) result.catch(() => {}); } catch (_) { /* Navigation owns its error display. */ }
           });
-          item.append(button, status); list.append(item); return { button, status };
+          item.append(button, status); list.append(item); return { item, button, status };
         });
         rendered = { value, scope: workspace, stamp: generation, items };
       }
-      if (!value) { setText(notice, translate("状态待核对")); renderExternal(); return; }
+      if (!value) { setText(notice, translate("状态待核对")); renderExternal(); publishSnapshot(); return; }
       const states = { running: "处理中", needs_user: "等待确认", idle: "本连接空闲", unknown: "状态待核对" };
       const connections = { not_open: "尚未连接", opening: "正在连接", failed: "连接异常", closed: "连接已关闭", unknown: "状态待核对" };
       value.works.forEach((row, index) => {
-        const { button, status } = rendered.items[index];
+        const { item, button, status } = rendered.items[index];
+        item.hidden = agentFilter !== null && row.agent !== agentFilter;
         let label; try { label = getLabel(Object.freeze({ ...row })); } catch (_) { /* Use the metadata-only default below. */ }
         setText(button, text(label) ? label : row.role === "specialist" ? translate("小白兔专员") : `${agents[row.agent]} · ${translate("连接中的对话")} · ${row.chat_id.slice(-6)}`);
         const trusted = row.complete;
@@ -129,10 +142,11 @@
       });
       setText(notice, !value.complete ? translate("部分工作状态未知") : !value.works.length ? translate("暂无已连接的工作") : "");
       renderExternal();
+      publishSnapshot();
     }
     const externalActive = () => active() && externalFocused;
     function renderExternal() {
-      external.hidden = !externalKnown || externalValue?.state === "unconfigured";
+      external.hidden = agentFilter !== null || !externalKnown || externalValue?.state === "unconfigured";
       externalHeading.textContent = translate("HAPI报告的工作");
       external.title = translate("只显示 Hub 报告；不证明原生执行者实时状态，也不能在此发送或审批。");
       const report = externalValue?.report;
@@ -247,7 +261,8 @@
     window.addEventListener?.("pageshow", () => { suspended = false; if (visible) show(); });
     window.addEventListener?.("blur", () => { externalFocused = false; invalidateExternal(); });
     window.addEventListener?.("focus", () => { externalFocused = true; if (visible && !externalSeen) readExternal(); });
-    return Object.freeze({ root, show, hide, refreshExternal });
+    function setAgentFilter(agent) { agentFilter = Object.hasOwn(agents, agent) ? agent : null; render(); }
+    return Object.freeze({ root, show, hide, refreshExternal, setAgentFilter });
   }
-  window.RabbitWorkStatus = Object.freeze({ create });
+  window.RabbitWorkStatus = Object.freeze({ create, snapshot });
 })();

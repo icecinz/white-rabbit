@@ -10,7 +10,7 @@ Use invented data where possible. Omit credentials, real conversations, account 
 
 ## Work within a module
 
-Before a larger change, name its module, owned data, inputs, outputs, and failure states. The [architecture guide](ARCHITECTURE.md) maps seven responsibilities to six installable cores and remaining host assembly.
+Before a larger change, name its module, owned data, inputs, outputs, and failure states. The [architecture guide](ARCHITECTURE.md) maps six active responsibilities to six installable cores and remaining host assembly; original module 6 is historical.
 
 - Keep a core independently installable; provide explicit paths/readers/capabilities instead of importing the host.
 - Use one implementation for shared rules. The specialist and graphical UI call the same business API and version checks.
@@ -24,6 +24,8 @@ Use a branch and pull request. Explain the resulting behavior, verification, and
 
 Use the repository's `Makefile` for the supplied offline checks. Keep tests isolated from personal histories and model calls; do not run a live verification script merely because its name starts with `test` or `verify`. Run relevant browser checks when changing interaction. A passing offline suite does not establish real-account permissions, every tool, or another machine's recovery behavior.
 
+Development checks require **Python 3.11+ and Node**. `make test` runs the supplied Python checks and the narrow `make test-ui` target (`test_blueprint_home_ui.cjs`); some specialist-core Python tests also invoke the existing Node codec. These use Node's standard library, with no npm dependency install. The UI uses system fonts and bundled images; those do not add an installation dependency. This test selection does not include every historical browser script or establish fresh-user installation acceptance.
+
 Keep English and Chinese user documentation aligned. For integration evidence, distinguish a native target round trip from the complete specialist-to-target-to-result chain. Preserve previous failed evidence when reporting a later correction; do not substitute the most recent answer for the answer belonging to an exact request.
 
 ## 中文
@@ -35,3 +37,5 @@ Keep English and Chinese user documentation aligned. For integration evidence, d
 新增“交给 AI 的设置”前先实现可靠接口。紫色表达已接通的程序能力，黑色／中性色保留当前人操作或确认；颜色不扩大权限。
 
 PR 说明变化、核验和剩余边界。离线测试、浏览器操作、真实 Agent、完整交办链分别报告；未知请求只核对原编号，不重发。中英文说明尽量同步，欢迎小而清楚、能单独复用的修改。
+
+开发检查需要 **Python 3.11+ 和 Node**。`make test` 运行随包 Python 检查后执行 `make test-ui`，后者只跑 `test_blueprint_home_ui.cjs`；部分专员核心 Python 检查也调用已有 Node codec。只用 Node 标准库，无需安装 npm 依赖；系统字体和随包图片不新增安装依赖。该范围不包含全部历史浏览器脚本，也不代表全新用户安装已验收。

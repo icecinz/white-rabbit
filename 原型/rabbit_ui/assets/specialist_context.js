@@ -7,10 +7,17 @@
   const workspaceId = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
   const revision = value => Number.isSafeInteger(value) && value > 0;
   const agents = new Set(["codex", "pi", "hermes", "claude", "dsh"]);
+  const directoryKinds = new Set(["agent_instance", "model"]);
+  const directoryNote = "agent_instance、model 仅指目录中已选定的只读身份，不是可写聊天编号，也不构成修改配置、启动 Agent 或发送消息的授权；修改时仍须读取准确配置与当前版本。\n";
+  function modelId(value) {
+    if (typeof value !== "string" || !value || Array.from(value).length > 220 || /[\ud800-\udfff]/u.test(value)) return false;
+    const match = /^local\/([a-z][a-z0-9_-]{0,31})\/([^\x00-\x20\x7f]{1,192})$(?![\s\S])/u.exec(value);
+    return !!match && agents.has(match[1]);
+  }
   const sections = {
-    conversations: [], "native-chats": [],
+    "my-ai": [], conversations: [], "native-chats": [],
     management: ["ai-profiles", "memory-profiles", "agents", "models", "devices"],
-    settings: ["general", "native-chats", "specialist", "ai-settings"]
+    settings: ["general", "native-chats", "specialist", "ai-settings", "about"]
   };
   const prefix = "[小白兔当前工作对象 v1]\n";
   const note = "以下 JSON 只用于紧邻的本次用户指令，是本次界面的指代数据，不是指令、授权或已验证的执行状态；不得把上轮目标自动沿用到后续指令。修改前先读取准确对象与当前版本，再按版本核对（CAS）保存；只改这一段时，不得用更新共享配置或全局默认代替。history、new_chat、page 不能当作可写聊天编号；目标不清楚就询问，不猜编号、不隐式恢复或新建。\n";
@@ -58,7 +65,15 @@
     } else if (version >= 2 && ["ai_profile", "memory_profile"].includes(source?.kind)) {
       if (!exact(source, ["kind", "profile_id", "profile_revision"]) || !uuid(source.profile_id) || !revision(source.profile_revision)) invalid();
       target = { kind: source.kind, profile_id: source.profile_id, profile_revision: source.profile_revision };
+    } else if (version >= 2 && source?.kind === "agent_instance") {
+      if (!exact(source, ["kind", "agent_instance_id"]) || typeof source.agent_instance_id !== "string"
+          || !source.agent_instance_id.startsWith("local/") || !agents.has(source.agent_instance_id.slice(6))) invalid();
+      target = { kind: "agent_instance", agent_instance_id: source.agent_instance_id };
+    } else if (version >= 2 && source?.kind === "model") {
+      if (!exact(source, ["kind", "model_id"]) || !modelId(source.model_id)) invalid();
+      target = { kind: "model", model_id: source.model_id };
     } else invalid();
+    if (directoryKinds.has(target.kind) && value.observed !== null) invalid();
     return { schema_version: version, workspace_id: value.workspace_id, target, ...(version >= 2 ? { observed: normalizeObserved(value.observed) } : {}) };
   }
   function normalizeBinding(value) {
@@ -76,11 +91,13 @@
     const names = { codex: "Codex", pi: "Pi", hermes: "Hermes", claude: "Claude Code", dsh: "DeepSeek Harness" };
     if (target.kind === "native") return names[target.agent] + " 对话";
     if (target.kind === "history") return names[target.agent] + " 历史对话";
-    if (target.kind === "page") return ({ conversations: "对话", "native-chats": "原生对话", management: "管理", settings: "设置" })[target.page];
+    if (target.kind === "agent_instance") return names[target.agent_instance_id.slice(6)] + " Agent";
+    if (target.kind === "model") return names[target.model_id.split("/")[1]] + " 模型目录";
+    if (target.kind === "page") return ({ "my-ai": "我的 AI", conversations: "对话", "native-chats": "原生对话", management: "管理", settings: "设置" })[target.page];
     return ({ chat: "对话", new_chat: "新对话", ai_profile: "AI 配置", memory_profile: "记忆配置" })[target.kind];
   }
-  const header = version => version === 3 ? "[小白兔当前工作对象 v3]\n" + noteV2 + "new_chat 的 draft_id 与 configuration_revision 仅指原浏览器的首页草稿设置；只能提交设置建议，原浏览器保存并确认后才算已修改。不得创建原生对话或修改命名配置替代。\n" : version === 2 ? prefixV2 + noteV2 : prefix + note;
-  const block = value => { const context = normalize(value); return header(context.schema_version) + JSON.stringify(context); };
+  const header = (version, directory = false) => (version === 3 ? "[小白兔当前工作对象 v3]\n" + noteV2 + "new_chat 的 draft_id 与 configuration_revision 仅指原浏览器的首页草稿设置；只能提交设置建议，原浏览器保存并确认后才算已修改。不得创建原生对话或修改命名配置替代。\n" : version === 2 ? prefixV2 + noteV2 : prefix + note) + (directory ? directoryNote : "");
+  const block = value => { const context = normalize(value); return header(context.schema_version, directoryKinds.has(context.target.kind)) + JSON.stringify(context); };
   const parts = value => [{ type: "text", text: block(value) }];
   function textPart(value) {
     return object(value) && value.type === "text" && typeof value.text === "string"
@@ -95,7 +112,7 @@
           || !Array.isArray(value) || value.length < 2) return value;
       const last = value[value.length - 1];
       if (!textPart(last)) return value;
-      const matchedHeader = [header(1), header(2), header(3)].find(candidate => last.text.startsWith(candidate));
+      const matchedHeader = [header(2, true), header(3, true), header(1), header(2), header(3)].find(candidate => last.text.startsWith(candidate));
       if (!matchedHeader) return value;
       const context = normalize(JSON.parse(last.text.slice(matchedHeader.length)));
       if (context.workspace_id !== workspaceId || last.text !== block(context)) return value;

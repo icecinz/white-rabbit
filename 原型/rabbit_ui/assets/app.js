@@ -23,14 +23,14 @@
   };
   const settingsMounts = { specialist: $("specialist-settings"), native: $("native-chat-settings") };
   const state = {
-    workspaceSections: { management: null, settings: "general" },
+    workspaceSections: { management: null, settings: "general" }, managementTarget: null,
     csrf: "", status: null, chats: [], listView: "library", page: "conversations", historyAgent: "all", includeInternal: false,
     queries: { chats: "", history: "" }, historyItems: [], historyTotal: 0, historyNext: null,
     historyLoading: false, hiddenInternal: 0, listVersion: 0,
     libraryItems: [], libraryWorkspace: "", libraryTotal: 0, libraryNext: null, libraryQuery: "", libraryError: "",
     preferences: { default_backend: "codex", send_shortcut: "enter", markdown: true, show_internal: false, chat_backends: {}, chat_models: {}, default_models: agents.emptyModels(), revision: "0" },
     management: null, backendChoosing: false, backendChoiceVersion: 0, preferenceNotice: "",
-    selected: { type: "new", id: null }, chat: null, historySession: null, historyMessages: [], historyReady: false,
+    selected: { type: "new", id: null }, chat: null, historySession: null, historyMessages: [], historyReady: false, historyReadOnly: false,
     historyMessageTotal: 0, historyMessageNext: null, historyMessagePrev: null, historyMessageStart: 0,
     historyMatch: null, historyPageLoading: false, run: null, chatMessages: [], exporting: false, rawMessages: false,
     backend: "codex", model_id: "", homeNativeChoice: null, homeConfiguration: null, homeNativeHandoff: null, homeConfigurationReceipt: null, homeTextCompatibility: false, nativeHomeSending: false, sending: false, creating: false, cancelling: false,
@@ -40,7 +40,7 @@
     pendingSubmission: null, pendingSubmissions: new Map(), newCreationId: null, historyCreationIds: new Map(), historyBackendChoices: new Map(), historyModelChoices: new Map(), historyContinuationIds: new Map(), historyChoices: new Map(),
     contextVisible: false, contextData: null, contextState: "empty", contextError: "", contextVersion: 0,
     contextPinSaving: null, contextPinNotice: "", contextPinError: false, contextNavigationVersion: 0, chatContextSelection: null,
-    libraryRevision: null, libraryWatchRevision: null, selectedRevision: null, remoteRunning: false, chatLoading: null,
+    libraryRevision: null, libraryWatchRevision: null, selectedRevision: null, remoteRunning: false, chatLoading: null, nativeWorkStatus: null,
     syncInFlight: false, syncRequested: false, syncAbort: null,
     browserNotice: "", browserInputTouched: false, browserTouchedDrafts: new Set(), browserPageTouched: false, browserQueryTouched: false, browserAgentFilterTouched: false, browserSaveTimer: null, browserRestoring: false, conversationScrollTop: 0,
     sourceUpdateVisible: false, sourceUpdateChatId: null, sourceUpdateState: "empty", sourceUpdateData: null, sourceUpdateNotice: "", sourceUpdateVersion: 0, sourceUpdateInputVersion: 0, sourceUpdateSaving: null,
@@ -82,18 +82,6 @@
     }, onAskSpecialist: askSpecialistForConfiguration, canAskSpecialist: specialistEnabled, onMemoryManual: openManual, onCatalog: acceptProfileCatalog, getInventory: () => state.management, getCapabilities: () => state.status?.profiles || {} }) : null;
   const activeRunStates = new Set(["queued", "running", "cancelling"]);
   const backendLabels = agents.labels;
-  const isImCodesPreview = window.location.hostname === "app.im.codes" && /^\/api\/server\/[^/]+\/local-web\/[^/]+(?:\/|$)/.test(window.location.pathname);
-
-  function outerPreviewCsrf() {
-    if (!isImCodesPreview) return "";
-    // Official IM.codes browser API uses a non-HttpOnly double-submit nonce.
-    // Session credentials stay in the browser's HttpOnly cookie; never copy them.
-    try {
-      const cookie = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("rcc_csrf="));
-      return cookie ? decodeURIComponent(cookie.slice("rcc_csrf=".length)) : "";
-    }
-    catch (_) { return ""; }
-  }
 
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -152,13 +140,7 @@
     const requestOptions = { ...options };
     if (method !== "GET") {
       headers["Content-Type"] = "application/json";
-      if (isImCodesPreview) {
-        // The proxy's CORS allowlist is fixed; keep the inner nonce in JSON.
-        const body = JSON.parse(options.body || "{}");
-        requestOptions.body = JSON.stringify({ ...body, _one_ai_csrf: state.csrf });
-      } else headers["X-OneAI-CSRF"] = state.csrf;
-      const outerNonce = outerPreviewCsrf();
-      if (outerNonce) headers["X-CSRF-Token"] = outerNonce;
+      headers["X-OneAI-CSRF"] = state.csrf;
     }
     const response = await fetch(path, { ...requestOptions, method, headers, credentials: "same-origin", cache: "no-store" });
     const data = await response.json().catch(() => ({}));
@@ -204,6 +186,11 @@
     return selection.type === "history" ? `history:${selection.id}` : selection.type === "chat" ? selection.id : "__new__";
   }
   function profilesEnabled() { return state.status?.profiles?.enabled === true; }
+  function profileDirectoryNeeded() {
+    return state.page === "conversations" && !(state.selected.type === "history" && state.historyReadOnly)
+      || state.page === "native-chats" && !nativeChats?.hasReadOnlySelection()
+      || state.page === "management" && ["ai-profiles", "memory-profiles"].includes(state.workspaceSections.management);
+  }
   function sourceCanContinue() { return state.selected.type !== "history" || state.historySession?.coverage?.continuable !== false; }
   function sourceCoverageNotice() { return state.historySession?.coverage?.notice || "这段来源的当前对话链不完整，可以阅读、搜索和引用；不能直接带入接续。"; }
   function historyChoice() {
@@ -330,6 +317,7 @@
   }
   function applyObservedProfileSelection() {
     if (state.selected.type !== "chat" || state.profileSelectionSync !== "pending" || commonProfileBusy()) return;
+    if (!state.profilesInventory || state.profilesInventory.workspace_id !== state.status?.workspace_id) return;
     const choice = state.profileSelection, row = choice?.ai_profile_id && profiles?.get(choice.ai_profile_id);
     const memory = choice?.memory_profile_id === "none" ? { id: "none" } : profiles?.getMemory(choice?.memory_profile_id);
     if (!row || !memory) { state.profile_snapshot = null; state.profileLegacy = false; state.profileChoices.delete(draftKey()); return; }
@@ -711,6 +699,8 @@
     if (state.page === "conversations") state.conversationScrollTop = Math.min(1e9, Math.max(0, Number(ui.scroll.scrollTop) || 0));
     const snapshot = {
       selection: { ...state.selected }, page: state.page === "continuation" && !state.currentContinuation ? "conversations" : state.page, backend: state.backend, model_id: state.model_id, homeNativeChoice: state.homeNativeChoice, homeConfiguration: state.homeConfiguration, homeNativeHandoff: state.homeNativeHandoff, homeConfigurationReceipt: state.homeConfigurationReceipt, homeTextCompatibility: state.homeTextCompatibility,
+      workspaceSections: { ...state.workspaceSections }, managementTarget: state.managementTarget,
+      historyReadOnly: state.historyReadOnly,
       continuations: state.continuations, currentContinuation: state.currentContinuation,
       query: state.libraryQuery, historyAgent: state.historyAgent,
       historyOffset: state.historyMessageStart, historyMatch: state.historyMatch?.titleOnly ? null : state.historyMatch,
@@ -765,6 +755,9 @@
     const snapshot = browserStore.load();
     browserRestoreSnapshot = snapshot;
     if (!snapshot) return null;
+    if (snapshot.workspaceSections) state.workspaceSections = { ...snapshot.workspaceSections };
+    state.managementTarget = snapshot.managementTarget || null;
+    state.historyReadOnly = snapshot.historyReadOnly === true;
     state.continuations = snapshot.continuations || [];
     state.currentContinuation = snapshot.currentContinuation || null;
     state.drafts = new Map([...snapshot.drafts, ...[...state.drafts].filter(([key, text]) => text.length > 0 || state.browserTouchedDrafts.has(key))]);
@@ -795,21 +788,36 @@
     return snapshot;
   }
   function canRestoreBrowserView() {
-    return state.openVersion === 0 && state.page === "conversations" && !state.browserInputTouched && !state.browserPageTouched && !state.browserQueryTouched && !state.browserAgentFilterTouched && !ui.input.value && !state.libraryQuery && state.historyAgent === "all" && state.backendChoiceVersion === 0 && !state.sending && !state.creating;
+    return state.openVersion === 0 && ["my-ai", "conversations"].includes(state.page) && !state.browserInputTouched && !state.browserPageTouched && !state.browserQueryTouched && !state.browserAgentFilterTouched && !ui.input.value && !state.libraryQuery && state.historyAgent === "all" && state.backendChoiceVersion === 0 && !state.sending && !state.creating;
   }
   function restoreHomeSnapshot(snapshot) {
-    if (!snapshot || !canRestoreBrowserView()) return false;
+    if (!canRestoreBrowserView()) return false;
     // A fresh visit opens Home. Journals and every chat's local draft were
     // loaded above; a reload still restores the current conversation below.
     restoreDraft();
-    showWelcome(); updateComposer();
+    showPage("my-ai"); updateComposer();
     return true;
   }
   async function restoreBrowserSnapshot(snapshot) {
     if (!snapshot || !canRestoreBrowserView()) return false;
+    if (["my-ai", "management", "settings"].includes(snapshot.page)) {
+      state.selected = { ...snapshot.selection }; state.backend = snapshot.backend; state.model_id = snapshot.model_id || "";
+      restoreDraft();
+      showPage(snapshot.page, state.workspaceSections[snapshot.page]);
+      if (snapshot.page === "management" && snapshot.managementTarget) await workspace?.openObject?.(snapshot.managementTarget);
+      checkpointBrowserState(); return true;
+    }
     if (snapshot.page === "continuation") {
       state.selected = { type: "new", id: null };
       restoreDraft(); showPage("continuation"); checkpointBrowserState(); return true;
+    }
+    if (snapshot.page === "native-chats" && nativeChats?.hasReadOnlySelection()) {
+      // The saved native reading identity is separate from the last editable
+      // composer. Restoring it must not first open that unrelated conversation.
+      state.libraryQuery = snapshot.query; ui.search.value = snapshot.query; state.historyAgent = snapshot.historyAgent;
+      sourceFilters().forEach(node => { const active = node.dataset.agent === state.historyAgent; node.classList.toggle("active", active); node.setAttribute("aria-pressed", String(active)); });
+      if (snapshot.query || snapshot.historyAgent !== "all") loadLibrary(true).catch(() => {});
+      restoreDraft(); showPage("native-chats"); checkpointBrowserState(); return true;
     }
     let selection = { ...snapshot.selection };
     const creationId = selection.type === "new" ? snapshot.newCreationId : selection.type === "history" ? state.historyCreationIds.get(selection.id) : null;
@@ -845,7 +853,7 @@
     let opening;
     try {
       if (selection.type === "chat") opening = openChat(selection.id, true, snapshot.historyMatch);
-      else if (selection.type === "history") opening = openHistory(selection.agent, selection.sessionId, snapshot.historyMatch, snapshot.historyOffset);
+      else if (selection.type === "history") opening = openHistory(selection.agent, selection.sessionId, snapshot.historyMatch, snapshot.historyOffset, snapshot.historyReadOnly === true);
       else { if (!creationId) state.newCreationId = snapshot.newCreationId; newChat(); opening = Promise.resolve(); }
     } finally { state.browserRestoring = false; }
     const version = state.openVersion;
@@ -975,10 +983,11 @@
     $("add-text-file").disabled = $("pick-text-file").disabled = !fileInputsSupported() || state.sending || state.creating || state.backendChoosing || currentUploadCount() > 0 || fileMode && state.attachment_ids.length > 0 || state.task_intent.artifact_ids.length >= 4;
     const selectedInfo = backendInfo(state.backend);
     const available = modelReady(), nativeHistory = historyUsesNative(), nativeHome = homeNativeChoice();
+    $("toggle-file-task").hidden = !!(nativeHistory || nativeHome) && !fileMode;
     const historyLoading = state.selected.type === "history" && !state.historyReady;
     const ordinaryPending = state.selected.type === "chat" && (state.pendingSubmissions.get(state.selected.id) || state.pendingSubmission);
     const ordinaryReceiptOnly = !!(ordinaryPending?.uncertain && (!modelReady() || profilesEnabled() && ordinaryPending.text !== ui.input.value.trim() || ordinaryPending.backend !== state.backend || (ordinaryPending.model_id || "") !== state.model_id || !sameProfile(ordinaryPending.profile_snapshot, state.profile_snapshot) || !sameAttachments(ordinaryPending.attachment_ids, state.attachment_ids) || !sameTaskIntent(ordinaryPending.task_intent, state.task_intent)));
-    ui.send.disabled = state.sending || state.creating || state.backendChoosing || state.page !== "conversations" || !ordinaryReceiptOnly && (!draftHasContent() || currentUploadCount() || fileBlocked || !available || state.attachment_ids.length && modelCapabilityInfo()?.image_input === "unsupported" || !sourceCanContinue() || isRunning() || historyLoading || contextCannotSend() || contextPinSavingCurrent());
+    ui.send.disabled = state.sending || state.creating || state.backendChoosing || state.page !== "conversations" || state.selected.type === "history" && state.historyReadOnly || !ordinaryReceiptOnly && (!draftHasContent() || currentUploadCount() || fileBlocked || !available || state.attachment_ids.length && modelCapabilityInfo()?.image_input === "unsupported" || !sourceCanContinue() || isRunning() || historyLoading || contextCannotSend() || contextPinSavingCurrent());
     ui.sendLabel.textContent = state.sending ? "发送中" : ordinaryReceiptOnly ? "确认上次发送" : "发送";
     if (nativeHistory) {
       ui.send.disabled = !draftHasContent() || !nativeAdoptionSource() || !nativeAdoption || fileMode || fileInputsUnready() || state.sending || state.creating || state.backendChoosing || currentUploadCount() > 0;
@@ -1046,18 +1055,25 @@
     window.RabbitProfiles?.renderStatus($("conversation-config-status"), {
       agent: backendLabels[nativeHistory ? state.selected.agent : state.backend],
       device: state.management?.device?.name,
-      model: effective?.effective_model || requested?.model_id || (nativeHistory || requested || profileUnresolved ? null : modelInfo()?.model || null),
-      effort: effective?.effective_effort || requested?.reasoning_effort,
+      model: nativeHome ? requested?.model_id || null : effective?.effective_model || requested?.model_id || (nativeHistory || requested || profileUnresolved ? null : modelInfo()?.model || null),
+      effort: nativeHome ? requested?.reasoning_effort : effective?.effective_effort || requested?.reasoning_effort,
       memory: !profileUnresolved && memory.id !== "none" ? [memory.name, memory.mode === "read_only" ? "只读" : "读取并记住"].filter(Boolean).join(" · ") : null,
       status: !state.status ? "正在连接" : state.sending || isRunning() ? "正在回复" : state.pendingSubmission?.uncertain ? "发送待核对" : !profileReady() || !available ? "配置待核对" : "空闲",
       language: window.RabbitWorkspace?.language?.() || "zh-CN",
     });
-    $("memory-profile-label").textContent = profileUnresolved ? "配置待核对" : memory.id !== "none" && memory.name || (nativeHistory ? "不额外带入共享记忆" : "不使用长期记忆");
+    $("memory-profile-label").textContent = profileUnresolved ? "配置待核对" : memory.id !== "none" && memory.name || (nativeHistory || nativeHome ? "不额外带入记忆" : "不使用长期记忆");
     $("choose-ai-profile").disabled = !profilesEnabled() || !profiles || !state.profilesInventory || state.sending || state.creating || state.backendChoosing;
     $("choose-memory-profile").disabled = !profilesEnabled() || !profiles || !state.profilesInventory || state.sending || state.creating || state.backendChoosing;
     if (state.nativeHomeSending) {
-      ui.send.disabled = ui.input.disabled = true; ui.sendLabel.textContent = "发送中";
+      ui.send.disabled = true; ui.sendLabel.textContent = "发送中";
       for (const id of ["choose-ai-profile", "choose-memory-profile", "add-text-file", "pick-text-file", "add-image", "toggle-file-task"]) $(id).disabled = true;
+    }
+    if (state.selected.type === "new" && !nativeHome && !state.homeTextCompatibility && state.status && state.status.demo_mode !== true && state.profilesInventory
+        && ![state.status.native_chats, state.status.hermes_native_chats, state.status.pi_native_chats, state.status.claude_native_chats, state.status.dsh_native_chats].some(entry => entry?.enabled === true)) {
+      ui.send.disabled = true;
+      const connect = el("button", "context-preview-button", "先接入一个 Agent"); connect.type = "button";
+      connect.addEventListener("click", () => openManual("connect-agent"));
+      ui.hint.replaceChildren(connect); ui.footnote.hidden = true;
     }
     renderComposerMaterials(); renderFileMaterialStatus();
     updateRoute();
@@ -1065,8 +1081,8 @@
     if (historyQuotes) historyQuotes.refresh();
     $("quote-history").disabled = !historyQuotes || state.page !== "conversations" || state.sending || state.creating || currentUploadCount() > 0 || ui.input.disabled;
     if ($("native-handoff")) {
-      $("native-handoff").hidden = !nativeChatsEnabled();
       const commonSource = state.selected.type === "chat" && state.chat?.id === state.selected.id;
+      $("native-handoff").hidden = !nativeChatsEnabled() || !commonSource && !historyTextSource();
       $("native-handoff").disabled = state.page !== "conversations" || !commonSource && !historyTextSource()
         || state.sending || state.creating || currentUploadCount() > 0;
     }
@@ -1076,9 +1092,10 @@
       $("native-adopt").textContent = "继续原对话";
       $("native-adopt").disabled = !nativeAdoptionSource() || !nativeAdoption;
     }
+    if (state.page === "conversations" && state.selected.type === "history" && state.historyReadOnly) { ui.composer.hidden = true; $("native-adopt").hidden = true; }
   }
   async function refreshStatus() {
-    const data = await api("/api/status");
+    const data = await api("/api/status?cached=1");
     const previousScope = state.status?.workspace_id;
     state.status = data;
     if (previousScope && previousScope !== data.workspace_id) {
@@ -1094,7 +1111,7 @@
     updateNativeChatsAvailability();
     renderList();
     if (!browserStore) beginBrowserRestore();
-    if (profilesEnabled() && profiles) await profiles.load();
+    if (profilesEnabled() && profiles && profileDirectoryNeeded()) await profiles.load();
     $("connection-state").textContent = "";
     updateComposer();
     updateHistorySummary();
@@ -1127,32 +1144,93 @@
   async function refreshChats(shouldApply = null, options = {}) {
     return loadLibrary(true, shouldApply, options, true);
   }
-  function switchListView() { showPage("conversations"); }
+  // One projection of owned connection facts. Reuse the existing page refresh;
+  // missing or stale observations never mean an Agent is idle.
+  let nativeWorkRead = 0, nativeWorkFlight = null;
+  function acceptNativeWorkStatus(observation) {
+    const scope = state.status?.workspace_id, age = Date.now() - observation?.received_at;
+    const next = observation && !document.hidden && observation.workspace_id === scope && observation.scope === "rabbit_owned_cache"
+      && Number.isFinite(age) && age >= 0 && age < 6000 ? observation : null;
+    const badges = new Map();
+    for (const row of next?.works || []) {
+      if (row.role !== "chat" || !row.complete || row.reason !== null || row.connection_state !== "ready") continue;
+      if (row.status === "needs_user" || row.status === "running") badges.set(`${row.agent}/${row.chat_id}`, row.status);
+    }
+    const signature = JSON.stringify([...badges].sort());
+    const previous = state.nativeWorkStatus;
+    state.nativeWorkStatus = next ? { workspace: scope, receivedAt: next.received_at, badges, signature } : null;
+    if ((previous?.signature || "[]") !== signature || previous && previous.workspace !== scope) renderList();
+  }
+  function nativeWorkBadge(item) {
+    const observed = state.nativeWorkStatus, age = Date.now() - observed?.receivedAt;
+    if (item.kind !== "native" || !observed || observed.workspace !== state.status?.workspace_id
+        || state.libraryWorkspace !== observed.workspace || document.hidden || age < 0 || age >= 6000) return "";
+    return observed.badges.get(`${item.agent}/${item.id}`) || "";
+  }
+  function readNativeWorkStatus() {
+    if (document.hidden || !state.status?.workspace_id || typeof window.RabbitWorkStatus?.snapshot !== "function") return;
+    if (state.page === "management" && state.workspaceSections.management === "agents") return;
+    if (Date.now() - state.nativeWorkStatus?.receivedAt >= 6000) acceptNativeWorkStatus(null);
+    if (nativeWorkFlight) return;
+    const scope = state.status.workspace_id, request = ++nativeWorkRead;
+    const controller = new AbortController(); let expired = false;
+    const valid = () => !expired && !controller.signal.aborted && request === nativeWorkRead && scope === state.status?.workspace_id && !document.hidden
+      && !(state.page === "management" && state.workspaceSections.management === "agents");
+    const timeout = setTimeout(() => { const current = valid(); expired = true; controller.abort(); if (current) acceptNativeWorkStatus(null); }, 2500);
+    nativeWorkFlight = Promise.resolve().then(() => valid() ? api("/api/management/work-status", { signal: controller.signal }, false) : null)
+      .then(value => { if (valid() && value) acceptNativeWorkStatus({ ...window.RabbitWorkStatus.snapshot(value, scope), workspace_id: scope, scope: "rabbit_owned_cache", received_at: Date.now() }); })
+      .catch(() => { if (valid()) acceptNativeWorkStatus(null); })
+      .finally(() => { clearTimeout(timeout); nativeWorkFlight = null; });
+    return nativeWorkFlight;
+  }
+  function switchListView() {
+    if (state.selected.type === "chat" && !state.chat && !state.chatLoading) return openChat(state.selected.id);
+    if (state.selected.type === "history" && !state.historySession) return openHistory(state.selected.agent, state.selected.sessionId);
+    showPage("conversations");
+  }
+  let listSearchMatch = null, listSearchNote = null;
+  function appendListSearchMatch(nativeMount = null) {
+    listSearchNote?.remove(); listSearchNote = null;
+    const item = listSearchMatch;
+    if (!item || item.workspace_id !== state.status?.workspace_id) return;
+    const native = item.kind === "native" && state.page === "native-chats" ? nativeChats?.getViewContext() : null;
+    const current = item.kind === "native" ? native?.agent === item.agent && native?.chat_id === item.id && native?.workspace_id === item.workspace_id
+      : state.page === "conversations" && state.selected.type === "chat" && state.selected.id === item.id;
+    if (!current || item.kind === "native" && !nativeMount) return;
+    const english = window.RabbitWorkspace?.language?.() === "en";
+    const note = el("p", "detail-notice list-search-match"); note.dataset.controlInterface = "ai";
+    note.append(el("strong", "", english ? "Search excerpt" : "搜索命中"), el("span", "", " · " + item.excerpt),
+      el("span", "", english ? " — Matched source record; not located in this conversation yet." : "——命中来源记录，尚未定位到本对话正文。"));
+    const mount = nativeMount || ui.actions.querySelector(".conversation-more-actions");
+    if (mount) mount.append(note); else ui.actions.append(headerMore([note]));
+    listSearchNote = note;
+  }
   function sessionListItem(item, index) {
     const isHistory = item.kind === "history", isNative = item.kind === "native", english = window.RabbitWorkspace?.language?.() === "en";
     const match = item.match;
     const target = match && match.message_id != null && Number.isInteger(match.index) ? { messageId: String(match.message_id), index: match.index, query: match.query || state.libraryQuery.trim() } : null;
-    const nativeMatch = !isHistory && !isNative && match && match.kind === "history" && typeof match.agent === "string" && typeof match.session_id === "string";
+    const sourceMatch = !isHistory && !isNative && match?.kind === "history";
+    const indexed = isNative && item.indexed_match;
+    const excerpt = indexed?.excerpt ?? match?.excerpt;
     const node = button("", "session-item", () => {
+      listSearchMatch = (sourceMatch || indexed) && typeof excerpt === "string" && excerpt ? { workspace_id: state.status?.workspace_id, kind: item.kind, agent: item.agent || null, id: item.id, excerpt } : null;
       if (isNative) {
         state.browserPageTouched = true;
-        if (item.available !== true || !nativeChats?.selectExisting) { toast(english ? "This native chat entry is unavailable. Its conversation and draft remain." : "原生入口暂不可用，原对话和草稿保留。"); return; }
-        return nativeChats.selectExisting({ agent: item.agent, chatId: item.id, workspaceId: state.status?.workspace_id || "" })
+        if (!nativeChats?.openEntry) return;
+        return nativeChats.openEntry({ agent: item.agent, chatId: item.id, workspaceId: state.status?.workspace_id || "" }, { readOnly: item.available !== true, title: item.title, match: indexed, excerpt })
           .catch(error => toast(userError(error, english ? "The native chat could not be opened. Drafts remain." : "原生对话暂时没打开，原草稿保留。")));
       }
-      if (nativeMatch) {
-        state.historyContinuationIds.set(`${match.agent}:${match.session_id}`, item.id);
-        const sourceTarget = match.title_only ? { index: 0, query: match.query || state.libraryQuery.trim(), titleOnly: true, sourceChatId: item.id } : target && { ...target, sourceChatId: item.id, sourcePending: true };
-        return openHistory(match.agent, match.session_id, sourceTarget);
-      }
-      return isHistory ? openHistory(item.agent, item.session_id, target) : openChat(item.id, false, target);
+      return isHistory ? openHistory(item.agent, item.session_id, target) : openChat(item.id, false, sourceMatch ? null : target);
     });
-    const nativeSelection = isNative ? nativeChats?.getQuoteContext() : null;
+    const nativeSelection = isNative ? nativeChats?.getViewContext() : null;
     const active = isNative ? state.page === "native-chats" && nativeSelection?.agent === item.agent && nativeSelection?.chat_id === item.id
-      : isHistory || nativeMatch ? state.page === "conversations" && state.selected.type === "history" && state.selected.id === `${nativeMatch ? match.agent : item.agent}:${nativeMatch ? match.session_id : item.session_id}` : state.page === "conversations" && state.selected.type === "chat" && state.selected.id === item.id;
+      : isHistory ? state.page === "conversations" && state.selected.type === "history" && state.selected.id === `${item.agent}:${item.session_id}` : state.page === "conversations" && state.selected.type === "chat" && state.selected.id === item.id;
     node.classList.toggle("active", active);
     if (active) node.setAttribute("aria-current", "true");
-    if (isNative) node.disabled = item.available !== true || !state.status?.workspace_id;
+    if (isNative) {
+      node.disabled = !state.status?.workspace_id;
+      if (item.available !== true) node.title = english ? "Read existing bound history; the Agent will not be connected." : "查看已绑定的历史，不连接 Agent。";
+    }
     node.append(el("div", "session-title", item.title || "未命名的对话"));
     const meta = el("div", "session-meta");
     (item.source_agents || (item.agent ? [item.agent] : [])).forEach((agent) => meta.append(el("span", `source-tag ${agent}`, backendLabels[agent] || agent)));
@@ -1164,22 +1242,16 @@
       meta.append(when);
     }
     if (typeof item.message_count === "number") meta.append(el("span", "", `${item.message_count} 条`));
-    if (item.running) meta.append(el("span", "session-running", "回答中"));
+    const workState = isNative ? nativeWorkBadge(item) : item.running ? "running" : "";
+    if (workState) meta.append(el("span", "session-running", workState === "needs_user" ? english ? "Needs attention" : "需处理" : english ? "Replying" : "回答中"));
     if (!isHistory && !isNative && item.source_update && item.source_update.has_changes) meta.append(el("span", "session-source-change", "来源有变化"));
     if (item.archived) meta.append(el("span", "archived-mark", "已归档"));
     node.append(meta);
     if (isNative) node.append(el("div", "session-excerpt", (item.search_scope === "indexed_text" ? english ? "Includes indexed history" : "可搜历史索引" : english ? "Title search only" : "仅名称搜索") + (item.available === true ? "" : english ? " · Unavailable" : " · 暂不可用")));
-    if (match && match.excerpt != null && !(isNative && match.title_only)) node.append(el("div", "session-excerpt", match.excerpt));
+    if (excerpt != null && !(isNative && match?.title_only && !indexed)) node.append(el("div", "session-excerpt", excerpt));
+    if (isNative && item.available !== true) node.append(el("div", "session-excerpt", english ? "Read only" : "仅可阅读"));
     for (const text of node.children) text.dataset.controlInterface = "ai";
     node.dataset.listIndex = String(index);
-    const indexed = isNative && item.indexed_match;
-    if (indexed && ["codex", "hermes", "pi", "claude", "dsh"].includes(indexed.agent) && typeof indexed.session_id === "string" && Number.isInteger(indexed.index) && indexed.index >= 0) {
-      const wrapper = el("div", "session-indexed-entry");
-      const inspect = button(english ? "View indexed match" : "查看索引匹配", "session-index-match", () => openHistory(indexed.agent, indexed.session_id,
-        { index: indexed.index, messageId: String(indexed.message_id), query: indexed.query || state.libraryQuery.trim() }));
-      if (typeof indexed.excerpt === "string") inspect.title = indexed.excerpt;
-      wrapper.append(node, inspect); return groupedListItem(wrapper, item);
-    }
     return groupedListItem(node, item);
   }
   function groupedListItem(content, item) {
@@ -1427,6 +1499,14 @@
         target = { kind: "native", agent: native.agent, chat_id: native.chat_id };
         observed = specialistObserved({ id: native.profile_id, revision: native.profile_revision }, { id: native.memory_profile_id, revision: native.memory_profile_revision }, native.ai_selection_revision, native.memory_selection_revision);
       }
+    } else if (state.page === "management") {
+      const object = workspace?.getObject?.();
+      if (object?.kind === "agent" && agents.has(object.id)) target = { kind: "agent_instance", agent_instance_id: agents.instanceId(object.id) };
+      else if (object?.kind === "model" && object.id && agents.validModelId(object.id)) target = { kind: "model", model_id: object.id };
+      else if (object?.kind === "memory") {
+        const memory = profiles?.getMemory(object.id);
+        if (memory && memory.id !== "none") { target = { kind: "memory_profile", profile_id: memory.id, profile_revision: memory.revision }; observed = specialistObserved(null, memory); }
+      }
     } else if (state.page === "conversations") {
       if (state.selected.type === "new") target = state.homeConfiguration ? { kind: "new_chat", draft_id: state.homeConfiguration.draft_id, configuration_revision: state.homeConfiguration.revision } : { kind: "new_chat" };
       else if (state.selected.type === "chat" && state.chat?.id === state.selected.id && !state.chatLoading) target = { kind: "chat", chat_id: state.chat.id };
@@ -1447,7 +1527,7 @@
   function workBinding(context, guide = "model", label, returnTo = context) {
     const codec = window.RabbitSpecialistContext, source = context?.target;
     const title = source?.kind === "chat" ? state.chat?.title : source?.kind === "history" ? state.historySession?.title
-      : source?.kind === "native" ? nativeChats?.getConfigurationContext()?.title : null;
+      : source?.kind === "native" ? nativeChats?.getConfigurationContext()?.title : ["agent_instance", "model", "memory_profile"].includes(source?.kind) ? workspace?.getObjectTitle?.() : null;
     const name = Array.from(String(label || title || codec.label(context)).replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]/gu, " ").trim()).slice(0, 160).join("") || "未指定对象";
     return codec.normalizeBinding({ workspace_id: state.status.workspace_id, context, label: name, guide, return_to: returnTo });
   }
@@ -1515,6 +1595,8 @@
       else if (target.kind === "chat") { if (state.selected.type === "chat" && state.selected.id === target.chat_id) showPage("conversations"); else await openChat(target.chat_id); }
       else if (target.kind === "history") { if (state.selected.type === "history" && state.selected.agent === target.agent && state.historySession?.session_id === target.session_id) showPage("conversations"); else await openHistory(target.agent, target.session_id); }
       else if (target.kind === "new_chat") { if (state.selected.type === "new") showPage("conversations"); else newChat(); }
+      else if (target.kind === "agent_instance" || target.kind === "model") await openMyAIAction({ kind: "manage", target: target.kind === "model" ? { kind: "model", id: target.model_id } : { kind: "agent", id: agents.backendOfInstance(target.agent_instance_id) } });
+      else if (target.kind === "memory_profile") await openMyAIAction({ kind: "manage", target: { kind: "memory", id: target.profile_id } });
       if (target.kind === "chat") await readSpecialistConfiguration({ ...specialistBinding, context }, () => context.workspace_id === state.status?.workspace_id && state.page === "conversations" && workTargetEqual(context, currentSpecialistWorkContext()));
     } catch (error) { toast(userError(error, "原页面暂时无法打开，专员草稿保留。")); }
   }
@@ -1735,7 +1817,7 @@
         const ai = readbacks.configuration_selection, memory = readbacks.memory_selection;
         observed = specialistObserved(ai?.profile, memory?.profile, ai?.selection.revision, memory?.selection.revision);
         verified = Object.values(readbacks).every(dto => dto.profile_current);
-        if (state.page === "native-chats" && workTargetEqual(context, currentSpecialistWorkContext()) && nativeChats?.applyConfigurationReadback?.(context, readbacks) !== true) return false;
+        if (state.page === "native-chats" && workTargetEqual(context, currentSpecialistWorkContext()) && nativeChats?.applyConfigurationReadback?.(context, { configuration_selection: ai || null, memory_selection: memory || null }) !== true) return false;
       } else if (["ai_profile", "memory_profile"].includes(target.kind)) {
         const row = target.kind === "ai_profile" ? profiles.get(target.profile_id) : profiles.getMemory(target.profile_id);
         if (!row || row.revision < target.profile_revision) return false;
@@ -1814,7 +1896,7 @@
   function updateSpecialistAvailability() {
     const enabled = specialistEnabled();
     $("specialist-composer-card").hidden = !enabled;
-    specialist?.setEnabled(enabled);
+    specialist?.setEnabled(enabled, { passive: state.page === "my-ai" });
     if (!enabled && state.page === "specialist") showPage("conversations");
   }
   const nativeChats = (() => {
@@ -1826,6 +1908,8 @@
     settingsMounts.native.append(choiceLabel, ...Object.values(settingsPanes));
     root.append(...Object.values(panes));
     const options = { api: (path, settings = {}) => api(path, settings, false), getWorkspace: () => state.status?.workspace_id || "", openDocument, materialFiles: fileMaterials,
+      getSendShortcut: () => state.preferences.send_shortcut,
+      onChooseConfiguration: kind => profiles?.open(kind),
       getModelLabel: value => {
         const source = profiles?.catalog()?.native_profile_capabilities?.[agents.backendOfInstance(value?.agent_instance_id)];
         return source?.enabled && source.catalogue_available ? source.models.find(row => row.id === value?.model_id)?.model || null : null;
@@ -1848,19 +1932,13 @@
       onError: error => toast(userError(error, "原生对话操作尚未确认，草稿与原请求保留。")) };
     const controllers = { codex: window.RabbitNativeChats.create({ ...options, root: panes.codex, settingsRoot: settingsPanes.codex,
       materialImages: materials,
-      getSendShortcut: () => state.preferences.send_shortcut,
-      onChooseConfiguration: kind => profiles?.open(kind),
       onManageProfiles: () => { state.browserPageTouched = true; showPage("management", "ai-profiles"); } }) };
     if (window.RabbitPiNative) controllers.pi = window.RabbitNativeChats.create({ ...options, root: panes.pi, settingsRoot: settingsPanes.pi,
       materialImages: materials,
-      getSendShortcut: () => state.preferences.send_shortcut,
-      onChooseConfiguration: kind => profiles?.open(kind),
       onManageProfiles: () => { state.browserPageTouched = true; showPage("management", "ai-profiles"); },
       descriptor: { agent: "pi", apiRoot: "/api/pi-chats", storageNamespace: "rabbit.pi-native-chats.page.v1.", createRenderer: window.RabbitPiNative.create } });
     if (window.RabbitHermesNative) controllers.hermes = window.RabbitNativeChats.create({ ...options, root: panes.hermes, settingsRoot: settingsPanes.hermes,
       materialImages: materials,
-      getSendShortcut: () => state.preferences.send_shortcut,
-      onChooseConfiguration: kind => profiles?.open(kind),
       onManageProfiles: () => { state.browserPageTouched = true; showPage("management", "ai-profiles"); },
       descriptor: { agent: "hermes", apiRoot: "/api/hermes-chats", storageNamespace: "rabbit.hermes-native-chats.page.v1.", createRenderer: window.RabbitHermesNative.create } });
     if (window.RabbitClaudeNative) controllers.claude = window.RabbitNativeChats.create({ ...options, root: panes.claude, settingsRoot: settingsPanes.claude,
@@ -1869,6 +1947,20 @@
       materialImages: materials,
       descriptor: { agent: "dsh", apiRoot: "/api/dsh-chats", storageNamespace: "rabbit.dsh-native-chats.page.v1.", createRenderer: window.RabbitDshNative.create } });
     let selected = "codex", available = {}, visible = false, settingsVisible = false, enabled = false, scope = "", language = "zh-CN", navigationVersion = 0, showExistingSelection = false, showing = Promise.resolve();
+    const readingRoot = el("div"); root.append(readingRoot);
+    const indexReader = window.RabbitNativeIndexText?.create({ root: readingRoot, scrollRoot: root, api: options.api, getWorkspace: options.getWorkspace,
+      renderMessage: (row, agent, match) => {
+        if (isThinkingRecord(row)) return null;
+        const item = messageNode(row, true, agent, match);
+        if (isOperationRecord(row)) item.dataset.operationRecord = "true";
+        return item;
+      },
+      onViewChange: source => { if (visible && state.page === "native-chats" && source?.workspace_id === scope) { nativeHeader(source); renderList(); } } });
+    function nativeHeader(source) {
+      const row = state.libraryItems.find(item => item.kind === "native" && item.agent === source.agent && item.id === source.chat_id);
+      ui.title.textContent = source.title || row?.title || "原生对话"; ui.eyebrow.textContent = ui.meta.textContent = "";
+    }
+    const readingSelected = () => !!indexReader?.selected();
     function remember() { try { if (scope) window.sessionStorage.setItem("rabbit.native-agent.v1." + encodeURIComponent(scope), selected); } catch (_) { /* Selection is optional; submission journals remain in the renderer. */ } }
     function renderChoice() {
       for (const [id, pane] of Object.entries(settingsPanes)) pane.hidden = id !== selected;
@@ -1882,54 +1974,100 @@
       specialistLocationRevision++;
       navigationVersion++;
       for (const controller of Object.values(controllers)) controller.hide();
+      indexReader?.clear();
       selected = choice.value; remember(); renderChoice();
       if (settingsVisible) controllers[selected].showSettings(); else if (visible) controllers[selected].show();
     });
     return {
       getComposerView: () => {
-        const view = visible && !settingsVisible && ["codex", "hermes", "pi"].includes(selected) && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.getComposerView?.() : null;
+        const view = !readingSelected() && visible && !settingsVisible && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.getComposerView?.() : null;
         return view && ["codex", "hermes"].includes(selected) ? { ...view, native_agents: ["codex", "hermes"] } : view;
       },
-      saveLocalConfiguration: (parameters, view, retry) => visible && !settingsVisible && selected === "codex" && scope === String(state.status?.workspace_id || "") ? controllers.codex?.saveLocalConfiguration?.(parameters, view, retry) ?? false : false,
-      chooseConfiguration: (kind, row, view) => visible && !settingsVisible && ["codex", "hermes", "pi"].includes(selected) && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.chooseConfiguration?.(kind, row, view) ?? false : false,
+      saveLocalConfiguration: (parameters, view, retry) => !readingSelected() && visible && !settingsVisible && selected === "codex" && scope === String(state.status?.workspace_id || "") ? controllers.codex?.saveLocalConfiguration?.(parameters, view, retry) ?? false : false,
+      chooseConfiguration: (kind, row, view) => !readingSelected() && visible && !settingsVisible && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.chooseConfiguration?.(kind, row, view) ?? false : false,
       applyConfigurationReadback(context, value) {
         const current = this.getConfigurationContext();
         if (!visible || settingsVisible || context?.workspace_id !== scope || context?.target?.kind !== "native" || context.target.agent !== selected || current?.chat_id !== context.target.chat_id) return false;
         return controllers[selected]?.applyConfigurationReadback?.(value) === true;
       },
-      getConfigurationContext: () => visible && !settingsVisible && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.getConfigurationContext?.() || null : null,
-      captureQuoteDraft: () => enabled && visible && !settingsVisible && ["codex", "pi", "hermes", "claude", "dsh"].includes(selected) && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.captureQuoteDraft?.() || null : null,
-      applyQuoteDraft: (expected, value, refs, preview) => enabled && visible && !settingsVisible && ["codex", "pi", "hermes", "claude", "dsh"].includes(selected) && expected?.agent === selected && scope === String(state.status?.workspace_id || "") && controllers[selected]?.applyQuoteDraft?.(expected, value, refs, preview) === true,
+      getConfigurationContext: () => !readingSelected() && visible && !settingsVisible && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.getConfigurationContext?.() || null : null,
+      captureQuoteDraft: () => !readingSelected() && enabled && visible && !settingsVisible && ["codex", "pi", "hermes", "claude", "dsh"].includes(selected) && scope === String(state.status?.workspace_id || "") ? controllers[selected]?.captureQuoteDraft?.() || null : null,
+      applyQuoteDraft: (expected, value, refs, preview) => !readingSelected() && enabled && visible && !settingsVisible && ["codex", "pi", "hermes", "claude", "dsh"].includes(selected) && expected?.agent === selected && scope === String(state.status?.workspace_id || "") && controllers[selected]?.applyQuoteDraft?.(expected, value, refs, preview) === true,
       setAvailability(status) {
         const next = String(status?.workspace_id || "");
         if (next !== scope) { navigationVersion++; scope = next; try { const value = window.sessionStorage.getItem("rabbit.native-agent.v1." + encodeURIComponent(scope)); if (Object.hasOwn(controllers, value)) selected = value; } catch (_) {} }
+        indexReader?.restore();
         available = { codex: status?.native_chats?.enabled === true, pi: !!controllers.pi && status?.pi_native_chats?.enabled === true,
           hermes: !!controllers.hermes && status?.hermes_native_chats?.enabled === true,
           claude: !!controllers.claude && status?.claude_native_chats?.enabled === true,
           dsh: !!controllers.dsh && status?.dsh_native_chats?.enabled === true };
-        if (!available[selected]) selected = Object.keys(controllers).find(id => available[id]) || "codex";
+        if (readingSelected()) selected = indexReader.selected().agent;
+        else if (!available[selected]) selected = Object.keys(controllers).find(id => available[id]) || "codex";
         renderChoice();
       },
-      setEnabled(value) { const next = value === true; if (enabled !== next) navigationVersion++; enabled = next; for (const [id, controller] of Object.entries(controllers)) controller.setEnabled(enabled && available[id]); renderChoice(); if (!enabled) this.hide(); },
-      setLanguage(value) { language = value === "en" ? "en" : "zh-CN"; for (const controller of Object.values(controllers)) controller.setLanguage(language); renderChoice(); },
-      show() { visible = true; settingsVisible = false; root.hidden = false; const existingSelection = showExistingSelection; showExistingSelection = false; for (const [id, controller] of Object.entries(controllers)) if (id !== selected) controller.hide(); return showing = Promise.resolve(controllers[selected]?.show({ existingSelection })).then(async () => { const source = controllers[selected]?.getQuoteContext(); if (visible && state.page === "native-chats" && source) { ui.title.textContent = source.title; ui.meta.textContent = (backendLabels[source.agent] || source.agent) + " · 原生对话"; await renderNativeOrigin(source, () => visible && state.page === "native-chats" && scope === source.workspace_id && selected === source.agent && controllers[selected]?.getQuoteContext()?.chat_id === source.chat_id); } }); },
-      showSettings() { visible = false; settingsVisible = true; root.hidden = true; for (const [id, controller] of Object.entries(controllers)) if (id !== selected) controller.hide(); return controllers[selected]?.showSettings(); },
-      hide() { navigationVersion++; showExistingSelection = false; visible = settingsVisible = false; root.hidden = true; for (const controller of Object.values(controllers)) controller.hide(); },
+      setEnabled(value) { const next = value === true; if (enabled !== next) navigationVersion++; enabled = next; for (const [id, controller] of Object.entries(controllers)) controller.setEnabled(enabled && available[id]); renderChoice(); if (!enabled && !readingSelected()) this.hide(); },
+      setLanguage(value) { language = value === "en" ? "en" : "zh-CN"; for (const controller of Object.values(controllers)) controller.setLanguage(language); indexReader?.setLanguage(language); renderChoice(); },
+      hasReadOnlySelection: readingSelected,
+      getViewContext() { return visible && !settingsVisible ? indexReader?.getViewContext() || (!readingSelected() ? controllers[selected]?.getQuoteContext() : null) : null; },
+      async openEntry(value, details = {}) {
+        if (details.readOnly !== true && available[value?.agent]) return this.selectExisting(value);
+        if (!indexReader) throw Error("只读历史组件尚未加载，请刷新页面。");
+        specialistLocationRevision++; navigationVersion++;
+        indexReader.select(value, details);
+        for (const controller of Object.values(controllers)) controller.hide();
+        selected = value.agent; remember(); renderChoice(); state.browserPageTouched = true;
+        showPage("native-chats"); renderList(); return showing;
+      },
+      show() {
+        visible = true; settingsVisible = false; root.hidden = false;
+        const existingSelection = showExistingSelection; showExistingSelection = false;
+        if (readingSelected()) {
+          for (const controller of Object.values(controllers)) controller.hide();
+          nativeHeader(indexReader.selected());
+          return showing = Promise.resolve(indexReader.show());
+        }
+        indexReader?.hide();
+        for (const [id, controller] of Object.entries(controllers)) if (id !== selected) controller.hide();
+        return showing = Promise.resolve(controllers[selected]?.show({ existingSelection })).then(async () => {
+          const source = controllers[selected]?.getQuoteContext();
+          if (visible && state.page === "native-chats" && source) {
+            ui.title.textContent = source.title; ui.eyebrow.textContent = ui.meta.textContent = "";
+            appendListSearchMatch(panes[selected].querySelector(".rbs-chat-more"));
+            await renderNativeOrigin(source, () => visible && state.page === "native-chats" && scope === source.workspace_id
+              && selected === source.agent && controllers[selected]?.getQuoteContext()?.chat_id === source.chat_id);
+          }
+        });
+      },
+      showSettings() { visible = false; settingsVisible = true; root.hidden = true; indexReader?.hide(); for (const [id, controller] of Object.entries(controllers)) if (id !== selected) controller.hide(); return controllers[selected]?.showSettings(); },
+      hide() { navigationVersion++; showExistingSelection = false; visible = settingsVisible = false; root.hidden = true; indexReader?.hide(); for (const controller of Object.values(controllers)) controller.hide(); },
       readCreation(creationId, agent = "codex") {
         if (!["codex", "hermes"].includes(agent) || !enabled || !available[agent] || scope !== String(state.status?.workspace_id || "")) throw Error("原创建入口暂不可用，原记录保留。");
         return controllers[agent].readCreation(creationId);
       },
-      async createNew(agent, isCurrent = () => true, savedProfile = null, initialDraft = null, send = false, preparation = null) {
+      async createNew(agent, isCurrent = () => true, savedProfile = null, initialDraft = null, send = false, preparation = null, captureNextDraft = null) {
         specialistLocationRevision++;
         const request = ++navigationVersion, originalWorkspace = scope;
         if (!isCurrent() || !enabled || !available[agent] || !controllers[agent]) throw Error("这个 Agent 的原生入口暂不可用。");
         const current = () => isCurrent() && request === navigationVersion && scope === originalWorkspace && enabled && available[agent];
         const id = await controllers[agent].createNew(savedProfile, current, initialDraft, preparation);
         if (!id || !isCurrent() || request !== navigationVersion || scope !== originalWorkspace) return false;
-        selected = agent; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true; showPage("native-chats"); refreshChats().catch(() => {});
+        const draftToken = send ? controllers[agent].captureDraftRevision?.(id) || null : null;
+        const nextDraft = send && typeof captureNextDraft === "function" ? captureNextDraft() : null;
+        indexReader?.clear(); selected = agent; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true; showPage("native-chats"); refreshChats().catch(() => {});
+        const location = state.contextNavigationVersion;
         if (send) {
           await showing;
-          if (state.page === "native-chats" && selected === agent && scope === originalWorkspace) await controllers[agent].sendDraft(id);
+          if (request !== navigationVersion || location !== state.contextNavigationVersion || state.page !== "native-chats" || selected !== agent || scope !== originalWorkspace) return false;
+          if (draftToken && controllers[agent].captureDraftRevision?.(id) !== draftToken) { toast("目标对话已有新草稿，没有覆盖或发送；首页草稿仍保留。"); return false; }
+          const sending = controllers[agent].sendDraft(id);
+          // sendDraft freezes A synchronously. B is a local draft, never a
+          // second submission, and a newer target edit C invalidates its token.
+          if (nextDraft) {
+            if (draftToken && controllers[agent].adoptTextDraft?.(id, draftToken, nextDraft.text) === true) {
+              if (nextDraft.consume() !== true) toast("新草稿已放到当前对话；首页仍保留一份，请核对后再发送。");
+            } else toast("新输入仍保留在首页；目标草稿没有覆盖。");
+          }
+          await sending;
         }
         return true;
       },
@@ -1946,7 +2084,7 @@
           },
         });
         if (!id || !current()) return { accepted: false };
-        selected = agent; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true;
+        indexReader?.clear(); selected = agent; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true;
         showPage("native-chats"); const location = state.contextNavigationVersion;
         refreshChats().catch(() => {}); await showing;
         // This explicit navigation replaces the preparation view. From here the
@@ -1957,9 +2095,9 @@
         return { accepted: !!receipt && ["accepted", "completed", "failed", "interrupted"].includes(receipt.status)
           && (agent === "hermes" ? receipt.chat_id === id : receipt.session_key === "chat/codex/" + id) };
       },
-      getQuoteContext() { return enabled && visible && available[selected] ? controllers[selected]?.getQuoteContext() : null; },
-      getTextSnapshot() { return enabled && visible && available[selected] ? controllers[selected]?.getTextSnapshot() : null; },
-      async readTextSnapshot() { return enabled && visible && available[selected] ? controllers[selected]?.readTextSnapshot() : null; },
+      getQuoteContext() { return !readingSelected() && enabled && visible && available[selected] ? controllers[selected]?.getQuoteContext() : null; },
+      getTextSnapshot() { return !readingSelected() && enabled && visible && available[selected] ? controllers[selected]?.getTextSnapshot() : null; },
+      async readTextSnapshot() { return !readingSelected() && enabled && visible && available[selected] ? controllers[selected]?.readTextSnapshot() : null; },
       async selectExisting(value, isCurrent = () => true) {
         specialistLocationRevision++;
         const request = ++navigationVersion, sourceWorkspace = scope, target = value?.agent;
@@ -1968,7 +2106,7 @@
         if (!value || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value.chatId) || !current()) throw Error(language === "en" ? "The native chat entry or workspace is unavailable." : "原生对话入口或所属工作区暂不可用。");
         if (await controllers[target].selectExisting(value, current) !== true || !current()) return false;
         for (const controller of Object.values(controllers)) controller.hide();
-        selected = target; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true; showPage("native-chats"); renderList();
+        indexReader?.clear(); selected = target; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true; showPage("native-chats"); renderList();
         return true;
       },
       async putDraft(value, isCurrent = () => true) {
@@ -1988,7 +2126,7 @@
         if (scope !== workspaceId || scope !== String(state.status?.workspace_id || "")) throw Error("工作区已变化，请在原工作区核对刚才的草稿。");
         if (!afterSelection()) return true; // The synchronous draft commit already succeeded; do not redirect a later view.
         for (const controller of Object.values(controllers)) controller.hide();
-        selected = agent; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true; showPage("native-chats");
+        indexReader?.clear(); selected = agent; remember(); renderChoice(); showExistingSelection = true; state.browserPageTouched = true; showPage("native-chats");
         return true;
       },
     };
@@ -1997,7 +2135,7 @@
   function updateNativeChatsAvailability() {
     nativeChats?.setAvailability(state.status);
     const enabled = nativeChatsEnabled(); nativeChats?.setEnabled(enabled);
-    if (!enabled && state.page === "native-chats") showPage("conversations");
+    if (!enabled && state.page === "native-chats" && !nativeChats?.hasReadOnlySelection()) showPage("conversations");
   }
   function nativeHandoffTargets() { return [
       { agent: "codex", label: "Codex", apiRoot: "/api/native-chats", enabled: state.status?.native_chats?.enabled },
@@ -2143,10 +2281,12 @@
   }
   function chooseHistoryMode(mode) {
     if (!["native", "text"].includes(mode) || !historyTextSource()) return false;
+    const wasReadOnly = state.historyReadOnly;
+    state.historyReadOnly = false;
     const id = state.selected.id, previous = historyChoice();
     state.historyChoices.set(id, { ...previous, mode }); state.backendChoiceVersion++;
     invalidateContextPreview("接续方式已更换，请重新查看本轮内容。");
-    if (saveDraft() !== true) { state.historyChoices.set(id, previous); updateComposer(); toast("浏览器不能保存接续选择；原方式与草稿保留。"); return false; }
+    if (saveDraft() !== true) { state.historyReadOnly = wasReadOnly; state.historyChoices.set(id, previous); updateComposer(); toast("浏览器不能保存接续选择；原方式与草稿保留。"); return false; }
     historyHeader(); updateComposer(); return true;
   }
   async function continueNativeHistory() {
@@ -2315,6 +2455,11 @@
   const workStatus = window.RabbitWorkStatus ? window.RabbitWorkStatus.create({
     api: (path, options) => api(path, options, false),
     getWorkspace: () => state.status?.workspace_id || "", translate: uiText,
+    onSnapshot: observation => {
+      if (observation || state.page === "management" && state.workspaceSections.management === "agents") {
+        nativeWorkRead++; acceptNativeWorkStatus(observation);
+      }
+    },
     getLabel: row => state.libraryWorkspace === state.status?.workspace_id
       ? state.libraryItems.find(item => item.kind === "native" && item.agent === row.agent && item.id === row.chat_id)?.title || "" : "",
     onOpen: async (row, isCurrent) => {
@@ -2337,11 +2482,13 @@
   const workspace = window.RabbitWorkspace ? window.RabbitWorkspace.create({
     root: $("workspace-panel"), api, getWorkspace: () => state.status?.workspace_id || "",
     workStatus,
+    getOverview: () => myAI?.snapshot(),
+    onOpenWork: (action, isCurrent = () => true) => isCurrent() ? openMyAIAction(action) : false,
     getSelection: () => ({ backend: state.backend, model_id: state.model_id, chatId: state.selected.type === "chat" ? state.selected.id : null, chatTitle: state.chat && state.chat.title || state.selected.type === "history" && state.historySession && state.historySession.title }),
     selectBackend, selectModel, onPreferences: applyPreferences, profiles, profilesEnabled, onNavigate: showPage,
     renderSpecialistSettings: container => container.append(settingsMounts.specialist),
     renderNativeSettings: container => container.append(settingsMounts.native),
-    onSectionChange: ({ page, tab }) => { state.workspaceSections[page] = tab; if (workspaceReady) { if (state.page === page) workspaceHeader(); renderSidebar(); } },
+    onSectionChange: ({ page, tab }) => { state.workspaceSections[page] = tab; if (workspaceReady) { state.managementTarget = workspace?.getObject?.() || null; if (state.page === page) workspaceHeader(); renderSidebar(); checkpointBrowserState(); } },
     onLanguageChange: updateBasicLanguage, onAddResource: openConnectionGuide, onManual: openManual,
     onManagement: (data) => {
       state.management = data;
@@ -2351,9 +2498,32 @@
     },
   }) : null;
   workspaceReady = true;
+  const myAI = window.RabbitMyAIPage?.create({ root: $("my-ai-panel"), headerActions: ui.actions, api, getWorkspace: () => state.status?.workspace_id || "",
+    onNewChat: newChat,
+    onRead: value => { state.management = value.management; profiles?.setInventory(); updateComposer(); },
+    onCheck: async () => {
+      if (!statusChecks) throw Error("综合核对入口暂不可用。已有目录保留。");
+      await statusChecks.show(); await statusChecks.start();
+    },
+    onAction: openMyAIAction,
+  });
+  async function openMyAIAction(action) {
+      state.browserPageTouched = true;
+      if (action.kind === "conversations") { await switchListView(); toggleSidebar(true); return; }
+      const target = action.target;
+      if (action.kind === "manage") {
+        const tab = target.kind === "agent" ? "agents" : target.kind === "model" ? "models" : "memory-profiles";
+        state.managementTarget = target.id ? { kind: target.kind, id: target.id } : null;
+        showPage("management", tab); if (target.id) await workspace?.openObject?.(target); checkpointBrowserState(); return;
+      }
+      if (target?.kind === "native") return nativeChats?.openEntry({ agent: target.agent, chatId: target.id, workspaceId: state.status.workspace_id }, { readOnly: action.kind === "read" || target.read_only });
+      if (target?.kind === "history") return openHistory(target.agent, target.session_id, null, 0, true);
+      if (target?.kind === "chat") return openChat(target.id);
+      throw Error("这项工作没有可核对的原始编号。原稿保留。");
+  }
   function uiText(text) { return window.RabbitWorkspace?.translate?.(text) || text; }
   function updateBasicLanguage() {
-    for (const [id, text] of [["conversations-nav", "对话"], ["management-nav", "管理"], ["settings-nav", "设置"]]) $(id).textContent = uiText(text);
+    for (const [id, text] of [["my-ai-nav", "我的 AI"], ["conversations-nav", "对话"], ["management-nav", "管理"], ["settings-nav", "设置"]]) if ($(id)) $(id).textContent = uiText(text);
     specialist?.setLanguage(window.RabbitWorkspace?.language?.() || "zh-CN");
     nativeChats?.setLanguage(window.RabbitWorkspace?.language?.() || "zh-CN");
     $("new-chat").textContent = "＋ " + uiText("新对话");
@@ -2384,7 +2554,7 @@
     index.setAttribute("aria-label", "手册目录");
     if (window.OneAIRichText?.render) window.OneAIRichText.render(body, text);
     else { const plainText = el("pre", "document-lines", text); body.append(plainText); }
-    const topics = { intro: "小白兔是什么", ai: "AI 配置", memory: "记忆配置", native: "Agent 会话", specialist: "小白兔专员", settings: "应用设置", devices: "设备", "connect-agent": "接入 Agent", "connect-model": "接入大模型", problems: "遇到问题" };
+    const topics = { intro: "小白兔是什么", ai: "AI 配置", memory: "记忆配置", native: "Agent 会话", specialist: "小白兔专员", settings: "应用设置", "connect-agent": "接入 Agent", "connect-model": "接入大模型", problems: "遇到问题" };
     const headings = [...body.querySelectorAll("h2,h3")], sections = new Map();
     for (const [key, label] of Object.entries(topics)) {
       const heading = headings.find(node => node.textContent.trim() === label);
@@ -2454,15 +2624,19 @@
     finally { state.backendChoosing = false; updateComposer(); }
   }
   function workspaceHeader() {
+    if (state.page === "my-ai") {
+      ui.title.textContent = "我的 AI"; ui.eyebrow.textContent = ui.meta.textContent = "";
+      ui.actions.replaceChildren(...(myAI?.actions() ? [myAI.actions()] : [])); ui.composer.hidden = true; return;
+    }
     if (state.page === "continuation") {
       ui.title.textContent = "接着《" + (continuations?.current()?.source_view.title || "原对话") + "》";
       ui.eyebrow.textContent = ui.meta.textContent = ""; ui.actions.replaceChildren(); ui.composer.hidden = true; return;
     }
     if (state.page === "native-chats") {
-      ui.title.textContent = window.RabbitWorkspace?.language?.() === "en" ? "Native chats" : "原生对话";
-      ui.eyebrow.textContent = "小白兔";
-      ui.meta.textContent = window.RabbitWorkspace?.language?.() === "en" ? "Native sessions · explicit connections" : "原生会话 · 独立连接";
-      ui.actions.replaceChildren(button(window.RabbitWorkspace?.language?.() === "en" ? "Session settings" : "会话设置", "text-button", () => showPage("settings", "native-chats"))); appendNativeOrigin(); ui.composer.hidden = true;
+      const view = nativeChats?.getViewContext(), row = view && state.libraryItems.find(item => item.kind === "native" && item.agent === view.agent && item.id === view.chat_id);
+      ui.title.textContent = view?.title || row?.title || (window.RabbitWorkspace?.language?.() === "en" ? "Native chats" : "原生对话");
+      ui.eyebrow.textContent = ui.meta.textContent = "";
+      ui.actions.replaceChildren(); appendNativeOrigin(); ui.composer.hidden = true;
       return;
     }
     if (state.page === "specialist") {
@@ -2475,7 +2649,7 @@
       return;
     }
     const section = state.workspaceSections[state.page];
-    ui.title.textContent = workspace?.getNavigation(state.page).find(value => value.id === section)?.label || uiText(state.page === "management" ? "管理" : "设置");
+    ui.title.textContent = state.page === "management" && workspace?.getObjectTitle?.() || workspace?.getNavigation(state.page).find(value => value.id === section)?.label || uiText(state.page === "management" ? "管理" : "设置");
     ui.eyebrow.textContent = "";
     ui.meta.textContent = "";
     ui.actions.replaceChildren(); ui.composer.hidden = true;
@@ -2531,9 +2705,9 @@
   }
   function showPage(page, tab, { keepSidebar = false } = {}) {
     fileTasks?.close(); fileMaterials?.close(); projectPublish?.close();
-    if (!['conversations', 'management', 'settings', 'specialist', 'native-chats', 'continuation'].includes(page)) return;
+    if (!['my-ai', 'conversations', 'management', 'settings', 'specialist', 'native-chats', 'continuation'].includes(page)) return;
     if (page === "specialist" && !specialistEnabled()) return;
-    if (page === "native-chats" && !nativeChatsEnabled()) return;
+    if (page === "native-chats" && !nativeChatsEnabled() && !nativeChats?.hasReadOnlySelection()) return;
     specialistLocationRevision++;
     saveDraft();
     profiles?.close(false);
@@ -2544,6 +2718,12 @@
     if (previousPage === "conversations" && page !== "conversations") invalidateContextPreview("已离开对话页，请返回后重新查看本轮上下文。");
     if (previousPage === "conversations") state.conversationScrollTop = Math.max(0, Number(ui.scroll.scrollTop) || 0);
     state.page = page;
+    specialist?.setPassive?.(page === "my-ai");
+    if (page !== "my-ai") myAI?.hide();
+    if (statusReportMount) {
+      if (page === "my-ai") myAI?.reportMount()?.append(statusReportMount);
+      else if (page === "specialist") $("specialist-guide-panel")?.querySelector(".rbs-guide")?.append(statusReportMount);
+    }
     $("specialist-layout").hidden = page !== "specialist";
     if (page !== "specialist") specialist?.hide();
     if (page !== "specialist") statusChecks?.hide();
@@ -2555,7 +2735,9 @@
       if (active) node.setAttribute("aria-current", "page"); else node.removeAttribute("aria-current");
     });
     ui.scroll.hidden = page !== "conversations";
-    if (page === "conversations") {
+    if (page === "my-ai") {
+      workspace?.hide(); workspaceHeader(); myAI?.show();
+    } else if (page === "conversations") {
       if (previousPage !== "conversations") ui.scroll.scrollTop = state.conversationScrollTop;
       if (state.selected.type === "new" && state.homeNativeChoice?.profile) { state.profile_snapshot = toProfileSnapshot(state.homeNativeChoice.profile, state.homeNativeChoice.memory); state.backend = state.homeNativeChoice.agent; state.model_id = state.homeNativeChoice.profile.model_id; }
       if (workspace) workspace.hide();
@@ -2600,8 +2782,8 @@
   function showWelcome() {
     const welcome = el("div", "welcome");
     const hero = el("div", "welcome-hero"), copy = el("div", "welcome-copy"), heading = el("h3");
-    for (const line of ["不同AI，", "不同设备，", "同一入口"]) heading.append(el("span", "", line));
-    copy.append(heading, el("p", "", "对话、资料和记忆，全部放一起。"));
+    for (const line of ["新的一段，", "从这里开始"]) heading.append(el("span", "", line));
+    copy.append(heading, el("p", "", "选择已有的 AI 配置，写下这次想做的事。"));
     const icon = el("img", "welcome-icon"); icon.src = "/rabbit-app-1024.png"; icon.alt = ""; icon.width = icon.height = 200;
     hero.append(copy, icon);
     const actions = el("div", "welcome-actions");
@@ -2634,7 +2816,7 @@
       ui.actions.append(headerMore(secondary));
     }
     ui.composer.hidden = false;
-   
+    appendListSearchMatch();
     ui.messages.setAttribute("aria-live", "polite");
   }
   function exportTime(value) {
@@ -2774,10 +2956,6 @@
   }
   async function exportChat() {
     if (state.selected.type !== "chat" || state.exporting) return;
-    if (isImCodesPreview && window.self !== window.top) {
-      toast("请先点击 IM.codes 的“在新标签页打开”，再导出文字。");
-      return;
-    }
     const id = state.selected.id;
     state.exporting = true; headerForChat(state.chat || state.chats.find((chat) => chat.id === id));
     try {
@@ -3003,6 +3181,7 @@
     } finally { if (version === state.contextVersion) updateComposer(); }
   }
   function newChat() {
+    state.historyReadOnly = false;
     showPage("conversations");
     closeSourceUpdate(false);
     closeSourceImages(false);
@@ -3019,6 +3198,7 @@
     ui.input.focus();
     checkpointBrowserState();
     schedulePoll(true);
+    if (profilesEnabled() && profiles && !state.profilesInventory) void profiles.load().catch(error => toast(userError(error, "配置目录暂未读到，草稿保留。")));
   }
   function showViewError(message, retry) {
     const box = el("div", "view-error");
@@ -3026,6 +3206,7 @@
     ui.messages.replaceChildren(box);
   }
   async function openChat(id, keepSidebar = false, target = null) {
+    state.historyReadOnly = false;
     showPage("conversations");
     closeSourceUpdate(false);
     closeSourceImages(false);
@@ -3099,7 +3280,8 @@
     if (captured.task_intent.mode !== "chat") throw Error("请先完成或取消“生成文件”任务，再切换原生 Agent；原稿和文件保留。");
     const memory = nativeDraftMemory();
     return { ...captured, type, workspaceId: state.status?.workspace_id || "", key: draftKey(), openVersion: state.openVersion,
-      editVersion: state.sourceUpdateInputVersion, memory, memorySpecified: type !== "history" || memory !== null || historyChoice()?.memory_explicit === true };
+      editVersion: state.sourceUpdateInputVersion, navigationVersion: state.contextNavigationVersion, configurationVersion: state.backendChoiceVersion,
+      configuration: JSON.stringify([state.backend, state.model_id, state.profile_snapshot]), memory, memorySpecified: type !== "history" || memory !== null || historyChoice()?.memory_explicit === true };
   }
   function sameNativeDraft(source) {
     try {
@@ -3108,6 +3290,18 @@
         && source.editVersion === current.editVersion && source.stamp === current.stamp && source.text === current.text
         && JSON.stringify(source.attachment_ids) === JSON.stringify(current.attachment_ids) && JSON.stringify(source.memory) === JSON.stringify(current.memory)
         && source.memorySpecified === current.memorySpecified;
+    } catch (_) { return false; }
+  }
+  function sameNativeSendTarget(source) {
+    // A click freezes its text. Later typing is another local draft, while the
+    // original target, chosen configuration and materials must remain unchanged.
+    try {
+      const current = captureNativeDraft(source.type);
+      return source.workspaceId === current.workspaceId && source.key === current.key && source.openVersion === current.openVersion
+        && source.navigationVersion === current.navigationVersion && source.configurationVersion === current.configurationVersion
+        && source.configuration === current.configuration && JSON.stringify(source.attachment_ids) === JSON.stringify(current.attachment_ids)
+        && JSON.stringify(source.file_inputs) === JSON.stringify(current.file_inputs) && sameTaskIntent(source.task_intent, current.task_intent)
+        && JSON.stringify(source.memory) === JSON.stringify(current.memory) && source.memorySpecified === current.memorySpecified;
     } catch (_) { return false; }
   }
   async function prepareNativeDraft(agent, source, isCurrent) {
@@ -3305,7 +3499,7 @@
     if (!nativeFileHandoff || !fileMaterials || selection?.workspace_id !== state.status?.workspace_id) throw Error("文件资料入口或工作区暂不可用。");
     nativeHandoff?.close(); nativeTextHandoff?.close(); nativeFileHandoff.close();
     if (!$("native-file-handoff-modal").hidden || !$("native-handoff-modal").hidden || !$("native-text-handoff-modal").hidden) throw Error("资料正在放入目标草稿，请稍后再打开文件。");
-    const version = ++documentVersion, scope = selection.workspace_id;
+    const version = ++documentVersion, scope = selection.workspace_id, capturedDraft = quoteDraft();
     documentDraftPreview = null;
     if ($("document-viewer").hidden) documentReturnFocus = document.activeElement;
     $("document-viewer").hidden = false;
@@ -3325,20 +3519,71 @@
       $("document-meta").textContent = `${data.path} · ${data.size_bytes} 字节 · 所见磁盘版本${data.observation.file_status === "external_modified" ? " · 含外部修改" : ""}`;
       $("document-content").append(el("pre", "file-task-preview-content", data.content));
       const tools = el("span", "document-draft-tools"), note = el("span", "document-draft-note", "将整份文件作为资料，不改写原聊天。" );
-      let attempted = false, busy = false;
+      let attempted = false, busy = false, frozenFile = null;
+      const sameDraft = () => {
+        const draft = quoteDraft();
+        return current() && draft.active && !draft.busy && draft.stamp === capturedDraft.stamp
+          && draft.text === capturedDraft.text;
+      };
+      const canAdd = () => capturedDraft.active && !capturedDraft.busy && fileInputsSupported()
+        && capturedDraft.task_intent.artifact_ids.length < 4
+        && !(capturedDraft.task_intent.mode === "files" && capturedDraft.attachment_ids.length);
+      async function frozenInput({ recoverSelected = false } = {}) {
+        if (frozenFile) return frozenFile;
+        // Reuse this exact origin's verified import, including a previous open
+        // of the same file. An uncertain import is only queried, never retried.
+        let item = await fileMaterials.recoverMarkdown(origin);
+        if (!current()) return null;
+        if (!item && !attempted && recoverSelected && capturedDraft.native_quote && capturedDraft.active && !capturedDraft.busy) {
+          // Native journals retain immutable refs across reloads, while the
+          // shared metadata cache does not. Resolve those selected IDs before
+          // deciding that this Markdown origin has not already been imported.
+          for (const id of capturedDraft.task_intent.artifact_ids) {
+            const metadata = await fileMaterials.inspect(id);
+            if (!current()) return null;
+            const expected = capturedDraft.native_quote.material_refs.find(ref => ref.kind === "text" && ref.id === id);
+            if (metadata.id !== id || expected?.sha256 && metadata.sha256 !== expected.sha256
+                || !metadata.available || !metadata.content_verified) throw Error("已有文件的版本或可用性尚未核对，未再次导入；原草稿保留。");
+          }
+          item = await fileMaterials.recoverMarkdown(origin);
+          if (!current()) return null;
+        }
+        if (!item && !attempted) {
+          attempted = true;
+          item = await fileMaterials.markdown(data.snapshot_ticket, data.name, origin, data.size_bytes);
+        }
+        if (!current()) { toast("文件导入请求保留在原入口，未放入其他草稿。"); return null; }
+        if (!item) { note.textContent = "尚未找到已核验的原导入回执；未重新读取磁盘或再次导入。"; return null; }
+        const frozen = await fileMaterials.read(item);
+        if (!current()) return null;
+        if (frozen.text !== data.content || frozen.artifact.sha256 !== data.sha256
+            || frozen.artifact.size_bytes !== data.size_bytes) throw Error("资料版本与所见文件不一致，未交给Agent。");
+        frozenFile = frozen; return frozen;
+      }
+      const add = button("加入当前草稿", "document-to-draft", async () => {
+        if (!current() || busy) return;
+        if (!canAdd() || !sameDraft()) { note.textContent = "当前草稿、配置或已有材料已变化，或文件已达四份；原稿保留，请重新打开后再选择。"; return; }
+        busy = true; add.disabled = use.disabled = true;
+        try {
+          const frozen = await frozenInput({ recoverSelected: true }); if (!current() || !frozen) return;
+          if (!sameDraft()) throw Error("草稿、配置或页面已变化；文件资料已保留，没有放入其他草稿。请重新打开后再选择。");
+          const ids = capturedDraft.task_intent.artifact_ids, item = frozen.artifact;
+          if (!ids.includes(item.id) && await putQuoteDraft(capturedDraft.text, capturedDraft,
+              capturedDraft.attachment_ids, [...ids, item.id], sameDraft, [{ id: item.id, sha256: item.sha256 }]) !== true) {
+            throw Error("当前草稿没有接收文件；原问题与已有材料保留，请重新打开后再选择。");
+          }
+          closeDocument(); toast(ids.includes(item.id) ? "这份文件已在当前草稿中，尚未发送。" : "完整文件已加入当前草稿；原问题和已有材料保留，尚未发送。");
+        } catch (error) {
+          if (current()) note.textContent = userError(error, "文件尚未加入当前草稿；原稿和固定资料保留。");
+        } finally { busy = false; if (current()) { add.disabled = !canAdd(); use.disabled = false; } }
+      });
+      add.disabled = !canAdd();
       const use = button("交给原生 Agent", "document-to-draft", async () => {
         if (!current() || busy) return;
-        busy = true; use.disabled = true;
+        busy = true; add.disabled = use.disabled = true;
         try {
-          const recovering = attempted; attempted = true;
-          const item = recovering ? await fileMaterials.recoverMarkdown(origin)
-            : await fileMaterials.markdown(data.snapshot_ticket, data.name, origin, data.size_bytes);
-          if (!current()) { toast("文件导入请求保留在原入口，未放入其他草稿。"); return; }
-          if (!item) { note.textContent = "尚未找到已核验的原导入回执；未重新读取磁盘或再次导入。"; return; }
-          const frozen = await fileMaterials.read(item);
-          if (!current()) return;
-          if (frozen.text !== data.content || frozen.artifact.sha256 !== data.sha256
-              || frozen.artifact.size_bytes !== data.size_bytes) throw Error("资料版本与所见文件不一致，未交给Agent。");
+          const frozen = await frozenInput(); if (!current() || !frozen) return;
+          const item = frozen.artifact;
           const input = { workspace_id: scope, ...frozen,
             source_key: JSON.stringify([scope, version, item.id, item.sha256]) };
           nativeFileInput = input;
@@ -3353,10 +3598,10 @@
           if (current()) note.textContent = userError(error, "导入结果尚未确认，请核对原回执；所见文件保留。");
         } finally {
           busy = false;
-          if (current()) { use.disabled = false; use.textContent = attempted ? "核对原导入回执" : "交给原生 Agent"; }
+          if (current()) { add.disabled = !canAdd(); use.disabled = false; use.textContent = attempted && !frozenFile ? "核对原导入回执" : "交给原生 Agent"; }
         }
       });
-      tools.append(use, note); $("document-meta").append(tools);
+      tools.append(add, use, note); $("document-meta").append(tools);
     } catch (error) {
       if (!current()) return;
       $("document-title").textContent = "暂时不能读取这个Markdown文件";
@@ -3405,7 +3650,7 @@
       $("document-content").append(el("p", "", userError(error, "文件可能不在本项目里，或这台 Mac 暂时不能读取。")));
     }
   }
-  function messageNode(message, history, sourceAgent) {
+  function messageNode(message, history, sourceAgent, historyMatch = state.historyMatch) {
     const summaryLabel = sourceBackgroundLabel(message, sourceAgent), summary = Boolean(summaryLabel), role = summary ? "system" : message.role || "assistant";
     const backend = message.backend || message.provenance && message.provenance.agent || sourceAgent;
     const internal = ["approval_context", "agent_context", "agent_message"].includes(message.message_kind);
@@ -3413,7 +3658,7 @@
     const article = el("article", `message ${role}${message.status === "pending" || message.status === "running" ? " pending" : ""}${phase === "过程" ? " commentary" : ""}${internal ? " internal-record" : ""}`);
     article.dataset.messageId = String(message.id || message.message_id || "");
     article.dataset.controlInterface = "ai";
-    const matched = state.historyMatch && article.dataset.messageId === state.historyMatch.messageId;
+    const matched = historyMatch && article.dataset.messageId === historyMatch.messageId;
     if (matched) { article.classList.add("search-match"); article.tabIndex = -1; }
     const label = internal ? "内部记录" : role === "user" ? "你" : role === "assistant" ? backendLabels[backend] || "AI" : role === "system" ? "背景说明" : role === "tool" ? "工具记录" : "记录";
     const top = el("div", "message-topline");
@@ -3427,7 +3672,7 @@
     if (sourceTimestamp && message.created_at && sourceTimestamp !== message.created_at) { const added = el("time", "message-time message-import-time", `补入 ${shortDate(message.created_at)}`); added.title = `录入此共同聊天时间：${fullDate(message.created_at)}；原来源时间与录入顺序分别保留。`; top.append(added); }
     const original = plain(message.content);
     const display = typeof message.display_content === "string" ? message.display_content : original;
-    const query = matched ? String(state.historyMatch.query || "") : "";
+    const query = matched ? String(historyMatch.query || "") : "";
     const rawMatch = !!query && !display.toLocaleLowerCase().includes(query.toLocaleLowerCase()) && original.toLocaleLowerCase().includes(query.toLocaleLowerCase());
     const content = state.rawMessages || rawMatch ? original : display;
     const copy = button(hasImageRecords(message) ? "复制文字" : "复制", "message-copy", async () => {
@@ -3440,8 +3685,8 @@
     top.append(copy);
     const body = el("div", `message-content${state.rawMessages || rawMatch ? " plain-original" : ""}`);
     if (rawMatch && !state.rawMessages) top.append(el("span", "matched-label", "匹配原文"));
-    if (state.rawMessages || rawMatch || state.preferences.markdown === false) appendHighlightedText(body, content, matched ? state.historyMatch.query : "");
-    else window.OneAIRichText.render(body, content, { query: matched ? state.historyMatch.query : "", openDocument });
+    if (state.rawMessages || rawMatch || state.preferences.markdown === false) appendHighlightedText(body, content, matched ? historyMatch.query : "");
+    else window.OneAIRichText.render(body, content, { query: matched ? historyMatch.query : "", openDocument });
     article.append(top);
     article.append(body);
     if (role === "user" && !history) appendFileInputs(article, message);
@@ -3972,18 +4217,19 @@
   }
   async function syncCurrentView() {
     if (document.hidden || state.syncInFlight) return;
+    readNativeWorkStatus();
     state.syncInFlight = true; state.syncRequested = false;
-    const version = state.openVersion; const type = state.selected.type; const id = state.selected.id;
+    const version = state.openVersion; const type = state.selected.type; const id = state.selected.id; const page = state.page;
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     state.syncAbort = controller;
     const options = controller ? { signal: controller.signal } : {};
-    const current = () => !document.hidden && !(controller && controller.signal.aborted) && version === state.openVersion && type === state.selected.type && id === state.selected.id;
+    const current = () => !document.hidden && !(controller && controller.signal.aborted) && page === state.page && version === state.openVersion && type === state.selected.type && id === state.selected.id;
     try {
       const params = type === "chat" && id ? `?${new URLSearchParams({ chat_id: id })}` : "";
       const changes = await api(`/api/changes${params}`, options);
       if (!current()) return;
       const libraryRevision = changes.library_revision ?? changes.revision;
-      if (profilesEnabled() && profiles && changes.profiles_revision && changes.profiles_revision !== state.profilesRevision) { await profiles.load(true); if (!current()) return; }
+      if (profileDirectoryNeeded() && profilesEnabled() && profiles && changes.profiles_revision && changes.profiles_revision !== state.profilesRevision) { await profiles.load(true); if (!current()) return; }
       if (libraryRevision !== (state.libraryWatchRevision ?? state.libraryRevision)) {
         const chats = await refreshChats(current, options);
         if (!current() || chats === null) return;
@@ -3992,7 +4238,7 @@
         await workspace.loadPreferences();
         if (!current()) return;
       }
-      if (type === "chat" && changes.selected && changes.selected.id === id) {
+      if (page === "conversations" && type === "chat" && changes.selected && changes.selected.id === id) {
         state.remoteRunning = !!changes.selected.running;
         const loading = state.chatLoading && state.chatLoading.id === id && state.chatLoading.version === version;
         if (changes.selected.revision !== state.selectedRevision && !loading && !state.sending) {
@@ -4002,6 +4248,8 @@
         }
       } else state.remoteRunning = false;
       if (current()) {
+        if (page === "my-ai") await myAI?.refresh({ quiet: true });
+        if (!current()) return;
         updateComposer();
         const notice = plain(changes.preferences_notice);
         if (notice && notice !== state.preferenceNotice) toast(notice);
@@ -4027,7 +4275,8 @@
     target.focus({ preventScroll: true });
     ui.scroll.scrollTop += target.getBoundingClientRect().top - ui.scroll.getBoundingClientRect().top - 18;
   }
-  async function openHistory(agent, sessionId, target = null, resumeOffset = 0) {
+  async function openHistory(agent, sessionId, target = null, resumeOffset = 0, readOnly = false) {
+    state.historyReadOnly = readOnly === true;
     showPage("conversations");
     closeSourceUpdate(false);
     closeSourceImages(false);
@@ -4199,9 +4448,9 @@
   async function sendHomeNative() {
     const choice = homeNativeChoice();
     if (!choice || state.nativeHomeSending || !ui.input.value.trim() || !draftHasContent() || !profileReady()) return;
-    let source;
+    let source, nextConsumed = false, nextConsumedRevision = null;
     state.nativeHomeSending = true; updateComposer();
-    const current = () => state.homeNativeChoice === choice && sameNativeDraft(source);
+    const current = () => state.homeNativeChoice === choice && sameNativeSendTarget(source);
     try {
       source = captureNativeDraft("new");
       const draft = await prepareNativeDraft(choice.agent, source, current);
@@ -4226,11 +4475,15 @@
       }
       // Creation and send keep their existing request journals; this submission
       // only hands the saved draft to that renderer's ordinary Send action.
-      if (await nativeChats?.createNew(choice.agent, current, choice.local_base || choice.profile, draft, true, preparation)) {
-        const consumed = clearNativeDraft(source);
+      if (await nativeChats?.createNew(choice.agent, current, choice.local_base || choice.profile, draft, true, preparation, () => {
+        if (!current() || state.sourceUpdateInputVersion === source.editVersion) return null;
+        const following = captureNativeDraft("new");
+        return { text: following.text, consume: () => { nextConsumed = clearNativeDraft(following); if (nextConsumed) nextConsumedRevision = following.editVersion; return nextConsumed; } };
+      })) {
+        const consumed = nextConsumed ? state.sourceUpdateInputVersion === nextConsumedRevision : clearNativeDraft(source);
         if (record && consumed && !finishHomeHandoff(record, choice)) toast("原目标已保存草稿；首页交接记录仍需核对。");
       }
-      else if (current()) toast("创建结果尚未确认，请在设置中的 Agent 会话核对；原稿保留，没有自动重发。");
+      else if (current()) toast("创建结果尚未确认，请在设置的“连接与恢复”中核对；原稿保留，没有自动重发。");
     } catch (error) {
       // A known created target is the recovery destination; do not offer a
       // fresh Home creation as if the original attempt had never happened.
@@ -4423,6 +4676,7 @@
   }
 
   $("new-chat").addEventListener("click", newChat);
+  $("home-logo")?.addEventListener("click", () => { state.browserPageTouched = true; showPage("my-ai"); });
   document.addEventListener("keydown", event => { if (event.key === "Escape") closeNewChatMenu(); });
   $("close-document").addEventListener("click", closeDocument);
   document.addEventListener("keydown", (event) => {
@@ -4440,7 +4694,7 @@
   $("close-sidebar").addEventListener("click", () => toggleSidebar(false));
   ui.backdrop.addEventListener("click", () => toggleSidebar(false));
   document.addEventListener("keydown", (event) => { if (event.key === "Escape") toggleSidebar(false); });
-  document.querySelectorAll(".page-nav").forEach((node) => node.addEventListener("click", () => { state.browserPageTouched = true; showPage(node.dataset.page); }));
+  document.querySelectorAll(".page-nav").forEach((node) => node.addEventListener("click", () => { state.browserPageTouched = true; if (node.dataset.page === "conversations") void switchListView(); else showPage(node.dataset.page); }));
   sourceFilters().forEach((node) => node.addEventListener("click", () => {
     conversationGroups?.clear();
     state.browserAgentFilterTouched = true;
@@ -4495,7 +4749,7 @@
   $("refresh-history").addEventListener("click", updateHistory);
   ui.contextButton.addEventListener("click", previewContext);
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) { saveDraft(); stopPolling(); state.syncRequested = false; if (state.syncAbort) state.syncAbort.abort(); }
+    if (document.hidden) { nativeWorkRead++; acceptNativeWorkStatus(null); saveDraft(); stopPolling(); state.syncRequested = false; if (state.syncAbort) state.syncAbort.abort(); }
     else { schedulePoll(true); checkHistorySources(); }
   });
   window.addEventListener("focus", () => checkHistorySources());
@@ -4504,9 +4758,9 @@
   window.addEventListener("resize", () => toggleSidebar(window.innerWidth <= 720 && ui.sidebar.classList.contains("is-open"), false));
 
   async function init() {
-    toggleSidebar(false); headerForChat(null); showWelcome(); updateComposer(); renderList();
+    toggleSidebar(false); showPage("my-ai"); updateComposer(); renderList();
     schedulePoll(true);
-    const results = await Promise.allSettled([refreshStatus(), refreshChats(), workspace ? workspace.loadPreferences() : Promise.resolve(), api("/api/management").then((data) => { state.management = data; updateComposer(); })]);
+    const results = await Promise.allSettled([refreshStatus(), refreshChats(), workspace ? workspace.loadPreferences() : Promise.resolve()]);
     if (results[0].status === "rejected") {
       $("connection-state").textContent = "连接暂时断开";
       state.transientError = "暂时连不上这台电脑。确认助手仍在运行后，刷新页面再试。"; renderRunNotice();
@@ -4520,6 +4774,7 @@
     if (fileMaterials && state.status?.workspace_id) fileMaterials.recover().catch(() => {});
     if (projectPublish && state.status?.workspace_id) projectPublish.recover().catch(() => {});
     browserRestoreSnapshot = null;
+    if (state.page === "my-ai") await myAI?.refresh();
     if (!restored && !state.browserTouchedDrafts.has(draftKey()) && ui.input.value === "") restoreDraft();
     saveDraft();
   }

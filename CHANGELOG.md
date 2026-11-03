@@ -1,11 +1,42 @@
 # Public snapshots · 公开更新
 
-## 0.1.0-alpha.4 — 2026-11-01
+## 0.2.0-alpha.1 — 2026-11-03
+
+Early Blueprint 2.0 source snapshot. Configure and verify native connections in your own environment; supported application interfaces do not replace agent authentication or permissions.
+
+- Added **My AI**, separate from New conversation: agent/model/memory summaries, recent work, exact-object management navigation, and a first-agent action when nothing is connected. Ordinary opening/polling uses existing facts and caches without starting an agent, probing a model, or reading memory content.
+- Added one specialist application history with separate Codex/DSH native sessions and received-text positions. Settings selects the core; successful switching adds one boundary, carries missing prose on the next turn, and does not replay historical tools.
+- Both specialist cores can use the supported management MCP for exact-target operations such as profile listing, versioned renaming, and rereading. Tool/model availability and native approvals remain core-specific.
+- Kept New conversation, browser-local drafts, and same-conversation refresh/continuation separate from the resource overview; native session identity remains explicit.
+- Removed device/wake-up/phone-preview entries and IM.codes-specific compatibility from source, preserving local service/access checks, local records, browser drafts, and separately installed user software. Historical pages stay outside runtime and active specialist document mirroring.
+- Added the About letter as one bundled source, directly exported to the public history page. Public screenshots show the running application with invented resources and work, rather than design mockups or private conversations.
+- Included narrow offline My AI UI checks and specialist-core protocol/failure checks. Developer checks require Python 3.11+ and Node; they do not establish fresh-user installation or real native failure handling. DSH specialist shared-memory selection remains unconnected, and the manual report's tool fact still observes the Codex-side holder.
+
+### 中文
+
+蓝图 2.0 的早期源码快照。请在自己的环境配置并验证原生连接；应用接口不替代 Agent 认证与权限。
+
+- 增加与“新对话”分开的**我的 AI**：Agent／模型／记忆摘要、最近工作、同一对象的管理导航，零接入时可接入第一个 Agent。普通打开和轮询只读已有事实与缓存，不启动 Agent、不探测模型、不读记忆正文。
+- 专员一段应用历史背后分别保存 Codex／DSH 原生会话与正文位置。设置中选择核心，成功才写一处分界，下一轮带缺失正文，不重放历史工具调用。
+- 两种专员核心可通过受支持管理 MCP 操作准确目标，例如列配置、按版本改名与读回；工具／模型可用性与原生审批仍按核心区分。
+- 新对话、浏览器本机草稿及同会话刷新续聊与资源总览分开，保留明确原生会话身份。
+- 源码撤设备／唤醒／手机预览入口及 IM.codes 专用兼容，保留本机服务与访问校验、local 记录、浏览器草稿和用户另装的软件。历史页不进入运行负载或专员当前文档镜像。
+- 关于页旧信保留唯一随包来源，公开历史直接导出同一正文。公开图来自实际运行界面，资源与工作为虚构示例，不纳入设计稿或私人对话。
+- 增加有限的首页离线 UI 和专员核心协议／故障检查；开发测试需 Python 3.11+ 与 Node，不代表新用户安装或真实原生失败处理已验收。DSH 专员共享记忆未接通，手动报告工具事实仍观察 Codex 一侧。
+
+### Carried-forward baseline / 保留的基础工作（2026-11-01–2026-11-02）
+
+The following baseline features are retained in this snapshot. The fixed alpha.4 commit below records that older public version's exact scope.
+
+以下基础功能保留在本快照中；下方固定 alpha.4 提交记录旧公开版本的准确范围。
 
 - Added the warm-paper, ink-purple, and moss-green visual layer with Song/serif headings, bundled static texture, and a separate dark palette; access-color semantics stay unchanged.
 - Refreshed the fictional-demo screenshots and restored its local simulated new-chat path; the preview needs no real agent or credentials.
-- Unified the Codex/Hermes/Pi composer from home draft through native conversation and refresh continuation. Pi retains a selected upload when typing continues, alongside existing draft text and files. Claude/DSH composer migration is not included.
+- Unified the basic Codex/Hermes/Pi/Claude Code/DSH composer from home draft through native conversation and refresh continuation, retaining each agent's sending, approval, and recovery protocols. Pi retains a selected upload when typing continues, alongside existing draft text and files.
+- Added read-only access to exactly bound saved text when a native conversation is unavailable. Search opens the same entry, with paging, refresh, reading-position recovery, and return without losing the original draft. Hermes source segments stay separate; a changed source requires an explicit reread. Reading does not start, restore, or take over an agent.
+- Disable direct Hermes reconnection after an event-stream failure. Keep already read text and drafts, and explain the explicit sequence: check the original receipt, confirm the request has ended, use the existing guarded disconnect, then restore the original session. Bound closed sessions show Restore original session even with cached text. This recovery path does not guarantee uninterrupted native connections across sleep/wake.
 - Added bidirectional Codex ↔ Hermes continuation using selected text, complete registered files, original images, and fixed snapshots. Preparation does not execute; Send creates the target once, with source/return navigation and original-ID recovery for uncertain results.
+- Registered Markdown files can be added to the current draft while retaining its question and selected materials. Repeated selection after reload reuses the same import; a separate explicit handoff remains available, with version checks and original-receipt recovery for uncertain results.
 - Added Codex draft/conversation model and reasoning fine-tuning. Specialist draft suggestions complete only after the originating page's versioned save and application receipt, preserving draft material and avoiding global-default changes.
 - Save eligible Pi/Hermes complete task results after their first exact successful read, allowing later original-ID retrieval without treating saved evidence as a live connection.
 - Keep independently verified work visible when another connection of the same Agent is unknown; preserve the overall unknown status.
@@ -18,8 +49,11 @@
 
 - 增加暖纸、墨紫、苔绿的视觉层，采用宋体标题、随包静态纸纹与独立深色配色，原有操作颜色含义不变。
 - 更新虚构演示截图，并修复新首页的本地模拟新建路径；预览不需要真实 Agent 或凭据。
-- Codex／Hermes／Pi 从首页草稿到原生对话、刷新续聊统一输入路径；Pi 上传期间继续打字仍保留选入文件、原稿和已有材料。Claude／DSH 输入区改造不在本版范围。
+- Codex／Hermes／Pi／Claude Code／DSH 从首页草稿到原生对话、刷新续聊统一基本输入路径，保留各自的发送、审批和恢复协议；Pi 上传期间继续打字仍保留选入文件、原稿和已有材料。
+- 原生对话暂不可用时，可以只读准确绑定的已存文字；搜索打开同一条目，支持分页、刷新、阅读位置恢复和保留原草稿返回。Hermes 各来源分开阅读，来源变化需明确重新读取；阅读不会启动、恢复或接管 Agent。
+- Hermes 事件流失败后禁止直接重连，保留已读取文字和草稿，说明先核对原回执、确认请求结束，再沿现有护栏断开旧连接并明确恢复原会话；已绑定的断开会话即便有缓存文字也标“恢复原会话”。此恢复路径不保证睡眠／唤醒后原生连接始终连续。
 - Codex ↔ Hermes 双向接续使用选定文字、完整登记文件、原图和固定快照；准备不执行，按发送才创建目标，保留来源／返回及未知结果的原编号核对。
+- 整理后的 Markdown 文件可加入当前草稿，保留原问题与已选材料；刷新后重复选择复用同一导入。另选目标的明确接力仍保留，版本核验与未知结果的原回执核对照常生效。
 - Codex 草稿／本对话支持模型与强度细调；专员草稿建议需原页面按版本保存并返回应用回执才完成，保留草稿材料，不改全局默认。
 - Pi／Hermes 的符合条件完整结果在首次按原编号成功读回后保存，之后可沿原编号取回，不把存储证据当成活连接。
 - 同一 Agent 的一个连接未知时，其他已核实的工作继续显示；整体状态仍标明未知。
@@ -27,6 +61,12 @@
 - 打开前确认本机服务属于当前安装；其他工作区或状态未知时保留原状。
 - 说明登录启动时怎样沿用 Hermes 或 DSH 的自定义资料目录。
 - 明确长期使用的 Python 选择和登录服务的环境变量限制，补充 Pi 与 Claude Code 的连接示例。
+
+## 0.1.0-alpha.4 — 2026-11-01
+
+[Published predecessor](https://github.com/icecinz/white-rabbit/commit/9e88305e17c4eca95550d86a6cc5fc4298b20296): warm-paper UI, then-supported unified composing, explicit Codex/Hermes continuation, and local configuration improvements. The fixed commit records the exact published scope.
+
+[已公开的前版](https://github.com/icecinz/white-rabbit/commit/9e88305e17c4eca95550d86a6cc5fc4298b20296)：软纸界面、当时已支持的统一输入、Codex／Hermes 明确选材接续及局部配置改进；准确公开范围以固定提交为准。
 
 ## 0.1.0-alpha.3 — 2026-10-28
 

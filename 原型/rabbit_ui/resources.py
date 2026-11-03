@@ -10,7 +10,7 @@ import secrets
 import stat
 
 
-INLINE_STYLES = ('style.css', 'workspace.css', 'specialist.css', 'work_status.css', 'composer_shell.css', 'soft_paper.css')
+INLINE_STYLES = ('style.css', 'workspace.css', 'specialist.css', 'work_status.css', 'composer_shell.css', 'soft_paper.css', 'my_ai.css')
 INLINE_SCRIPTS = (
     'agents.js', 'markdown-it.min.js', 'rich_text.js', 'materials.js',
     'status_checks.js', 'profiles.js', 'native_memory.js', 'work_status.js', 'workspace.js', 'browser_state.js',
@@ -22,12 +22,12 @@ INLINE_SCRIPTS = (
     'hermes_native.js', 'claude_material_draft.js', 'claude_native.js',
     'dsh_material_draft.js', 'dsh_native.js', 'native_chats.js',
     'native_handoff.js', 'native_adoption.js', 'native_text_quote.js',
-    'native_file_quote.js', 'continuations.js', 'app.js',
+    'native_file_quote.js', 'continuations.js', 'native_index_text.js', 'my_ai.js', 'my_ai_page.js', 'app.js',
 )
 HELP_FILES = ('manual.md', 'specialist-guide.md')
 INLINE_ASSETS = frozenset(('index.html', 'rabbit-app-1024.png', 'soft-paper.jpg') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES)
 ASSET_FILES = ('index.html', 'rabbit-app-1024.png', 'soft-paper.jpg', 'app.webmanifest',
-               'markdown-it.LICENSE') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES
+               'markdown-it.LICENSE', 'old-letter.md') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES
 MAX_INLINE_ASSET_BYTES = 2 * 1024 * 1024
 _ROUTES = {'/': 'index.html', **{'/' + name: name for name in ASSET_FILES if name != 'markdown-it.LICENSE'}}
 _CONTENT_TYPES = {
