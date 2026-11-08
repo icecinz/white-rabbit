@@ -86,7 +86,7 @@ class AppTaskPresentationTests(unittest.TestCase):
         indexed = dict(source, message_id='fco_synthetic_original', role='user', content=wrapper,
                        timestamp='2026-01-01T01:01:00Z', phase='app_task_context',
                        source_path='/synthetic/not-opened.jsonl', source_line=13)
-        with tempfile.TemporaryDirectory(prefix='app-task-import-', dir='/private/tmp') as directory, \
+        with tempfile.TemporaryDirectory(prefix='app-task-import-', dir=Path(tempfile.gettempdir()).resolve()) as directory, \
              patch('subprocess.Popen', side_effect=AssertionError('Agent launched')), \
              patch('socket.socket', side_effect=AssertionError('Network opened')):
             store = ChatStore(Path(directory) / 'chat.sqlite')
