@@ -153,7 +153,7 @@
     const handoffView = window.RabbitHandoffView?.create();
     const nativeMaterials = chatId !== null && window.RabbitNativeMaterials ? window.RabbitNativeMaterials.create({ api, images: materialImages, files: materialFiles, getWorkspace, onError }) : null;
     let materialsEnabled = chatId !== null && materialInputs === true, filePicker = null;
-    let firstPageLoaded = false, snapshotReadable = false, readingPartial = false, fullReadPending = false, openFeedbackPending = false, historyRestore = null, initialComposerRead = false;
+    let firstPageLoaded = false, snapshotReadable = false, readingPartial = false, fullReadPending = false, openFeedbackPending = false, historyRestore = null, initialComposerRead = false, resumeDiagnosticFresh = false, resumeDiagnosticBlockedEpoch = null;
     let answerJournal = Object.create(null), answering = false;
     let selectedProfile = null, profileRows = [], currentProfileRow = null, localConfigurationPending = null, localConfigurationInvalid = false, localConfigurationUnsupported = false, localConfigurationSupported = false, localConfigurationCommitting = false, profilesReadable = false, profilesReading = false, profilesError = "", profilesRequest = 0, nativeCatalogReady = false, pendingVerified = true;
     const configurationSelection = chatId === null ? null : window.RabbitProfiles?.createNativeSelection?.({ agent: "codex", parseProfile: profileChoice });
@@ -630,7 +630,7 @@
       const id = String(getWorkspace() || "");
       if (id === workspace) return;
       save(); workspace = id; storageKey = id ? storagePrefix() + lane : ""; sessionKey = id ? (chatId === null ? "rabbit.specialist.page.v1." + encodeURIComponent(id) : "rabbit.native-chat.page.v1." + encodeURIComponent(id) + "." + chatId) : ""; generation++;
-      draft = ""; draftMaterials = []; pending = null; pendingCommand = null; pendingDraftRevision = null; bindingChoiceVersion = 0; draftBinding = proposedBinding = lastCommand = commandReadbackReading = commandObservation = null; draftFrame8 = false; draftEdits = 0; draftStorageInvalid = false; answerJournal = Object.create(null); snapshot = null; snapshotReadable = false; epoch = null; seq = null; nextCursor = null; historyAvailable = null; feedback = ""; errorText = "";
+      draft = ""; draftMaterials = []; pending = null; pendingCommand = null; pendingDraftRevision = null; bindingChoiceVersion = 0; draftBinding = proposedBinding = lastCommand = commandReadbackReading = commandObservation = null; draftFrame8 = false; draftEdits = 0; draftStorageInvalid = false; answerJournal = Object.create(null); snapshot = null; snapshotReadable = false; resumeDiagnosticFresh = false; resumeDiagnosticBlockedEpoch = null; epoch = null; seq = null; nextCursor = null; historyAvailable = null; feedback = ""; errorText = "";
       nativeMaterials?.setScope(JSON.stringify([workspace, chatId]));
       selectedProfile = null; profileRows = []; currentProfileRow = null; localConfigurationPending = null; localConfigurationInvalid = localConfigurationUnsupported = localConfigurationSupported = localConfigurationCommitting = configurationWriting = false; profilesReadable = profilesReading = nativeCatalogReady = false; profilesError = ""; profilesRequest++; pendingVerified = true; preparing = false; writeVersion++;
       selectedMemory = null; memoryRows = []; memoryReadable = memoryReading = false; memoryError = ""; memoryRequest++; memoryVersion++;
@@ -791,6 +791,26 @@
     }
     function nativePending() { return (snapshot && snapshot.receipts || []).filter(r => r.kind === "thread_start" && r.status === "submitted_unknown" || r.kind === "turn_start" && ["submitted_unknown", "accepted"].includes(r.status)); }
     function activeTurn() { const state = snapshot && snapshot.turn_state; return state && !terminal.has(state.status) && state.turn_id ? state.turn_id : null; }
+    function rejectedResumeNotice() {
+      if (chatId === null || !snapshotReadable || !resumeDiagnosticFresh || reading || mutating || preparing || openingForSend || configurationWriting
+          || pending || draftStorageInvalid || localConfigurationPending || localConfigurationInvalid || hasUnresolvedRequests()
+          || snapshot?.connection?.state !== "failed" || snapshot.connection.epoch === resumeDiagnosticBlockedEpoch || !/^[a-f0-9]{32}$/.test(snapshot.connection.epoch || "")
+          || snapshot.binding?.session_key !== expectedSession || !nativeToken(snapshot.binding.thread_id)
+          || snapshot.disconnect_unconfirmed !== false || snapshot.turn_state !== null || !Array.isArray(snapshot.receipts)
+          || !Array.isArray(snapshot.answers) || snapshot.answers.some(row => row.state === "submitted_unknown" || row.status === "submitted_unknown")) return "";
+      const rows = snapshot.receipts;
+      if (rows.some(row => row.session_key !== expectedSession || row.kind === "turn_start"
+          || !["thread_start", "thread_resume", "turn_interrupt"].includes(row.kind)
+          || !["accepted", "completed", "failed", "interrupted", "rejected"].includes(row.status))) return "";
+      // Rejected operations have null native IDs. The service ties this exact
+      // resume nonce to the current epoch and verifies its bound session before
+      // RPC; an older rejection or a generic HTTP error cannot establish this.
+      const own = rows.filter(row => row.client_id === "specialist/resume/" + snapshot.connection.epoch);
+      if (own.length !== 1 || own[0].kind !== "thread_resume" || own[0].status !== "rejected" || own[0].rpc_error_code !== -32600
+          || !isSHA(own[0].request_sha256) || ["thread_id", "session_id", "turn_id", "target_turn_id"].some(key => own[0][key] !== null)) return "";
+      return language === "en" ? "Native Codex rejected resuming the original conversation (-32600). This turn was not sent; the original binding and draft are preserved."
+        : "原会话恢复被原生拒绝（-32600）；本轮未发送，原绑定和草稿保留。";
+    }
     function finishPending(receipt, materialVerified = false, memoryVerified = false) {
       if (!pending || !pendingVerified || draftStorageInvalid || !receipt || receipt.client_id !== pending.client_id || receipt.status === "submitted_unknown") return;
       if (pending.material_refs?.length && !materialVerified) return;
@@ -1066,7 +1086,7 @@
       const partial = value.items_included === false;
       const scopeChanged = snapshot && (value.connection.epoch !== epoch || value.binding.thread_id !== snapshot.binding.thread_id);
       if (scopeChanged) { history.clear(); live.clear(); itemNodes.clear(); requestNodes.clear(); burned.clear(); loadedCursors.clear(); memoryCards.clear(); firstPageLoaded = false; nextCursor = null; historyAvailable = null; }
-      epoch = value.connection.epoch; snapshot = value; seq = Number.isInteger(value.last_seq) ? value.last_seq : null;
+      epoch = value.connection.epoch; snapshot = value; resumeDiagnosticFresh = true; seq = Number.isInteger(value.last_seq) ? value.last_seq : null;
       consumeMemory(value);
       if (!partial) {
         const pageValue = value.history_page;
@@ -1199,7 +1219,9 @@
     async function mutate(kind, body, onKnownUnsent = null) {
       if (mutating || preparing || destroyed || !enabled || snapshot?.core_unavailable) return null;
       syncWorkspace(); if (!snapshotReadable) return null;
-      const stamp = generation; writeVersion++; mutating = true; errorText = ""; if (kind === "open") openFeedbackPending = false; render();
+      const stamp = generation; writeVersion++; mutating = true; resumeDiagnosticFresh = false; errorText = "";
+      if (kind === "open") { openFeedbackPending = false; resumeDiagnosticBlockedEpoch = snapshot?.connection?.epoch ?? null; }
+      render();
       try { const value = await api(apiRoot + "/" + kind, { method: "POST", body: JSON.stringify(body) }); if (stamp !== generation || destroyed) return null; if (kind === "open") openFeedbackPending = true; if (kind === "send") rememberGuideReceipt(value?.receipt); return value; }
       catch (error) {
         if (stamp === generation && !destroyed) {
@@ -2041,7 +2063,8 @@
         memoryInfo.textContent = [memorySelection?.message(language), memorySelectionUnsupported ? english ? "Memory configuration state is unavailable; the original draft remains." : "记忆配置状态组件未就绪；原草稿保留。" : "", english ? "Native Agent memory stays unchanged. This adds selected read-only context for the next send; it does not save this interaction. Choosing none does not erase earlier context." : "Agent 原生记忆照常；这里只为下一次发送附加所选只读资料，不保存本轮交互。不附加不会清除原生上文。",
           memoryStale ? english ? "The saved memory choice changed or is unverified. Choose a version before sending." : "原选共享记忆已变化或尚未核实，请重新选择后发送。" : "", memoryReading ? english ? "Reading saved parameters…" : "正在读取保存的参数…" : "", memoryError].filter(Boolean).join(" ");
       }
-      notices.replaceChildren(); if (errorText) notices.append(node("p", "rbs-error", errorText)); if (feedback) notices.append(node("p", "rbs-note", feedback));
+      const displayedError = rejectedResumeNotice() || errorText;
+      notices.replaceChildren(); if (displayedError) notices.append(node("p", "rbs-error", displayedError)); if (feedback) notices.append(node("p", "rbs-note", feedback));
       if (snapshot?.core_unavailable) notices.append(node("p", "rbs-note", snapshot.core_unavailable));
       if (unsupportedMemoryCombination()) notices.append(node("p", "rbs-note", currentCore() === "dsh"
         ? "DSH 专员与额外共享记忆的组合尚未接通；原选择和草稿保留，请明确取消附加记忆或切回 Codex 后发送。"

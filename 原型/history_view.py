@@ -17,7 +17,8 @@ import sqlite3
 import stat
 from urllib.parse import quote
 from agent_registry import IDS as AGENTS, LABELS
-from rabbit_content.history_records import source_phase, SOURCE_PHASES, PI_COVERAGE_MAX_BYTES, PI_CONTEXT_MAX_IDS
+from rabbit_content.history_records import (source_phase, SOURCE_PHASES, PI_COVERAGE_MAX_BYTES,
+                                           PI_CONTEXT_MAX_IDS, APP_TASK_PHASE, app_task_content)
 from rabbit_content.history_markdown_reference import reference_source
 
 
@@ -104,6 +105,11 @@ def display_message(content, agent, role, kind="root", *, phase=''):
                                "child_context" if kind == "child" else "user")}
     phase_info = source_phase(phase)
     if phase_info:
+        if phase == APP_TASK_PHASE:
+            task = app_task_content(content)
+            if task:
+                return dict(phase_info, display_content=task['input'], has_wrapper=True,
+                            declared_source_thread_id=task['declared_source_thread_id'])
         return dict(phase_info, has_wrapper=False)
     if phase == 'incomplete_reply':
         return {"has_wrapper": False, "message_kind": 'incomplete_reply', 'phase_label': '未完成回复，未带入接续'}
@@ -182,6 +188,7 @@ def clean_for_context(message):
     presentation = dict(inferred)
     excluded = {
         "approval_context", "agent_context", "agent_message", "environment", "interruption",
+        APP_TASK_PHASE,
     }
     if (message.get("message_kind") in excluded or
             presentation.get("message_kind") in excluded):

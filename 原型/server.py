@@ -35,6 +35,7 @@ from rabbit_memory import memory_management
 from rabbit_memory import memory_connection_check
 import native_model_management
 import native_work_status
+import dashboard_usage
 import external_work
 import native_chat_management
 import native_material_inventory
@@ -204,7 +205,7 @@ def document_path(root, path):
     return candidate, relative
 
 
-def read_local_document(root, path):
+def read_local_document(root, path, *, missing_ok=False):
     """Read a bounded project file through anchored no-follow handles."""
     candidate, relative = document_path(root, path)
     parts = relative.parts
@@ -238,6 +239,8 @@ def read_local_document(root, path):
             raise ValueError('这份文件不是 UTF-8 文字，暂时无法预览。') from None
         return {'path': str(candidate), 'name': candidate.name, 'content': content}
     except FileNotFoundError:
+        if missing_ok:
+            return None
         raise ValueError('这份文件不存在，可能已经移动或改名。') from None
     except OSError as error:
         # Private diagnostic contains only a stage and numeric errno, no paths,
@@ -251,7 +254,7 @@ def read_local_document(root, path):
             os.close(descriptor)
 
 
-def read_document_snapshot(root, path, cache_dir):
+def read_document_snapshot(root, path, cache_dir, *, missing_ok=False):
     """Read a published mirror entry, never a manifest-supplied local path."""
     candidate, relative = document_path(root, path)
     relative_key = relative.as_posix()
@@ -282,6 +285,8 @@ def read_document_snapshot(root, path, cache_dir):
                 or not isinstance(updated_at, str) or not 1 <= len(updated_at) <= 100):
             raise ValueError(unavailable)
         if relative_key not in files:
+            if missing_ok:
+                return None
             raise ValueError('项目文字副本中没有这份文件，请双击“打开小白兔”刷新后再试。')
         if files[relative_key] != key:
             raise ValueError(unavailable)
@@ -309,6 +314,8 @@ def read_document_snapshot(root, path, cache_dir):
 
 
 class Service:
+    dashboard_local_actions = True
+
     def __init__(self, data_dir, index_path, adapters=None, documents_dir=None,
                  *, codex_root=None, hermes_db=None, memory_driver=DEFAULT_MEMORY_DRIVER,
                  native_source_getter=DEFAULT_NATIVE_SOURCE, native_transport_factory=None, file_adapters=None,
@@ -601,6 +608,16 @@ class Service:
                     self._specialist_http = self._specialist_conversation
             self._choose_initial_native_default()
             self._status_checks = status_check_service.StatusChecks(self)
+            self._usage_sources = dashboard_usage.UsageSources.from_connections(
+                self.data_dir, native_chat_connection, specialist_connection, hermes_native_connection,
+                hermes_manager=self.hermes_native_chats, pi_history=self.pi_history,
+                pi_manager=self.pi_native_chats, dsh_history=self.history, dsh_manager=self.dsh_history,
+                allow_minimax=self.dashboard_local_actions)
+            from dashboard_native_launch import NativeAgentLauncher
+            from rabbit_runtime.hermes.dashboard import HermesDashboardLauncher
+            self._dashboard_native_launcher = NativeAgentLauncher(
+                pi_native_connection, dsh_native_connection, native_chat_connection or specialist_connection)
+            self._dashboard_hermes_launcher = HermesDashboardLauncher(hermes_native_connection)
             # All local initialization and recovery checks finish before any
             # background work begins. Memory starts last, with no later setup.
             if repair_sources:
@@ -1382,6 +1399,36 @@ class Service:
         return dict(workspace_id=self.workspace_id, scope=native_origins.SCOPE,
                     origin=self._native_origins.read(agent, chat_id))
 
+    def _native_origin_history_source(self, agent, session_id):
+        try:
+            value = HistoryMarkdownReference(self.history, self.workspace_id).get(agent, session_id)
+        except KeyError:
+            raise native_origins.NativeOriginError('not_found') from None
+        except (ValueError, TypeError, OSError, sqlite3.Error):
+            raise native_origins.NativeOriginError('unavailable') from None
+        return dict(value, workspace_id=self.workspace_id)
+
+    @admitted_service
+    def native_chat_origin_targets(self, source_kind, source_agent, source_session_id):
+        relations = self._native_origins.targets(source_kind, source_agent, source_session_id)
+        # A stored source is a frozen declaration. Index replacement, renaming
+        # or disappearance must not erase an already-established relation.
+        source = (relations[0]['source_view'] if relations else
+                  self._native_origin_history_source(source_agent, source_session_id))
+        targets = []
+        for value in relations:
+            agent, identity = value['target_agent'], value['target_chat_id']
+            title, available = None, False
+            try:
+                manager = getattr(self, native_origins.AGENTS[agent], None)
+                if manager is not None:
+                    title, available = manager.catalogue.get(identity)['title'], True
+            except (SpecialistHTTPError, sqlite3.Error, OSError):
+                pass  # An unavailable target keeps its exact ID; no substitute.
+            targets.append(dict(agent=agent, chat_id=identity, title=title, available=available))
+        return dict(workspace_id=self.workspace_id, scope=native_origins.TARGETS_SCOPE,
+                    source_view=source, targets=targets)
+
     @admitted_service
     def save_native_chat_origin(self, body):
         try:
@@ -1390,7 +1437,16 @@ class Service:
             raise native_origins.NativeOriginError() from None
         value = native_origins.record(fields, self.workspace_id)
         target = self._native_origin_catalogue(value['target_agent'], value['target_chat_id'])
-        self._native_origin_catalogue(value['source_view']['agent'], value['source_view']['chat_id'])
+        source = value['source_view']
+        if source.get('kind') == 'history_reference':
+            previous = self._native_origins.read(value['target_agent'], value['target_chat_id'])
+            if previous is not None:
+                if previous != value:
+                    raise native_origins.NativeOriginError('conflict')
+            else:
+                self._native_origin_history_source(source['agent'], source['session_id'])
+        else:
+            self._native_origin_catalogue(source['agent'], source['chat_id'])
         try:
             created = target.creation(value['creation_id'])
         except (sqlite3.Error, OSError):
@@ -2462,6 +2518,17 @@ class Service:
         ticket = self.document_tickets.issue(result, relative.as_posix())
         return dict(result, snapshot_ticket=ticket)
 
+    def dashboard_briefing(self):
+        import dashboard_brief
+
+        def reader(root, path, *, missing_ok=False):
+            try:
+                return read_local_document(root, path, missing_ok=missing_ok)
+            except DocumentAccessDenied:
+                return read_document_snapshot(root, path, self.documents_cache_dir, missing_ok=missing_ok)
+
+        return dashboard_brief.snapshot(self.workspace_id, self.documents_dir, reader)
+
     def _file_source(self, material_id, *, content=False):
         try:
             return (self.file_tasks.source_content(material_id) if content
@@ -2674,6 +2741,26 @@ class Service:
             subprocess.run(['/usr/bin/open', '-a', 'Finder', str(self.markdown_root)],
                 check=True, timeout=8, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return dict(workspace_id=self.workspace_id, opened=True)
+
+    @admitted_service
+    def launch_dashboard_agent(self, agent):
+        if not self.dashboard_local_actions:
+            raise ValueError('演示模式无法打开本机 Agent。')
+        if type(agent) is not str or agent not in dashboard_usage.LAUNCH_AGENTS:
+            raise ValueError('请选择卡片中的 Agent。')
+        if agent == 'hermes':
+            web_url = self._dashboard_hermes_launcher.launch()
+        else:
+            web_url = self._dashboard_native_launcher.launch(agent)
+        return {'workspace_id': self.workspace_id, 'opened': True, 'web_url': web_url}
+
+    @admitted_service
+    def configure_dashboard_minimax(self, body):
+        if not self.dashboard_local_actions:
+            raise ValueError('演示模式无法接入 MiniMax 账户。')
+        from dashboard_minimax_usage import save_configuration
+        configuration = save_configuration(self.data_dir, body)
+        return {'workspace_id': self.workspace_id, 'configuration': configuration}
 
     @admitted_service
     def history_markdown_reference(self, agent, session_id):
@@ -4379,14 +4466,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self.service.external_work_snapshot()
             if path == '/api/management':
                 return self.service.management_inventory(fresh=arg('refresh') == '1')
+            if path == '/api/management/briefing':
+                self._require_bodyless_get('briefing_invalid', '简报')
+                if route.query:
+                    raise ValueError('简报不接受查询参数。')
+                return self.service.dashboard_briefing()
             if path == '/api/management/my-ai':
                 self._require_bodyless_get('my_ai_invalid', '我的AI')
-                if route.query:
-                    raise ValueError('我的AI总览不接受探测参数。')
+                if route.query not in ('', 'view=dashboard'):
+                    raise ValueError('我的 AI 只接受明确的总览视图。')
                 import my_ai_overview
-                return my_ai_overview.snapshot(self.service)
+                return my_ai_overview.snapshot(self.service, dashboard=route.query == 'view=dashboard')
             if path == '/api/management/ai-profiles':
                 return self.service.saved_ai_profile_inventory()
+            if path == dashboard_usage.PATH:
+                self._require_bodyless_get('usage_sources_invalid', '额度与用量')
+                if route.query:
+                    raise ValueError('额度与用量不接受查询参数。')
+                return {'workspace_id': self.service.workspace_id,
+                        'sources': self.service._usage_sources.snapshot()}
             if path == '/api/management/conversations':
                 self._require_bodyless_get('conversation_query_invalid', '对话目录')
                 fields = parse_qs(route.query, keep_blank_values=True, strict_parsing=True, errors='strict')
@@ -4416,9 +4514,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == native_origins.PATH:
                 self._require_bodyless_get('native_chat_origin_invalid', '原生接续来源')
                 fields = parse_qs(route.query, keep_blank_values=True, strict_parsing=True, errors='strict')
-                if set(fields) != {'agent', 'chat_id'} or any(len(values) != 1 for values in fields.values()):
+                if any(len(values) != 1 for values in fields.values()):
                     raise native_origins.NativeOriginError()
-                return self.service.native_chat_origin(fields['agent'][0], fields['chat_id'][0])
+                if set(fields) == {'agent', 'chat_id'}:
+                    return self.service.native_chat_origin(fields['agent'][0], fields['chat_id'][0])
+                if set(fields) == {'source_kind', 'source_agent', 'source_session_id'}:
+                    return self.service.native_chat_origin_targets(**{key: values[0] for key, values in fields.items()})
+                raise native_origins.NativeOriginError()
             if path == '/api/management/native-chat-memory-configuration':
                 self._require_bodyless_get('native_chat_memory_selection_invalid', '原生下轮共享记忆')
                 fields = parse_qs(route.query, keep_blank_values=True, strict_parsing=True)
@@ -4593,6 +4695,8 @@ class Handler(BaseHTTPRequestHandler):
             markdown_material = path in ('/api/markdown-chats/file-preview', '/api/file-materials/markdown')
             markdown_move = path == '/api/markdown-chats/move'
             native_task = path == '/api/management/native-tasks'
+            usage_refresh = path == dashboard_usage.REFRESH_PATH
+            dashboard_action = path in (dashboard_usage.LAUNCH_PATH, dashboard_usage.MINIMAX_CONFIG_PATH)
             external = path == external_work.PATH
             native_history = path.startswith('/api/native-history/')
             native_management = path in ('/api/management/native-chat-configuration',
@@ -4608,7 +4712,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if self.headers.get_content_type() != 'application/json':
                     raise ValueError('请使用 JSON 消息。')
-                raw = self._read_body(external_work.MAX_BODY if external else 256 * 1024 if native_task else 8192 if native_management or markdown_move else app_settings.MAX_BODY if path == app_settings.PATH else
+                raw = self._read_body(2048 if dashboard_action else 1024 if usage_refresh else external_work.MAX_BODY if external else 256 * 1024 if native_task else 8192 if native_management or markdown_move else app_settings.MAX_BODY if path == app_settings.PATH else
                                       32 * 1024 if path in ('/api/management/memory-profile-operations', '/api/management/memory-documents') else MAX_MATERIAL_BODY if path == '/api/materials' else
                                       MAX_TEXT_MATERIAL_BODY if path == '/api/file-materials' else MAX_BODY)
                 if path in ('/api/management/memory-profile-operations', '/api/management/memory-documents'):
@@ -4624,7 +4728,7 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError('文件资料需要不含重复字段的有效 JSON 对象。') from None
                     else:
                         body = (external_work.decode_body(raw) if external else app_settings.decode_body(raw) if path == app_settings.PATH else
-                                decode_specialist_body(raw) if specialist or native_material or native_management or native_task else json.loads(raw))
+                                decode_specialist_body(raw) if specialist or native_material or native_management or native_task or usage_refresh or dashboard_action else json.loads(raw))
                 if not isinstance(body, dict):
                     raise ValueError('请求格式无效。')
                 if not self._allowed(mutate=True):
@@ -4674,6 +4778,21 @@ class Handler(BaseHTTPRequestHandler):
                 if self.command != 'POST' or route.query:
                     raise native_task_input.NativeTaskInputError('invalid_arguments', 'not_sent')
                 return self.service.dispatch_native_task(body)
+            if usage_refresh:
+                if self.command != 'POST' or route.query or set(body) != {'source_id'}:
+                    raise ValueError('请使用固定的手动更新入口，选择一个来源。')
+                return {'workspace_id': self.service.workspace_id,
+                        'source': self.service._usage_sources.refresh(body['source_id'])}
+            if dashboard_action:
+                if self.command != 'POST' or route.query:
+                    raise ValueError('请使用卡片上的操作入口。')
+                if self.headers.get('Origin') is None:
+                    raise RequestDenied('请从本机小白兔页面操作。')
+                if path == dashboard_usage.LAUNCH_PATH:
+                    if body.keys() != {'agent'}:
+                        raise ValueError('请选择卡片中的 Agent。')
+                    return self.service.launch_dashboard_agent(body['agent'])
+                return self.service.configure_dashboard_minimax(body)
             if specialist:
                 if dsh_chat:
                     return self.service.dsh_native_request(self.command, path, query=route.query, body=body)

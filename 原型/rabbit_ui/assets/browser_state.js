@@ -318,6 +318,27 @@
       const target = object(input.managementTarget);
       if (!["agent", "model", "memory"].includes(target.kind) || !text(target.id, 512, false)) invalid();
       result.managementTarget = { kind: target.kind, id: target.id };
+      if (target.kind === "agent" && agents.has(target.id)) {
+        if (target.section === "connection") result.managementTarget.section = "connection";
+        if (target.fromMyAI === true) {
+          result.managementTarget.fromMyAI = true;
+          if (target.backTo === "usage") result.managementTarget.backTo = "usage";
+        }
+      }
+    }
+    if (input.dashboardView != null) {
+      try {
+        const view = exact(input.dashboardView, ["kind", "focusId", "expanded", "scrollTop", "homeScrollTop", "homeFocus"]);
+        if (!["home", "usage", "brief"].includes(view.kind) || typeof view.expanded !== "boolean") invalid();
+        result.dashboardView = {
+          kind: view.kind,
+          focusId: view.kind === "home" || view.focusId === null ? null : id(view.focusId),
+          expanded: view.expanded,
+          scrollTop: integer(view.scrollTop, 1e9),
+          homeScrollTop: integer(view.homeScrollTop, 1e9),
+          homeFocus: view.homeFocus === null ? null : id(view.homeFocus),
+        };
+      } catch (_) { /* Discard only stale dashboard navigation metadata. */ }
     }
     if (own(input, "continuations")) {
       if (!Array.isArray(input.continuations) || input.continuations.length > MAX_ITEMS) invalid();

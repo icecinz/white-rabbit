@@ -416,13 +416,13 @@ class NativeChats:
         # approval, archive a thread, or claim background tools have exited.
         view = SpecialistHTTP(owner.holder).dispatch('GET', HOLDER_ROOT, query='include_items=0')
         active = view.get('turn_state') or {}
-        pending = self.store.pending_operations(session_key(identity))
+        unfinished = self.store.has_unfinished_operations(session_key(identity))
         ready = view.get('connection', {}).get('state') == 'ready'
         native_status = ((view.get('native') or {}).get('thread') or {}).get('status') or {}
         bound = (view.get('binding') or {}).get('thread_id') is not None
         if (view.get('requests') or active.get('status') not in (None, 'completed', 'failed', 'interrupted')
-                or pending or ready and (view.get('requests_available') is not True
-                                         or bound and native_status.get('type') != 'idle')):
+                or unfinished or ready and (view.get('requests_available') is not True
+                                            or bound and native_status.get('type') != 'idle')):
             raise _error(409, 'native_chat_disconnect_pending', '本轮或回执仍待确认，请先结束并核对再断开。', unsent=True)
         try:
             owner.holder.close()

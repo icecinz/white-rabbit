@@ -4,7 +4,7 @@
 
 The Rabbit specialist is the application's management assistant: **one continuous application conversation, with Codex or DSH as its execution core**. Each core retains its own native session, role, and received-text position. Its job is to understand an instruction, inspect the relevant state, and use the owning module's supported interfaces.
 
-This describes the **0.2.0-alpha.1 early source snapshot**. Configure the management prerequisites and the selected native connection, preserving its original account, provider, tools, and approvals.
+This describes the **0.2.0-alpha.2 early source snapshot**. Configure the management prerequisites and the selected native connection, preserving its original account, provider, tools, and approvals.
 
 It is responsibility 7, reusing the runtime foundation from responsibility 3 and the UI from responsibility 5. Data, settings, and validation remain in their modules. There is no second settings database or unrestricted management bypass.
 

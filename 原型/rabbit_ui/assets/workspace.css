@@ -74,6 +74,26 @@
 .rbw-settings-page .rbn-create{max-width:100%;flex-wrap:wrap;align-items:center}
 .rbw-settings-page .rbn-create>.rbs-control{flex:0 1 28rem;width:28rem;max-width:100%}
 .rbw-settings-page .rbs-actions{justify-content:flex-start}
+.rbw-about-card{
+  display:grid;
+  gap:18px;
+  margin-bottom:22px;
+  padding:clamp(14px,4vw,28px);
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:var(--paper);
+}
+.rbw-about-profile{display:flex;align-items:center;gap:clamp(12px,3vw,22px)}
+.rbw-about-icon{display:block;width:clamp(56px,15vw,96px);height:auto;flex:none;border-radius:16%}
+.rbw-about-copy h3{font:700 clamp(25px,4vw,36px)/1.25 var(--font-title);margin-bottom:6px}
+.rbw-about-bio{color:var(--muted)}
+.rbw-about-age{color:var(--ai-control);white-space:nowrap}
+.rbw-about-ability,.rbw-about-back{justify-self:start;min-height:40px}
+.app-shell:has(#workspace-panel[data-about-view="ability"]:not([hidden]))>:is(.sidebar,.sidebar-backdrop),
+.main-panel:has(>#workspace-panel[data-about-view="ability"]:not([hidden]))>.conversation-header{display:none}
+.rbw-about-figure{width:min(100%,640px,max(240px,calc(100dvh - 150px)));margin:12px auto 0;text-align:center}
+.rbw-about-split{display:block;width:100%;height:auto}
+.rbw-about-figure figcaption{font:700 clamp(22px,4vw,32px)/1.4 var(--font-title)}
 .rbw-letter{max-width:62ch;margin:0}
 .rbw-letter>summary{font-size:15px}
 .rbw-letter-body{padding:12px 0;line-height:1.85;overflow-wrap:anywhere}

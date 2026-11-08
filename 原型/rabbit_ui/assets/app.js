@@ -3,7 +3,7 @@
 
   const agents = window.RabbitAgents;
   const $ = (id) => document.getElementById(id);
-  let bundledHelp;
+  let bundledHelp, myAI = null;
   function readBundledHelp() {
     if (bundledHelp !== undefined) return bundledHelp;
     try {
@@ -13,7 +13,7 @@
     return bundledHelp;
   }
   const ui = {
-    sidebar: $("sidebar"), backdrop: $("sidebar-backdrop"), list: $("session-list"),
+    sidebar: $("sidebar"), sidebarContent: $("sidebar-content"), backdrop: $("sidebar-backdrop"), list: $("session-list"),
     search: $("search-input"), title: $("conversation-title"), eyebrow: $("heading-eyebrow"),
     meta: $("conversation-meta"), actions: $("header-actions"), messages: $("messages"),
     scroll: $("conversation-scroll"), composer: $("composer-region"), input: $("message-input"),
@@ -22,6 +22,8 @@
     contextPanel: $("context-preview"), contextButton: $("preview-context"),
   };
   const settingsMounts = { specialist: $("specialist-settings"), native: $("native-chat-settings") };
+  const sidebarScroll = { conversations: 0, management: 0, settings: 0 };
+  let sidebarView = "conversations";
   const state = {
     workspaceSections: { management: null, settings: "general" }, managementTarget: null,
     csrf: "", status: null, chats: [], listView: "library", page: "conversations", historyAgent: "all", includeInternal: false,
@@ -56,7 +58,16 @@
   for (const control of [ui.send, $("new-chat"), $("refresh-history")]) control.dataset.controlInterface = "ai";
   let browserStore = null, browserRestoreSnapshot = null, profileCatalogReadback = 0;
   $("brand-agents").textContent = agents.ids.map(id => agents.labels[id]).join(" · ");
-  for (const id of agents.ids) { const item = document.createElement("button"); item.type = "button"; item.className = "source-filter"; item.dataset.agent = id; item.textContent = agents.labels[id]; item.setAttribute("aria-pressed", "false"); $("source-filters").append(item); }
+  const sidebarAgentLabel = id => id === "dsh" ? "DSH" : agents.labels[id] || id;
+  for (const id of agents.ids) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "source-filter";
+    item.dataset.agent = id;
+    item.textContent = sidebarAgentLabel(id);
+    item.setAttribute("aria-pressed", "false");
+    $("source-filters").append(item);
+  }
   const sourceFilters = () => [...document.querySelectorAll(".source-filter")].filter(n => n.dataset.agent === "all" || agents.has(n.dataset.agent));
   const contextScrollVersions = new WeakMap();
   let conversationGroups = null;
@@ -700,6 +711,7 @@
     const snapshot = {
       selection: { ...state.selected }, page: state.page === "continuation" && !state.currentContinuation ? "conversations" : state.page, backend: state.backend, model_id: state.model_id, homeNativeChoice: state.homeNativeChoice, homeConfiguration: state.homeConfiguration, homeNativeHandoff: state.homeNativeHandoff, homeConfigurationReceipt: state.homeConfigurationReceipt, homeTextCompatibility: state.homeTextCompatibility,
       workspaceSections: { ...state.workspaceSections }, managementTarget: state.managementTarget,
+      dashboardView: myAI?.getView?.() || null,
       historyReadOnly: state.historyReadOnly,
       continuations: state.continuations, currentContinuation: state.currentContinuation,
       query: state.libraryQuery, historyAgent: state.historyAgent,
@@ -800,6 +812,7 @@
   }
   async function restoreBrowserSnapshot(snapshot) {
     if (!snapshot || !canRestoreBrowserView()) return false;
+    myAI?.restoreView?.(snapshot.dashboardView);
     if (["my-ai", "management", "settings"].includes(snapshot.page)) {
       state.selected = { ...snapshot.selection }; state.backend = snapshot.backend; state.model_id = snapshot.model_id || "";
       restoreDraft();
@@ -1102,7 +1115,7 @@
       historySourceSerial++; historySourcePending = false; historySourceCheckedAt = 0; historySourceState = null;
       checkHistorySources();
     }
-    $("open-markdown-chats").hidden = !markdownChats?.enabled();
+    $("conversation-folder-tools").hidden = !markdownChats?.enabled();
     conversationGroups?.setEnabled(markdownChats?.enabled() === true);
     const demoNotice = $("demo-mode-banner");
     if (demoNotice) demoNotice.hidden = data.demo_mode !== true;
@@ -1118,13 +1131,20 @@
     return data;
   }
   function updateHistorySummary() {
-    if (state.hiddenInternal) $("history-summary").textContent = `还有 ${state.hiddenInternal} 条内部记录`;
-    else if (historySourceState === "changed") $("history-summary").textContent = "原对话可能有更新";
-    else if (historySourceState === "unknown" && state.status?.history?.built_at) $("history-summary").textContent = "原对话变化待核对";
-    else if (state.status && state.status.history && state.status.history.built_at) $("history-summary").textContent = `最近读取 ${shortDate(state.status.history.built_at)}`;
-    else $("history-summary").textContent = "原来的对话，保留原文";
-    const historyNotice = state.status && state.status.history && state.status.history.notice;
-    $("history-summary").title = historyNotice || "已接入用户和助手文字；图片及工具记录后续加入。";
+    const control = $("refresh-history");
+    if (control.disabled) return;
+    const history = state.status?.history;
+    const changed = historySourceState === "changed";
+    const summary = changed ? "原对话可能有更新"
+      : historySourceState === "unknown" && history?.built_at ? "原对话变化待核对"
+      : history?.built_at ? `最近读取 ${shortDate(history.built_at)}`
+      : "原来的对话，保留原文";
+    const details = [summary];
+    if (state.hiddenInternal) details.push(`还有 ${state.hiddenInternal} 条内部记录`);
+    if (history?.notice) details.push(history.notice);
+    control.textContent = changed ? "可能有更新 ↻" : "更新";
+    control.setAttribute("aria-label", `更新原对话。${summary}`);
+    control.title = details.join("\n");
   }
   // Compare source metadata only when entering or returning to the app; never
   // rebuild the index in the background or infer that an unknown is current.
@@ -1233,7 +1253,7 @@
     }
     node.append(el("div", "session-title", item.title || "未命名的对话"));
     const meta = el("div", "session-meta");
-    (item.source_agents || (item.agent ? [item.agent] : [])).forEach((agent) => meta.append(el("span", `source-tag ${agent}`, backendLabels[agent] || agent)));
+    (item.source_agents || (item.agent ? [item.agent] : [])).forEach((agent) => meta.append(el("span", `source-tag ${agent}`, sidebarAgentLabel(agent))));
     const date = shortDate(isNative && item.timestamp_kind !== "confirmed_activity" ? item.created_at : item.timestamp);
     if (isNative) { meta.style.flexWrap = "wrap"; meta.append(el("span", "", english ? "Native" : "原生")); }
     if (date) {
@@ -1257,20 +1277,28 @@
   function groupedListItem(content, item) {
     if (!conversationGroups || !markdownChats?.enabled()) return content;
     const row = el("div", "session-group-entry"), choose = button("⋯", "session-group-menu", () => conversationGroups.open(item));
-    choose.setAttribute("aria-label", `将“${item.title || "未命名对话"}”加入分组`); choose.title = "加入分组";
+    choose.setAttribute("aria-label", `将“${item.title || "未命名对话"}”加入对话夹`); choose.title = "加入对话夹";
     row.append(content, choose); return row;
+  }
+  function conversationSidebarTop() {
+    return sidebarView === "conversations" ? ui.sidebarContent.scrollTop : sidebarScroll.conversations;
+  }
+  function setConversationSidebarTop(top) {
+    sidebarScroll.conversations = top;
+    if (sidebarView === "conversations") ui.sidebarContent.scrollTop = top;
   }
   function renderList() {
     const nodes = [];
     if (state.libraryItems.length) {
       nodes.push(el("p", "list-caption", `${state.libraryQuery.trim() ? "找到" : "共"} ${state.libraryTotal} 段对话`));
       state.libraryItems.forEach((item, index) => nodes.push(sessionListItem(item, index)));
-    } else if (!state.historyLoading) nodes.push(el("div", "empty-list", state.libraryError || (state.libraryQuery.trim() ? "没有找到这些文字。" : conversationGroups?.selected() ? "这个分组还没有对话。" : "还没有可读取的对话。写下第一条消息，或点更新读取原有记录。")));
+    } else if (!state.historyLoading) nodes.push(el("div", "empty-list", state.libraryError || (state.libraryQuery.trim() ? "没有找到这些文字。" : conversationGroups?.selected() ? "这个对话夹还没有对话。" : "还没有可读取的对话。写下第一条消息，或点更新读取原有记录。")));
     if (state.historyLoading) nodes.push(el("p", "list-caption", "正在读取对话…"));
     else if (state.libraryNext != null) nodes.push(button("继续加载", "load-more", () => loadHistoryList(false)));
     if (state.libraryError && state.libraryItems.length) nodes.push(el("p", "list-caption", state.libraryError));
-    const previousTop = ui.list.scrollTop;
-    ui.list.replaceChildren(...nodes); ui.list.scrollTop = previousTop;
+    const previousTop = conversationSidebarTop();
+    ui.list.replaceChildren(...nodes);
+    setConversationSidebarTop(previousTop);
   }
   async function loadLibrary(reset, shouldApply = null, options = {}, preserve = false, retry = 0) {
     if (!reset && state.historyLoading) return null;
@@ -1279,9 +1307,9 @@
     const query = state.libraryQuery.trim();
     const agent = state.historyAgent;
     const folder = conversationGroups?.selected() || null;
-    const previousTop = ui.list.scrollTop;
+    const previousTop = conversationSidebarTop();
     const wanted = reset && preserve ? Math.max(50, state.libraryItems.length) : 50;
-    if (reset && !preserve) { state.libraryItems = []; state.libraryNext = null; ui.list.scrollTop = 0; }
+    if (reset && !preserve) { state.libraryItems = []; state.libraryNext = null; setConversationSidebarTop(0); }
     state.historyLoading = true; state.libraryError = ""; renderList();
     const current = () => version === state.listVersion && query === state.libraryQuery.trim() && agent === state.historyAgent && folder === (conversationGroups?.selected() || null) && (!shouldApply || shouldApply());
     let discarded = false;
@@ -1316,7 +1344,7 @@
     } finally {
       if (version === state.listVersion) {
         state.historyLoading = false;
-        if (!discarded) { renderList(); if (preserve) ui.list.scrollTop = previousTop; }
+        if (!discarded) { renderList(); if (preserve) setConversationSidebarTop(previousTop); }
       }
     }
   }
@@ -1955,7 +1983,14 @@
         if (isOperationRecord(row)) item.dataset.operationRecord = "true";
         return item;
       },
-      onViewChange: source => { if (visible && state.page === "native-chats" && source?.workspace_id === scope) { nativeHeader(source); renderList(); } } });
+      onViewChange: source => {
+        if (visible && state.page === "native-chats" && source?.workspace_id === scope) {
+          nativeHeader(source); renderList(); ui.actions.replaceChildren();
+          const read = indexReader.getHistorySourceContext();
+          if (read) void loadHistoryOrigins(read.agent, read.source_session_id, state.openVersion, read);
+          else { historyOriginTargets = null; historyOriginRead++; }
+        }
+      } });
     function nativeHeader(source) {
       const row = state.libraryItems.find(item => item.kind === "native" && item.agent === source.agent && item.id === source.chat_id);
       ui.title.textContent = source.title || row?.title || "原生对话"; ui.eyebrow.textContent = ui.meta.textContent = "";
@@ -2009,6 +2044,7 @@
       setLanguage(value) { language = value === "en" ? "en" : "zh-CN"; for (const controller of Object.values(controllers)) controller.setLanguage(language); indexReader?.setLanguage(language); renderChoice(); },
       hasReadOnlySelection: readingSelected,
       getViewContext() { return visible && !settingsVisible ? indexReader?.getViewContext() || (!readingSelected() ? controllers[selected]?.getQuoteContext() : null) : null; },
+      getHistorySourceContext() { return visible && !settingsVisible && scope === String(state.status?.workspace_id || "") ? indexReader?.getHistorySourceContext() || null : null; },
       async openEntry(value, details = {}) {
         if (details.readOnly !== true && available[value?.agent]) return this.selectExisting(value);
         if (!indexReader) throw Error("只读历史组件尚未加载，请刷新页面。");
@@ -2079,7 +2115,7 @@
           creation_id: record.creation.creation_id, created_chat_id: record.creation.created_chat_id,
           onProgress,
           beforePlace: async id => {
-            await saveContinuationOrigin({ ...origin, target_chat_id: id });
+            if (await saveContinuationOrigin({ ...origin, target_chat_id: id }, current) !== true) return false;
             return current() && onProgress({ handoff_started: true }) === true;
           },
         });
@@ -2150,45 +2186,151 @@
     if (!window.crypto?.subtle) throw Error("浏览器不能核对接续版本，原准备保留。");
     return [...new Uint8Array(await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(continuationJSON(value))))].map(v => v.toString(16).padStart(2, "0")).join("");
   }
-  async function saveContinuationOrigin(origin) {
+  const continuationKeys = (value, names) => value && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
+  const continuationUUID = value => typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
+  function continuationSourceView(source, scope) {
+    if (source?.workspace_id !== scope || typeof source.title !== "string" || !source.title.length || source.title.length > 16384 || /[\u0000\ud800-\udfff]/u.test(source.title)) return false;
+    if (source.kind === "history_reference") return continuationKeys(source, ["kind", "workspace_id", "id", "agent", "session_id", "title"])
+      && continuationUUID(source.id) && ["codex", "pi", "hermes", "claude", "dsh"].includes(source.agent)
+      && typeof source.session_id === "string" && source.session_id.length > 0 && source.session_id.length <= 256 && !/[\s\p{Cc}\p{Cf}\p{Cs}]/u.test(source.session_id);
+    return continuationKeys(source, ["workspace_id", "agent", "chat_id", "title"])
+      && ["codex", "hermes"].includes(source.agent) && continuationUUID(source.chat_id);
+  }
+  function continuationOrigin(value, scope, agent, chatId) {
+    return continuationKeys(value, ["target_agent", "target_chat_id", "creation_id", "source_view", "source_revision", "selected_message_ids", "material_refs", "snapshot_sha256"])
+      && ["codex", "hermes"].includes(agent) && continuationUUID(chatId) && value.target_agent === agent && value.target_chat_id === chatId && continuationUUID(value.creation_id)
+      && continuationSourceView(value.source_view, scope) && /^[a-f0-9]{64}$/.test(value.source_revision) && /^[a-f0-9]{64}$/.test(value.snapshot_sha256)
+      && Array.isArray(value.selected_message_ids) && value.selected_message_ids.length <= 50 && value.selected_message_ids.every(id => typeof id === "string" && id.length > 0 && id.length <= 16384 && !/[\u0000\ud800-\udfff]/u.test(id))
+      && new Set(value.selected_message_ids).size === value.selected_message_ids.length && Array.isArray(value.material_refs);
+  }
+  async function saveContinuationOrigin(origin, isCurrent = () => true) {
     const query = new URLSearchParams({ agent: origin.target_agent, chat_id: origin.target_chat_id });
-    const scope = state.status?.workspace_id;
+    const scope = origin.source_view?.workspace_id;
+    if (scope !== state.status?.workspace_id || !continuationOrigin(origin, scope, origin.target_agent, origin.target_chat_id) || !isCurrent()) return false;
+    const key = "rabbit.native-origin.pending.v1." + encodeURIComponent(scope) + "." + origin.target_agent + "." + origin.target_chat_id;
+    let pending;
+    try {
+      pending = window.sessionStorage.getItem(key);
+      if (pending !== null && continuationJSON(JSON.parse(pending)) !== continuationJSON(origin)) throw Error();
+    } catch (_) { throw Error("原目标的来源保存记录无法核对，没有替换或放入草稿。"); }
     const valid = value => value?.workspace_id === scope && value.scope === "native_continuation_source"
-      && Object.keys(value).sort().join(",") === "origin,scope,workspace_id";
+      && continuationKeys(value, ["origin", "scope", "workspace_id"])
+      && (value.origin === null || continuationOrigin(value.origin, scope, origin.target_agent, origin.target_chat_id));
     const observed = await api("/api/management/native-chat-origin?" + query, {}, false);
+    if (scope !== state.status?.workspace_id || !isCurrent()) return false;
     if (!valid(observed)) throw Error("接续来源的读取身份待核对。");
     if (observed.origin !== null) {
       if (continuationJSON(observed.origin) !== continuationJSON(origin)) throw Error("原目标已有不同来源，没有覆盖。");
-      return;
+      if (pending !== null) {
+        if (window.sessionStorage.getItem(key) !== pending) throw Error("原来源保存记录已有变化，没有放入草稿。");
+        window.sessionStorage.removeItem(key);
+        if (window.sessionStorage.getItem(key) !== null) throw Error("原来源保存记录尚未清除；此次没有放入草稿。");
+      }
+      return true;
     }
-    const saved = await api("/api/management/native-chat-origin", { method: "POST", body: JSON.stringify(origin) }, false);
-    if (!valid(saved) || continuationJSON(saved.origin) !== continuationJSON(origin)) throw Error("来源保存结果待核对；原目标和创建编号保留。");
+    if (pending !== null) throw Error("原目标的来源保存尚未查到确认；此次只读核对，没有再次保存、重建或放入草稿。");
+    const raw = JSON.stringify(origin);
+    try {
+      if (window.sessionStorage.getItem(key) !== null) throw Error();
+      window.sessionStorage.setItem(key, raw);
+      if (window.sessionStorage.getItem(key) !== raw) throw Error();
+    } catch (_) { throw Error("浏览器不能保留原来源保存记录；尚未保存来源或放入草稿。"); }
+    try {
+      const saved = await api("/api/management/native-chat-origin", { method: "POST", body: JSON.stringify(origin) }, false);
+      if (!valid(saved) || continuationJSON(saved.origin) !== continuationJSON(origin)) throw Error();
+      if (window.sessionStorage.getItem(key) !== raw) throw Error();
+      window.sessionStorage.removeItem(key);
+      if (window.sessionStorage.getItem(key) !== null) throw Error();
+    } catch (_) {
+      let confirmed = false;
+      if (scope === state.status?.workspace_id) try {
+        const readback = await api("/api/management/native-chat-origin?" + query, {}, false);
+        confirmed = valid(readback) && continuationJSON(readback.origin) === continuationJSON(origin);
+      } catch (_) { /* Keep the exact original target and creation receipt. */ }
+      throw Error(confirmed ? "来源已按原目标读回确认；此次未放入草稿，请核对后再次明确放入。" : "来源保存结果待核对；此次未放入草稿，原目标和创建编号保留，没有重建。");
+    }
+    return scope === state.status?.workspace_id && isCurrent();
   }
   let nativeOriginView = null;
   function appendNativeOrigin() {
     const current = nativeChats?.getQuoteContext(), cached = nativeOriginView, previous = cached?.origin?.source_view;
-    if (!cached || !previous || current?.workspace_id !== cached.workspace_id || current.agent !== cached.origin.target_agent || current.chat_id !== cached.origin.target_chat_id) return;
+    if (state.page !== "native-chats" || !cached || !previous || !continuationSourceView(previous, current?.workspace_id) || current?.workspace_id !== cached.workspace_id || current.agent !== cached.origin.target_agent || current.chat_id !== cached.origin.target_chat_id) return;
+    const location = state.contextNavigationVersion;
     ui.actions.querySelector('[data-continuation-source]')?.remove();
     const back = el("button", "text-button", "返回原对话"); back.type = "button"; back.setAttribute("data-continuation-source", "");
     back.title = previous.title; back.addEventListener("click", () => {
       const view = nativeChats?.getQuoteContext();
-      if (view?.workspace_id === current.workspace_id && view.agent === current.agent && view.chat_id === current.chat_id) void openContinuationSource(previous);
+      if (cached === nativeOriginView && location === state.contextNavigationVersion && state.page === "native-chats" && state.status?.workspace_id === current.workspace_id
+          && view?.workspace_id === current.workspace_id && view.agent === current.agent && view.chat_id === current.chat_id) void openContinuationSource(previous);
     }); ui.actions.append(back);
   }
   async function renderNativeOrigin(source, isCurrent) {
-    if (!continuations || !["codex", "hermes"].includes(source.agent)) return;
+    if (!["codex", "hermes"].includes(source.agent)) return;
     try {
       const value = await api("/api/management/native-chat-origin?" + new URLSearchParams({ agent: source.agent, chat_id: source.chat_id }), {}, false);
-      if (!isCurrent() || value?.workspace_id !== source.workspace_id || value.scope !== "native_continuation_source" || !value.origin) return;
+      if (!isCurrent() || !continuationKeys(value, ["workspace_id", "scope", "origin"]) || value.workspace_id !== source.workspace_id || value.scope !== "native_continuation_source" || !value.origin) return;
       const origin = value.origin, previous = origin.source_view;
-      if (origin.target_agent !== source.agent || origin.target_chat_id !== source.chat_id || previous?.workspace_id !== source.workspace_id
-          || !["codex", "hermes"].includes(previous.agent) || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(previous.chat_id)) return;
+      if (!continuationOrigin(origin, source.workspace_id, source.agent, source.chat_id)) return;
       nativeOriginView = { workspace_id: source.workspace_id, origin }; appendNativeOrigin();
     } catch (_) { /* An unavailable relation never changes or replaces a native chat. */ }
   }
-  function openContinuationSource(source) {
-    return nativeChats.selectExisting({ workspaceId: source.workspace_id, agent: source.agent, chatId: source.chat_id })
-      .catch(error => toast(userError(error, "原对话暂不可用，接续准备仍保留。")));
+  async function openContinuationSource(source) {
+    if (!continuationSourceView(source, state.status?.workspace_id)) return false;
+    try {
+      if (source.kind === "history_reference") return await openHistory(source.agent, source.session_id, null, 0, true);
+      return await nativeChats.selectExisting({ workspaceId: source.workspace_id, agent: source.agent, chatId: source.chat_id });
+    } catch (error) { toast(userError(error, "原对话暂不可用，接续准备仍保留。")); return false; }
+  }
+  async function openContinuationTarget(target) {
+    if (!continuationKeys(target, ["workspace_id", "agent", "chat_id"]) || target.workspace_id !== state.status?.workspace_id
+        || !["codex", "hermes"].includes(target.agent) || !continuationUUID(target.chat_id)) return false;
+    try { return await nativeChats.selectExisting({ workspaceId: target.workspace_id, agent: target.agent, chatId: target.chat_id }); }
+    catch (error) { toast(userError(error, "接续对话暂不可用，原准备仍保留。")); return false; }
+  }
+  let historyOriginTargets = null, historyOriginRead = 0;
+  function sameNativeHistorySource(left, right) {
+    return !!left && !!right && ["workspace_id", "agent", "chat_id", "source_session_id", "generation"].every(key => left[key] === right[key]);
+  }
+  async function loadHistoryOrigins(agent, sessionId, version = state.openVersion, readerContext = null) {
+    const request = ++historyOriginRead, scope = state.status?.workspace_id;
+    const reader = readerContext === null ? null : { ...readerContext }, location = state.contextNavigationVersion;
+    historyOriginTargets = null;
+    if (!scope) return;
+    if (reader && (!continuationKeys(reader, ["workspace_id", "agent", "chat_id", "source_session_id", "generation"])
+        || reader.workspace_id !== scope || reader.agent !== agent || reader.source_session_id !== sessionId || !continuationUUID(reader.chat_id) || !Number.isSafeInteger(reader.generation))) return;
+    const current = () => request === historyOriginRead && scope === state.status?.workspace_id && version === state.openVersion
+      && location === state.contextNavigationVersion && (reader ? state.page === "native-chats" && sameNativeHistorySource(reader, nativeChats?.getHistorySourceContext())
+        : state.page === "conversations" && state.selected.type === "history" && state.selected.agent === agent && state.selected.sessionId === sessionId);
+    if (!current()) return;
+    try {
+      const value = await api("/api/management/native-chat-origin?" + new URLSearchParams({ source_kind: "history_reference", source_agent: agent, source_session_id: sessionId }), {}, false);
+      if (!current() || !continuationKeys(value, ["workspace_id", "scope", "source_view", "targets"]) || value.workspace_id !== scope || value.scope !== "native_continuation_targets"
+          || !continuationSourceView(value.source_view, scope) || value.source_view.kind !== "history_reference" || value.source_view.agent !== agent || value.source_view.session_id !== sessionId
+          || !Array.isArray(value.targets) || value.targets.length > 512 || value.targets.some(row => !continuationKeys(row, ["agent", "chat_id", "title", "available"])
+            || !["codex", "hermes"].includes(row.agent) || !continuationUUID(row.chat_id) || typeof row.available !== "boolean"
+            || (row.available ? typeof row.title !== "string" || /[\u0000\ud800-\udfff]/u.test(row.title) || row.title.length > 16384 : row.title !== null))
+          || new Set(value.targets.map(row => row.agent + ":" + row.chat_id)).size !== value.targets.length) return;
+      historyOriginTargets = { ...value, version, reader }; historyHeader(); updateComposer();
+    } catch (_) { /* A missing relation never creates a target or rewrites history. */ }
+  }
+  function appendHistoryOriginTargets() {
+    const value = historyOriginTargets, version = state.openVersion, location = state.contextNavigationVersion;
+    const current = () => value === historyOriginTargets && value?.workspace_id === state.status?.workspace_id && value.version === state.openVersion && version === state.openVersion
+      && location === state.contextNavigationVersion && (value.reader ? state.page === "native-chats" && sameNativeHistorySource(value.reader, nativeChats?.getHistorySourceContext())
+        : state.page === "conversations" && state.selected.type === "history" && state.selected.agent === value.source_view.agent && state.selected.sessionId === value.source_view.session_id);
+    if (!value?.targets.length || !current()) return;
+    const group = el("details", "conversation-more"), actions = el("div", "conversation-more-actions");
+    group.append(el("summary", "", "接续对话"));
+    for (const target of value.targets) {
+      if (!target.available) { actions.append(el("p", "detail-notice", (backendLabels[target.agent] || target.agent) + " 接续入口暂不可用；原关系保留。")); continue; }
+      const open = button(target.title || "未命名接续对话", "text-button", () => {
+        if (current()) void nativeChats.selectExisting({ workspaceId: value.workspace_id, agent: target.agent, chatId: target.chat_id }, current)
+          .catch(error => toast(userError(error, "这段接续对话暂时无法打开，原关系保留。")));
+      });
+      open.title = (backendLabels[target.agent] || target.agent) + " · 打开已有对话，不会发送"; actions.append(open);
+    }
+    group.append(actions); ui.actions.append(group);
   }
   const continuations = window.RabbitContinuations ? window.RabbitContinuations.create({
     root: $("continuation-panel"), getWorkspace: () => state.status?.workspace_id || "",
@@ -2201,7 +2343,7 @@
     },
     getProfiles: () => profiles?.catalog(), onChooseConfiguration: kind => profiles?.open(kind),
     getSendShortcut: () => state.preferences.send_shortcut, onOpenSource: openContinuationSource,
-    onOpenTarget: openContinuationSource,
+    onOpenTarget: openContinuationTarget,
     onReadCreation: async (record, onProgress) => {
       const found = await nativeChats.readCreation(record.creation.creation_id, record.target.agent);
       return !!found.chat && onProgress({ created_chat_id: found.chat.id }) === true;
@@ -2316,14 +2458,15 @@
   }) : null;
   $("native-adopt")?.addEventListener("click", continueNativeHistory);
   if (window.RabbitConversationGroups && markdownChats && $("conversation-group-modal")) {
-    conversationGroups = window.RabbitConversationGroups.create({ api, root: $("conversation-group-modal"), filters: $("source-filters"),
+    conversationGroups = window.RabbitConversationGroups.create({ api, root: $("conversation-group-modal"),
+      filters: $("conversation-folder-filters"), heading: $("conversation-folder-heading"),
       directory: markdownChats, getWorkspace: () => state.status?.workspace_id || "",
       onSelect: folder => {
         state.historyAgent = "all"; state.browserAgentFilterTouched = true;
         sourceFilters().forEach(n => { const active = !folder && n.dataset.agent === "all"; n.classList.toggle("active", active); n.setAttribute("aria-pressed", String(active)); });
         loadHistoryList(true); checkpointBrowserState();
       },
-      onAssign: prepareGroupSource, onError: error => toast(userError(error, "分组暂时未读出，请重新读取文件夹。")) });
+      onAssign: prepareGroupSource, onError: error => toast(userError(error, "对话夹暂时未读出，请重新读取。")) });
   }
   async function prepareGroupSource(item, folder, directory) {
     const workspace = state.status?.workspace_id;
@@ -2401,6 +2544,22 @@
         const preview = body.registered_material_refs?.length ? await api("/api/native-materials/preview", { method: "POST", body: JSON.stringify({ material_refs: body.registered_material_refs }) }, false) : undefined;
         return window.RabbitNativeTextQuote.prepare(snapshot || { snapshot_kind: "native_text", workspace_id: captured.workspace_id, source, records }, body, targetAgent, preview);
       },
+    },
+    onPrepareOrigin: async (value, isCurrent) => {
+      const scope = value.workspace_id, snapshot = value.snapshot, source = snapshot?.source;
+      if (!isCurrent() || scope !== state.status?.workspace_id || source?.origin_kind !== "history_index") return false;
+      const response = await api("/api/markdown-chats/history-reference?" + new URLSearchParams({ agent: source.agent, session_id: source.history_session_id }), {}, false);
+      if (!isCurrent()) return false;
+      const reference = response?.reference;
+      if (!continuationKeys(response, ["workspace_id", "reference"]) || response.workspace_id !== scope
+          || !continuationKeys(reference, ["kind", "id", "agent", "session_id", "title"]) || reference.kind !== "history_reference"
+          || reference.agent !== source.agent || reference.session_id !== source.history_session_id || !continuationUUID(reference.id)) throw Error("原索引引用身份待核对；原目标和草稿保留。");
+      const sourceView = { kind: "history_reference", workspace_id: scope, id: reference.id, agent: source.agent, session_id: source.history_session_id, title: source.title };
+      const snapshotSha = await continuationDigest({ source_view: sourceView, snapshot, material_refs: value.material_refs });
+      if (!isCurrent()) return false;
+      return saveContinuationOrigin({ target_agent: value.target_agent, target_chat_id: value.target_chat_id, creation_id: value.creation_id,
+        source_view: sourceView, source_revision: source.revision, selected_message_ids: value.selected_message_ids,
+        material_refs: value.material_refs, snapshot_sha256: snapshotSha }, isCurrent);
     },
     onPrepareContinuation: async (value, isCurrent) => {
       const profile = nativeQuoteProfile?.agent_instance_id === "local/" + value.target_agent ? nativeQuoteProfile : null;
@@ -2483,6 +2642,7 @@
     root: $("workspace-panel"), api, getWorkspace: () => state.status?.workspace_id || "",
     workStatus,
     getOverview: () => myAI?.snapshot(),
+    onBackToMyAI: () => showPage("my-ai"),
     onOpenWork: (action, isCurrent = () => true) => isCurrent() ? openMyAIAction(action) : false,
     getSelection: () => ({ backend: state.backend, model_id: state.model_id, chatId: state.selected.type === "chat" ? state.selected.id : null, chatTitle: state.chat && state.chat.title || state.selected.type === "history" && state.historySession && state.historySession.title }),
     selectBackend, selectModel, onPreferences: applyPreferences, profiles, profilesEnabled, onNavigate: showPage,
@@ -2498,13 +2658,13 @@
     },
   }) : null;
   workspaceReady = true;
-  const myAI = window.RabbitMyAIPage?.create({ root: $("my-ai-panel"), headerActions: ui.actions, api, getWorkspace: () => state.status?.workspace_id || "",
-    onNewChat: newChat,
+  const dashboard = window.RabbitDashboardSections?.create({ api, getWorkspace: () => state.status?.workspace_id || "",
+    onConnection: id => openMyAIAction({ kind: "manage", target: { kind: "agent", id, section: "connection", fromMyAI: true, backTo: "usage" } }),
+  });
+  myAI = window.RabbitMyAIPage?.create({ root: $("my-ai-panel"), api, getWorkspace: () => state.status?.workspace_id || "",
+    sections: dashboard?.sections,
+    onViewChange: () => { state.browserPageTouched = true; checkpointBrowserState(); },
     onRead: value => { state.management = value.management; profiles?.setInventory(); updateComposer(); },
-    onCheck: async () => {
-      if (!statusChecks) throw Error("综合核对入口暂不可用。已有目录保留。");
-      await statusChecks.show(); await statusChecks.start();
-    },
     onAction: openMyAIAction,
   });
   async function openMyAIAction(action) {
@@ -2514,7 +2674,7 @@
       if (action.kind === "manage") {
         const tab = target.kind === "agent" ? "agents" : target.kind === "model" ? "models" : "memory-profiles";
         state.managementTarget = target.id ? { kind: target.kind, id: target.id } : null;
-        showPage("management", tab); if (target.id) await workspace?.openObject?.(target); checkpointBrowserState(); return;
+        showPage("management", tab); if (target.id) await workspace?.openObject?.({ ...target, fromMyAI: target.kind === "agent" }); checkpointBrowserState(); return;
       }
       if (target?.kind === "native") return nativeChats?.openEntry({ agent: target.agent, chatId: target.id, workspaceId: state.status.workspace_id }, { readOnly: action.kind === "read" || target.read_only });
       if (target?.kind === "history") return openHistory(target.agent, target.session_id, null, 0, true);
@@ -2625,8 +2785,9 @@
   }
   function workspaceHeader() {
     if (state.page === "my-ai") {
-      ui.title.textContent = "我的 AI"; ui.eyebrow.textContent = ui.meta.textContent = "";
-      ui.actions.replaceChildren(...(myAI?.actions() ? [myAI.actions()] : [])); ui.composer.hidden = true; return;
+      ui.title.textContent = "我的 AI"; ui.eyebrow.textContent = "";
+      ui.meta.textContent = new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "long" }).format(new Date());
+      ui.actions.replaceChildren(); ui.composer.hidden = true; return;
     }
     if (state.page === "continuation") {
       ui.title.textContent = "接着《" + (continuations?.current()?.source_view.title || "原对话") + "》";
@@ -2636,7 +2797,7 @@
       const view = nativeChats?.getViewContext(), row = view && state.libraryItems.find(item => item.kind === "native" && item.agent === view.agent && item.id === view.chat_id);
       ui.title.textContent = view?.title || row?.title || (window.RabbitWorkspace?.language?.() === "en" ? "Native chats" : "原生对话");
       ui.eyebrow.textContent = ui.meta.textContent = "";
-      ui.actions.replaceChildren(); appendNativeOrigin(); ui.composer.hidden = true;
+      ui.actions.replaceChildren(); appendNativeOrigin(); appendHistoryOriginTargets(); ui.composer.hidden = true;
       return;
     }
     if (state.page === "specialist") {
@@ -2686,10 +2847,17 @@
       extra.push(open, button("查看来源更新", "text-button source-update-entry", () => openSourceUpdate(continuation)), button(state.sourceImagePending.has(continuation) ? "检查上次图片补入" : "补入来源图片", "text-button source-images-entry", () => openSourceImages(continuation)));
     }
     if (extra.length) ui.actions.append(headerMore(extra));
+    appendHistoryOriginTargets();
     ui.composer.hidden = false;
   }
   function renderSidebar() {
     const categories = state.page === "management" || state.page === "settings";
+    const nextView = categories ? state.page : "conversations";
+    const changed = sidebarView !== nextView;
+    if (changed) {
+      sidebarScroll[sidebarView] = ui.sidebarContent.scrollTop;
+      sidebarView = nextView;
+    }
     $("sidebar-chat-content").hidden = categories;
     const list = $("sidebar-section-list"); list.hidden = !categories;
     $("specialist-composer-card").dataset.active = String(state.page === "specialist");
@@ -2702,6 +2870,7 @@
         return control;
       }));
     }
+    if (changed) ui.sidebarContent.scrollTop = sidebarScroll[sidebarView];
   }
   function showPage(page, tab, { keepSidebar = false } = {}) {
     fileTasks?.close(); fileMaterials?.close(); projectPublish?.close();
@@ -2720,10 +2889,7 @@
     state.page = page;
     specialist?.setPassive?.(page === "my-ai");
     if (page !== "my-ai") myAI?.hide();
-    if (statusReportMount) {
-      if (page === "my-ai") myAI?.reportMount()?.append(statusReportMount);
-      else if (page === "specialist") $("specialist-guide-panel")?.querySelector(".rbs-guide")?.append(statusReportMount);
-    }
+    if (statusReportMount && page === "specialist") $("specialist-guide-panel")?.querySelector(".rbs-guide")?.append(statusReportMount);
     $("specialist-layout").hidden = page !== "specialist";
     if (page !== "specialist") specialist?.hide();
     if (page !== "specialist") statusChecks?.hide();
@@ -2809,7 +2975,7 @@
       exportButton.title = "将全部文字与图片数量、状态下载为 Markdown 文件；未打包图片文件";
       secondary.push(exportButton);
       if (markdownChats?.enabled()) {
-        const organize = button("整理到文件夹", "text-button", () => markdownChats.open(chat).catch(error => toast(userError(error, "整理面板尚未打开。"))));
+        const organize = button("整理到对话夹", "text-button", () => markdownChats.open(chat).catch(error => toast(userError(error, "整理面板尚未打开。"))));
         organize.dataset.controlInterface = "ai";
         secondary.push(organize);
       }
@@ -4310,11 +4476,12 @@
       state.historyMessageNext = data.next_offset == null ? null : data.next_offset;
       state.historyReady = true;
       historyHeader();
+      void loadHistoryOrigins(agent, sessionId, version);
       renderMessages(state.historyMessages, { history: true });
       if (target) requestAnimationFrame(() => { if (version === state.openVersion) scrollToHistoryMatch(); });
       if (!state.historyMessages.length) ui.messages.append(el("div", "empty-list", "这段历史暂时没有可读取的文字或图片记录。"));
     } catch (error) {
-      if (version === state.openVersion) { historyHeader(); showViewError(userError(error, "这段原文暂时没有读出来，请稍后再试。"), () => openHistory(agent, sessionId, target)); }
+      if (version === state.openVersion) { historyHeader(); showViewError(userError(error, "这段原文暂时没有读出来，请稍后再试。"), () => openHistory(agent, sessionId, target, start, readOnly)); }
     } finally { updateComposer(); checkpointBrowserState(); schedulePoll(true); }
   }
   async function loadMoreHistoryMessages(node, direction = "next") {
@@ -4645,6 +4812,7 @@
   }
   async function updateHistory() {
     const node = $("refresh-history"); node.disabled = true; node.textContent = "更新中…";
+    node.setAttribute("aria-label", "正在更新原对话");
     historySourceSerial++; historySourcePending = false;
     const scope = state.status?.workspace_id || null;
     const current = () => !scope || state.status?.workspace_id === scope;
@@ -4672,11 +4840,11 @@
         toast(rejected ? `历史更新未完成。${userError(error, "请稍后再试。")}` : "历史更新结果尚未确认；请稍后查看对话列表，未自动重发。");
       }
     }
-    finally { node.disabled = false; node.textContent = "更新"; }
+    finally { node.disabled = false; updateHistorySummary(); }
   }
 
   $("new-chat").addEventListener("click", newChat);
-  $("home-logo")?.addEventListener("click", () => { state.browserPageTouched = true; showPage("my-ai"); });
+  $("home-logo")?.addEventListener("click", () => { state.browserPageTouched = true; myAI?.resetView?.(); showPage("my-ai"); });
   document.addEventListener("keydown", event => { if (event.key === "Escape") closeNewChatMenu(); });
   $("close-document").addEventListener("click", closeDocument);
   document.addEventListener("keydown", (event) => {
@@ -4694,7 +4862,7 @@
   $("close-sidebar").addEventListener("click", () => toggleSidebar(false));
   ui.backdrop.addEventListener("click", () => toggleSidebar(false));
   document.addEventListener("keydown", (event) => { if (event.key === "Escape") toggleSidebar(false); });
-  document.querySelectorAll(".page-nav").forEach((node) => node.addEventListener("click", () => { state.browserPageTouched = true; if (node.dataset.page === "conversations") void switchListView(); else showPage(node.dataset.page); }));
+  document.querySelectorAll(".page-nav").forEach((node) => node.addEventListener("click", () => { state.browserPageTouched = true; if (node.dataset.page === "conversations") void switchListView(); else { if (node.dataset.page === "my-ai") myAI?.resetView?.(); showPage(node.dataset.page); } }));
   sourceFilters().forEach((node) => node.addEventListener("click", () => {
     conversationGroups?.clear();
     state.browserAgentFilterTouched = true;

@@ -30,7 +30,7 @@
     return Object.keys(left).every(key => Object.hasOwn(right, key) && sameValue(left[key], right[key]));
   }
   const node = (tag, cls, text) => { const item = document.createElement(tag); if (cls) item.className = cls; if (text !== undefined) item.textContent = String(text); return item; };
-  function create({ root, api, getSource, getTargets, placeDraft, materialImages = null, onError = () => {}, sourceAdapter = null, onPrepareContinuation = null }) {
+  function create({ root, api, getSource, getTargets, placeDraft, materialImages = null, onError = () => {}, sourceAdapter = null, onPrepareContinuation = null, onPrepareOrigin = null }) {
     if (!root || [api, getSource, getTargets, placeDraft].some(value => typeof value !== "function")) throw Error("原生接力缺少入口或接口。");
     const nativeSource = sourceAdapter !== null;
     const fileSource = sourceAdapter?.kind === "file_material";
@@ -44,12 +44,25 @@
     // Only creation metadata is journaled. Keep it separate from each native
     // page's selection/name drafts, and retain it across modal/source changes.
     let creationKey = "", creationRaw = null, creationPending = null, creationBlocked = false, creatingTarget = false, creationGeneration = 0, creationTargetVersion = 0, creationError = "";
-    let creationDetails, creationName, creationButton, creationNote;
+    let creationDetails, creationName, creationButton, creationNote, originNote;
     let panel, heading, sourceNote, status, collection, task, agent, chat, chatLabel, previewButton, insertButton, fullText, previewDetails, previewCounts, previewMaterials, selectAll, selectLast, clear, closeButton;
     const materialCards = window.RabbitNativeMaterials?.create({ api, images: materialImages, getWorkspace: () => sameScope() ? captured.workspace_id : "", onError });
     root.hidden = true;
     const button = (text, callback) => { const item = node("button", "file-task-action", text); item.type = "button"; item.addEventListener("click", callback); return item; };
     const indexedSource = () => nativeSource && (source?.origin_kind || captured?.origin_kind) === "history_index";
+    const originTarget = targetAgent => indexedSource() && typeof onPrepareOrigin === "function" && ["codex", "hermes"].includes(targetAgent);
+    const createdTargetKey = (workspace, targetAgent, chatId) => "rabbit.native-handoff.created.v1." + encodeURIComponent(workspace) + "." + targetAgent + "." + chatId;
+    function createdTarget(targetAgent, chatId) {
+      if (!originTarget(targetAgent)) return null;
+      let raw;
+      try {
+        raw = window.sessionStorage.getItem(createdTargetKey(captured.workspace_id, targetAgent, chatId));
+        if (raw === null) return null;
+        const value = JSON.parse(raw);
+        if (!keys(value, ["version", "client_id", "title"]) || value.version !== 1 || !uuid(value.client_id) || !titleValid(value.title)) throw Error();
+        return value;
+      } catch (_) { throw Error("原目标的创建编号无法核对，尚未登记来源或放入草稿；没有重建目标。"); }
+    }
     const continuationMode = () => typeof onPrepareContinuation === "function" && nativeSource && !fileSource && !indexedSource() && ["codex", "hermes"].includes(source?.agent) && ["codex", "hermes"].includes(agent?.value);
     const refOf = ({ kind, id, sha256, source_chat_id }) => ({ kind, id, sha256, ...(source_chat_id === undefined ? {} : { source_chat_id }) });
     const chosenMaterials = () => [...materialSelections.values()].filter(value => value.registered === true || selected.has(value.message_id));
@@ -71,7 +84,7 @@
       reading = readingChats = preparing = placing = false; root.replaceChildren();
       // Do not retain detached DOM containing complete quoted conversations.
       panel = heading = sourceNote = status = collection = task = agent = chat = previewButton = insertButton = fullText = previewDetails = previewCounts = previewMaterials = selectAll = selectLast = clear = closeButton = null;
-      creationDetails = creationName = creationButton = creationNote = chatLabel = null;
+      creationDetails = creationName = creationButton = creationNote = originNote = chatLabel = null;
       if (nativeSource && typeof sourceAdapter.release === "function") sourceAdapter.release();
       const shell = document.querySelector(".app-shell"); if (shell) shell.inert = false;
       if (returnFocus && returnFocus.isConnected !== false) returnFocus.focus();
@@ -92,6 +105,7 @@
       task.disabled = reading || placing; agent.disabled = reading || placing || !targets.length; chat.disabled = reading || readingChats || placing || !validTarget || !chats.length;
       selectAll.disabled = reading || placing || !records.length || records.length > 50; selectLast.disabled = reading || placing || !records.length; clear.disabled = reading || placing || !records.length && !registeredMaterials.length;
       chatLabel.hidden = creationDetails.hidden = continuation;
+      originNote.hidden = !originTarget(agent.value);
       for (const checkbox of collection.querySelectorAll("input")) {
         if (checkbox.dataset.memoryReferenceId) {
           checkbox.checked = memorySelections.has(checkbox.dataset.messageId + ":" + checkbox.dataset.memoryReferenceId);
@@ -138,6 +152,7 @@
       chat = node("select", "native-handoff-control"); chat.setAttribute("aria-label", "放入哪段原生对话");
       agent.addEventListener("change", () => { if ([...materialSelections.values()].some(item => !materialKind(agent.value, item.kind))) { agent.value = targets.find(item => item.agent === lastAgent && [...materialSelections.values()].every(material => materialKind(item.agent, material.kind)))?.agent || targets.find(item => [...materialSelections.values()].every(material => materialKind(item.agent, material.kind)))?.agent || ""; notice = "此 Agent 尚不支持全部所选材料；请先取消相应材料，全部选择仍保留。"; render(); return; } invalidate(); return loadChats(); }); chat.addEventListener("change", () => { creationTargetVersion++; render(); });
       agentLabel.append(agent); chatLabel.append(chat); destinations.append(agentLabel, chatLabel);
+      originNote = node("p", "file-task-note", "在这里新建目标，可从目标返回来源；放入已有对话会保留它原来的来源。");
       creationDetails = node("details", "rbh-details"); creationDetails.append(node("summary", "", "新建目标对话"));
       const nameLabel = node("label", "native-handoff-field", "新对话名称"); creationName = node("input", "native-handoff-control"); creationName.type = "text"; creationName.maxLength = 160; creationName.setAttribute("aria-label", "新建目标对话名称");
       creationName.addEventListener("input", () => { if (creationPending || creationBlocked || creatingTarget) creationName.value = creationPending?.title || ""; render(); }); nameLabel.append(creationName);
@@ -146,7 +161,7 @@
       previewDetails = node("details", "native-handoff-preview"); previewDetails.hidden = true; previewDetails.open = true;
       previewDetails.append(node("summary", "", "将交给 Agent 的完整文字")); previewCounts = node("p", "file-task-note"); fullText = node("pre", "file-task-preview-content"); previewMaterials = node("div", "native-handoff-materials"); previewDetails.append(previewCounts, fullText, previewMaterials);
       status = node("p", "file-task-note native-handoff-status"); status.setAttribute("aria-live", "polite");
-      panel.append(header, sourceNote, boundary, tools, collection, taskLabel, destinations, creationDetails, actions, status, previewDetails); root.replaceChildren(panel); render();
+      panel.append(header, sourceNote, boundary, tools, collection, taskLabel, destinations, originNote, creationDetails, actions, status, previewDetails); root.replaceChildren(panel); render();
     }
     function loadCreation() {
       creationGeneration++; creatingTarget = false; creationPending = null; creationRaw = null; creationBlocked = false; creationError = "";
@@ -184,6 +199,12 @@
         if (!current()) return false;
         if (!keys(row, ["id", "title", "agent", "role", "created_at"]) || !uuid(row.id) || row.agent !== targetAgent || row.role !== "chat" || row.title !== submitted.title || !id(row.created_at) || row.created_at.length > 80) throw Error("新建回执无法核对，原编号保留；没有放入草稿。");
         if (window.sessionStorage.getItem(key) !== raw) { creationBlocked = true; throw Error("原创建记录已有变化，没有覆盖或清除；请保留原编号核对。"); }
+        if (originTarget(targetAgent)) {
+          const receiptKey = createdTargetKey(captured.workspace_id, targetAgent, row.id), previous = window.sessionStorage.getItem(receiptKey);
+          if (previous !== null && previous !== raw) throw Error("原目标已有不同的创建记录，没有替换或放入草稿。");
+          window.sessionStorage.setItem(receiptKey, raw);
+          if (window.sessionStorage.getItem(receiptKey) !== raw) throw Error("不能保留原目标的创建编号；请用原编号核对，尚未放入草稿。");
+        }
         window.sessionStorage.removeItem(key);
         if (window.sessionStorage.getItem(key) !== null) { creationBlocked = true; throw Error("新建已收到回执，但浏览器不能清除原记录；请用原编号核对。"); }
         creationPending = null; creationRaw = null; creationName.value = ""; creationDetails.open = false;
@@ -357,7 +378,18 @@
       placing = true; notice = ""; render();
       try {
         if (!sameScope(stamp) || !targetAvailable() || preview.targetAgent !== agent.value) return false;
-        const placed = continuation ? await onPrepareContinuation(value, () => sameScope(stamp) && version === selectionVersion && targetAvailable() && agent.value === value.target_agent && continuationMode()) : await placeDraft(value, () => sameScope(stamp) && version === selectionVersion && targetAvailable() && agent.value === value.agent && chat.value === value.chatId);
+        const current = () => sameScope(stamp) && version === selectionVersion && targetAvailable() && agent.value === value.agent && chat.value === value.chatId;
+        if (!continuation && originTarget(value.agent)) {
+          const creation = createdTarget(value.agent, value.chatId);
+          if (creation) {
+            const frozen = JSON.parse(JSON.stringify({ workspace_id: captured.workspace_id, target_agent: value.agent,
+              target_chat_id: value.chatId, creation_id: creation.client_id, snapshot: { ...nativeSnapshot,
+                records: nativeSnapshot.records.filter(row => preparedBody.message_ids.includes(row.message_id)) },
+              selected_message_ids: preparedBody.message_ids, material_refs: preview.material_refs }));
+            if (await onPrepareOrigin(frozen, current) !== true || !current()) return false;
+          }
+        }
+        const placed = continuation ? await onPrepareContinuation(value, () => sameScope(stamp) && version === selectionVersion && targetAvailable() && agent.value === value.target_agent && continuationMode()) : await placeDraft(value, current);
         if (stamp !== generation || root.hidden) return placed === true;
         if (placed === true) { placing = false; close(); return true; }
         throw Error("目标草稿未接收这份资料。原草稿保留，请核对目标后再试。");

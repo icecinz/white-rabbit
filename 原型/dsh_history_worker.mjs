@@ -128,6 +128,26 @@ async function resumeInspection(root,meta,events,unknown,interruptedTurnClosers)
   return {schema_version:1,mode:'resume_inspect',ok:true,header:meta,project_key:project(meta.cwd),session_key:segment(meta.id),
     effective_preset:preset,event_count:events.length,closed_log:true,repair_required:false,pending_next_turn:0,pending_next_step:0,ownership:'not_checked'}
 }
+async function usageInspection(root,meta,events){
+  if(Object.hasOwn(meta,'parentSession')||Object.hasOwn(meta,'origin')||meta.delegationDepth!==0||(meta.seedLength??0)!==0||!Object.hasOwn(meta,'cwd'))fail()
+  const meterRoot=resolve(root,'node_modules/@deepseek-ai/dsh-token-meter')
+  const pkg=JSON.parse(readFileSync(resolve(meterRoot,'package.json'),'utf8'))
+  if(pkg.name!=='@deepseek-ai/dsh-token-meter'||pkg.version!=='0.1.0-rc.6')fail()
+  const {tokenUsageProjectionDefinition:meter}=await import(pathToFileURL(resolve(meterRoot,'lib/types/usage-projection.js')).href)
+  let state=meter.init()
+  for(const event of events){
+    const {type,data}=event
+    const usage=type==='assistant/message'?data.usage:
+      type==='assistant/chunk'&&data.chunk?.type==='usage'?data.chunk.usage:undefined
+    if(usage===undefined)continue
+    if(!object(usage)||!integer(data.turn)||!integer(data.step)||!integer(usage.inputTokens)||!integer(usage.outputTokens)
+        ||['cacheReadTokens','cacheWriteTokens'].some(key=>Object.hasOwn(usage,key)&&!integer(usage[key])))fail()
+    state=meter.apply(state,event)
+  }
+  const usage=state.last===null?null:meter.schema.parse(meter.view(state))
+  return {schema_version:1,mode:'usage_inspect',session_id:meta.id,cwd:meta.cwd,
+    project_key:project(meta.cwd),session_key:segment(meta.id),usage}
+}
 async function main(){
   if(process.argv.length!==4||process.argv[2]!=='--package-root'||!isAbsolute(process.argv[3]))fail()
   const root=resolve(process.argv[3]),pkg=JSON.parse(readFileSync(resolve(root,'package.json'),'utf8'))
@@ -139,7 +159,7 @@ async function main(){
   let size=0;const chunks=[]
   for await(const chunk of process.stdin){size+=chunk.length;if(size>Math.ceil(MAX_FILE*4/3)+1024)fail();chunks.push(chunk)}
   const input=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks)))
-  if(!exact(input,['schema_version','compression','body'],['mode'])||input.schema_version!==1||Object.hasOwn(input,'mode')&&input.mode!=='resume_inspect'||!['none','zstd'].includes(input.compression)||typeof input.body!=='string'||/[^A-Za-z0-9+/=]/u.test(input.body))fail()
+  if(!exact(input,['schema_version','compression','body'],['mode'])||input.schema_version!==1||Object.hasOwn(input,'mode')&&!['resume_inspect','usage_inspect'].includes(input.mode)||!['none','zstd'].includes(input.compression)||typeof input.body!=='string'||/[^A-Za-z0-9+/=]/u.test(input.body))fail()
   const raw=Buffer.from(input.body,'base64');if(raw.length>MAX_FILE||raw.toString('base64')!==input.body)fail()
   // Strict complete-file mode: a torn zstd frame or partial JSONL tail rejects.
   const plain=input.compression==='zstd'?decompress(raw):raw
@@ -159,6 +179,9 @@ async function main(){
       adoptSessionEvent(event);events.push(event);physical.push(i+1)
       if(event.type==='session/title'&&typeof event.data.title==='string')title=event.data.title.slice(0,240)
     }
+  }
+  if(input.mode==='usage_inspect'){
+    process.stdout.write(JSON.stringify(await usageInspection(root,meta,events)));return
   }
   const folded=foldSurface(events),current=new Set(folded.nodes),rows=[],transforms={}
   if(input.mode==='resume_inspect'){

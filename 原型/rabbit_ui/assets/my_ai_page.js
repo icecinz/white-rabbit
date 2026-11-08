@@ -1,108 +1,366 @@
-/* The overview reads saved facts. Actions remain in the existing work pages. */
+/* The dashboard mounts cached facts and keeps each visit separate from account refresh. */
 (() => {
   "use strict";
-  function create({ root, api, getWorkspace, onAction, onNewChat, onCheck, onRead = () => {}, headerActions = null }) {
-    if (!root || [api, getWorkspace, onAction, onNewChat, onCheck].some(fn => typeof fn !== "function")) throw Error("我的 AI 页面入口不完整。");
-    let visible = false, generation = 0, actionGeneration = 0, loading = false, checking = false, data = null, error = "", flight = null, expiry = null;
-    const node = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
-    const button = (label, callback, cls = "my-ai-link") => { const n = node("button", cls, label); n.type = "button"; n.addEventListener("click", callback); return n; };
-    const report = node("div", "my-ai-report");
-    let currentActions = null;
-    const current = (snapshot, stamp, scope) => visible && stamp === actionGeneration && scope === getWorkspace() && snapshot === data && (!snapshot || snapshot.workspace_id === scope);
-    function actionButton(label, action) {
-      const snapshot = data, stamp = actionGeneration, scope = getWorkspace();
-      return button(label, () => { if (current(snapshot, stamp, scope)) Promise.resolve().then(() => current(snapshot, stamp, scope) && onAction(action)).catch(e => { if (current(snapshot, stamp, scope)) { error = e?.message || "这项工作暂时没有打开，原稿保留。"; render(); } }); });
+  const TITLES = Object.freeze({ usage: "额度与用量", brief: "简报" });
+  const THREAD_URL = /^codex:\/\/threads\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+  const execution = status => status === "running" || status === "needs_user";
+
+  function node(tag, cls, text) {
+    const value = document.createElement(tag);
+    if (cls) value.className = cls;
+    if (text !== undefined) value.textContent = text;
+    return value;
+  }
+
+  function button(label, callback, cls = "my-ai-link") {
+    const value = node("button", cls, label);
+    value.type = "button";
+    value.addEventListener("click", callback);
+    return value;
+  }
+
+  function create({ root, api, getWorkspace, onAction, onRead = () => {}, onViewChange = () => {}, sections = {} }) {
+    if (!root || [api, getWorkspace, onAction].some(fn => typeof fn !== "function")) throw Error("我的 AI 页面入口不完整。");
+    const body = node("div", "my-ai-body"), home = node("div", "my-ai-home");
+    const agentMount = node("section", "my-ai-agents");
+    const mounts = { usage: node("section", "my-ai-extra my-ai-usage"), brief: node("section", "my-ai-extra my-ai-brief") };
+    const full = node("div", "my-ai-subpage");
+    const privacy = node("footer", "my-ai-privacy");
+    const dot = node("span", "privacy-dot"); dot.setAttribute("aria-hidden", "true");
+    privacy.append(dot, node("span", "", "记录保存在这台电脑"));
+    home.append(agentMount, mounts.usage, mounts.brief, privacy);
+    root.replaceChildren(body);
+    let visible = false, workspace = "", active = null, expanded = false, visit = 0;
+    let scrollTop = 0, homeReturn = null, detailReturn = null, viewReturn = null;
+    let generation = 0, controlVersion = 0, loading = false, data = null, error = "", flight = null, expiry = null;
+
+    function focusOf(trigger) {
+      return { trigger, key: trigger?.dataset.dashboardFocus, top: root.scrollTop || 0 };
     }
-    function resource(title, rows, kind, empty) {
-      const section = node("section", "my-ai-resource");
-      const head = node("div", "my-ai-section-heading"); head.append(node("h3", "", title), actionButton("查看全部", { kind: "manage", target: { kind, id: null } })); section.append(head);
-      const list = node("ul", "my-ai-resources");
-      const summary = kind === "agent" ? [...rows].sort((a, b) => Number(["running", "needs_user"].includes(b.status)) - Number(["running", "needs_user"].includes(a.status))) : rows;
-      for (const row of summary.slice(0, 3)) {
-        const item = node("li", "my-ai-resource-row"), control = actionButton(row.name, { kind: "manage", target: row.target });
-        control.dataset.objectId = row.id; control.dataset.controlInterface = "ai";
-        const status = node("span", "my-ai-status", row.status_label); status.dataset.state = row.status;
-        item.append(control, status, node("p", "my-ai-resource-note", kind === "model" ? row.agent_name : kind === "memory" ? row.program : row.model_count ? `${row.model_count} 项模型目录` : "查看接入与工作"));
-        list.append(item);
-      }
-      if (!rows.length) list.append(node("li", "my-ai-empty-note", empty));
-      section.append(list);
-      return section;
+
+    function restoreFocus(location) {
+      if (!location) return false;
+      const trigger = location.trigger;
+      const replacement = location.key && [...root.querySelectorAll("[data-dashboard-focus]")]
+        .find(control => control.dataset.dashboardFocus === location.key);
+      const control = trigger && root.contains(trigger) ? trigger : replacement;
+      control?.focus({ preventScroll: true });
+      root.scrollTop = location.top;
+      return Boolean(control);
     }
-    function render() {
-      actionGeneration++;
-      if (data && data.workspace_id !== getWorkspace()) data = null;
-      root.hidden = !visible;
-      const body = node("div", "my-ai-body"), hero = node("section", "my-ai-hero");
-      const actions = node("div", "my-ai-actions");
-      const primary = data?.empty ? actionButton("接入第一个 Agent", { kind: "manage", target: { kind: "agent", id: null } }) : button("新对话", onNewChat);
-      primary.className = "my-ai-primary";
-      const check = button(checking ? "正在核对…" : "核对并更新", checkNow, "my-ai-secondary"); check.disabled = checking || loading; actions.append(check, primary);
-      currentActions = actions;
-      if (visible && headerActions) headerActions.replaceChildren(actions);
-      if (!headerActions) { hero.append(actions); body.append(hero); }
-      if (error) { const note = node("p", "my-ai-notice", error); note.setAttribute("role", "status"); note.append(button("重新读取", refresh)); body.append(note); }
-      if (!data) body.append(node("p", "my-ai-empty-note", loading ? "正在读取已有目录…" : "目录尚未读到。"));
-      else {
-        const resources = node("div", "my-ai-resource-grid");
-        resources.append(resource("Agent", data.agents, "agent", "还没有已接入的 Agent。"), resource("大模型", data.models, "model", "目录尚未报告模型。"), resource("记忆", data.memories, "memory", "尚未保存记忆配置。"));
-        body.append(resources);
-        const recent = node("section", "my-ai-recent"), head = node("div", "my-ai-section-heading");
-        head.append(node("h3", "", "最近工作"), actionButton("全部对话 →", { kind: "conversations" })); recent.append(head);
-        const list = node("ul", "my-ai-work-list");
-        for (const row of data.works) {
-          const item = node("li", "my-ai-work"), description = node("div", "my-ai-work-copy"); item.dataset.workKey = row.key;
-          description.append(node("strong", "", row.name), node("p", "my-ai-resource-note", [row.agent_name, row.status_label, row.detail].filter(Boolean).join(" · ")));
-          const controls = node("div", "my-ai-work-actions");
-          for (const action of row.actions) {
-            if (action.kind === "original") { const link = node("a", "my-ai-link", action.label); link.href = action.url; link.dataset.controlInterface = "human";
-              const snapshot = data, stamp = actionGeneration, scope = getWorkspace(); link.addEventListener("click", event => { if (!current(snapshot, stamp, scope)) event.preventDefault(); }); controls.append(link); }
-            else controls.append(actionButton(action.label, action));
-          }
-          item.append(description, controls); list.append(item);
+
+    function syncWorkspace() {
+      const next = getWorkspace();
+      if (next === workspace) return false;
+      workspace = next;
+      data = null;
+      loading = false;
+      error = "";
+      active = null;
+      expanded = false;
+      scrollTop = 0;
+      homeReturn = detailReturn = viewReturn = null;
+      generation++;
+      clearTimeout(expiry);
+      return true;
+    }
+
+    function currentControl(stamp, scope) {
+      return visible && !active && stamp === controlVersion && workspace === scope && scope === getWorkspace();
+    }
+
+    function agentAction(label, target, focusKey) {
+      const stamp = controlVersion, scope = workspace;
+      const control = button(label, () => {
+        if (!currentControl(stamp, scope)) return;
+        detailReturn = focusOf(control);
+        Promise.resolve().then(() => currentControl(stamp, scope) && onAction({ kind: "manage", target }))
+          .catch(failure => {
+            if (!currentControl(stamp, scope)) return;
+            error = failure?.message || "暂时无法打开这位 Agent 的详情。";
+            renderAgents();
+          });
+      });
+      control.dataset.dashboardFocus = focusKey;
+      return control;
+    }
+
+    function agentStatus(row) {
+      const status = node("span", "my-ai-status", row.status_label);
+      status.dataset.state = row.status;
+      return status;
+    }
+
+    function modelLabel(row) {
+      if (row.recorded_model) return "记录中的模型 " + row.recorded_model;
+      return row.model_count ? `已发现 ${row.model_count} 项模型` : "模型待核对";
+    }
+
+    function renderAgents() {
+      const wasFocused = document.activeElement;
+      const focus = wasFocused && agentMount.contains(wasFocused) ? focusOf(wasFocused) : null;
+      controlVersion++;
+      const stamp = controlVersion, scope = workspace;
+      const rows = data?.agents || [];
+      const head = node("div", "my-ai-section-heading");
+      const title = node("h3", "", "常用 Agent");
+      title.id = "my-ai-agents-heading";
+      agentMount.setAttribute("aria-labelledby", title.id);
+      head.append(title);
+      const content = [head];
+      const toggle = control => {
+        if (!currentControl(stamp, scope)) return;
+        expanded = !expanded;
+        renderAgents();
+        if (control.dataset.dashboardFocus === "agent-summary") {
+          agentMount.querySelector('[data-dashboard-focus="agent-expand"]')?.focus({ preventScroll: true });
         }
-        if (!data.works.length) list.append(node("li", "my-ai-empty-note", "在这里开始的工作，以及已索引的历史，会出现在这里。"));
-        recent.append(list); body.append(recent);
-        if (data.issues.length) body.append(node("p", "my-ai-notice", "部分目录暂未读完整；已有条目仍保留。"));
-        body.append(node("p", "my-ai-facts-note", "首页展示已有目录和可观察的工作。模型标为“已发现”；记忆只显示配置，不读取正文。"));
+        onViewChange();
+      };
+      if (rows.length) {
+        const expand = button(expanded ? "收起 ↑" : "展开 ↓", () => toggle(expand));
+        expand.dataset.dashboardFocus = "agent-expand";
+        expand.setAttribute("aria-expanded", String(expanded));
+        expand.setAttribute("aria-controls", "my-ai-agent-rows");
+        head.append(expand);
+        const box = node("div", "my-ai-agent-box");
+        if (!expanded) {
+          const summary = button("", () => toggle(summary), "my-ai-agent-summary-toggle");
+          summary.dataset.dashboardFocus = "agent-summary";
+          summary.setAttribute("aria-expanded", "false");
+          summary.setAttribute("aria-controls", "my-ai-agent-rows");
+          summary.setAttribute("aria-label", "展开常用 Agent");
+          const strip = node("span", "my-ai-agent-strip");
+          const featured = [...rows].sort((a, b) => Number(execution(b.status)) - Number(execution(a.status)));
+          for (const row of featured.slice(0, 3)) {
+            const item = node("span", "my-ai-agent-summary");
+            const name = node("strong", "my-ai-agent-name", row.name);
+            name.dataset.state = row.status;
+            item.append(name, node("small", "my-ai-agent-model", modelLabel(row)), agentStatus(row));
+            strip.append(item);
+          }
+          summary.append(strip);
+          box.append(summary);
+        }
+        const list = node("ul", "my-ai-agent-rows");
+        list.id = "my-ai-agent-rows";
+        list.hidden = !expanded;
+        if (expanded) for (const row of rows) {
+          const item = node("li", "my-ai-agent-row"), identity = node("div", "my-ai-agent-identity");
+          item.dataset.agentId = row.id;
+          const target = { ...row.target, fromMyAI: true };
+          const details = agentAction(row.name, target, "agent-" + row.id);
+          details.dataset.objectId = row.id;
+          identity.append(details, node("small", "my-ai-agent-model", modelLabel(row)));
+          item.append(identity, agentStatus(row));
+          if (THREAD_URL.test(row.original_url || "")) {
+            const link = node("a", "my-ai-external", "在 Codex 打开工作 ↗");
+            link.href = row.original_url;
+            link.addEventListener("click", event => { if (!currentControl(stamp, scope)) event.preventDefault(); });
+            item.append(link);
+          } else if (["needs_attention", "unverified"].includes(row.status)) {
+            item.append(agentAction("接入说明 →", { ...target, section: "connection" }, "connection-" + row.id));
+          }
+          list.append(item);
+        }
+        box.append(list);
+        content.push(box);
+      } else {
+        const empty = node("div", "my-ai-agent-box my-ai-empty-note", data ? "还没有可展示的 Agent。" : loading ? "正在读取 Agent 目录…" : "Agent 目录尚未读到。");
+        if (data) empty.append(agentAction("查看 Agent 接入 →", { kind: "agent", id: null }, "agent-connect"));
+        content.push(empty);
       }
-      body.append(report); root.replaceChildren(body);
+      if (error || data?.issues.length) {
+        const notice = node("p", "my-ai-notice", error || "部分目录暂未读完整。");
+        notice.setAttribute("role", "status");
+        if (error) notice.append(button("重新读取", () => currentControl(stamp, scope) && refresh()));
+        content.push(notice);
+      }
+      agentMount.replaceChildren(...content);
+      restoreFocus(focus);
     }
+
+    function renderView(location = null) {
+      const currentVisit = ++visit, scope = workspace, view = active;
+      root.dataset.dashboardView = view?.kind || "home";
+      root.setAttribute("aria-label", view ? TITLES[view.kind] : "我的 AI");
+      const isCurrent = () => visible && currentVisit === visit && scope === getWorkspace();
+      const previousFocus = document.activeElement;
+      let pending = location, initialTop = null;
+      const back = () => {
+        if (!isCurrent() || !active) return;
+        active = null;
+        renderAgents();
+        renderView(homeReturn);
+        homeReturn = null;
+        onViewChange();
+      };
+      let backButton;
+      function mount(kind, target) {
+        target.replaceChildren();
+        sections[kind]?.render(target, {
+          full: Boolean(view), focusId: view?.id || null, workspace: scope, visit: currentVisit, isCurrent, back,
+          onReady() {
+            if (!pending || !isCurrent() || pending.section && pending.section !== kind) return;
+            const focus = document.activeElement;
+            if ((!focus || focus === previousFocus || focus === document.body) && (initialTop === null || root.scrollTop === initialTop)) restoreFocus(pending);
+            pending = null;
+          },
+          open(id = null, trigger = document.activeElement) {
+            if (!isCurrent() || view?.kind === kind && view.id === id) return;
+            if (!view) homeReturn = { ...focusOf(trigger), section: kind };
+            active = { kind, id };
+            const nextBack = renderView();
+            root.scrollTop = 0;
+            nextBack?.focus({ preventScroll: true });
+            onViewChange();
+          }
+        });
+      }
+      if (view) {
+        const heading = node("header", "my-ai-subpage-heading");
+        backButton = button("← 我的 AI", back);
+        backButton.dataset.dashboardFocus = "dashboard-back";
+        heading.append(backButton, node("h2", "", TITLES[view.kind]));
+        const target = node("section", "my-ai-extra my-ai-" + view.kind);
+        full.replaceChildren(heading, target);
+        body.replaceChildren(full);
+        mount(view.kind, target);
+      } else {
+        body.replaceChildren(home);
+        for (const kind of Object.keys(TITLES)) mount(kind, mounts[kind]);
+      }
+      if (pending && isCurrent()) {
+        if (restoreFocus(pending)) pending = null;
+        initialTop = root.scrollTop;
+      }
+      return backButton;
+    }
+
     function expireExecutionFacts() {
-      if (!data || !visible) return;
+      if (!data) return;
       let changed = false;
-      for (const row of [...data.agents, ...data.works]) if (["running", "needs_user"].includes(row.status)) {
-        row.status = "unknown"; row.status_label = "状态待核对"; changed = true;
+      for (const row of data.agents) {
+        if (execution(row.status)) {
+          row.status = "unknown";
+          row.status_label = "状态待核对";
+          changed = true;
+        }
+        if (row.original_url) {
+          row.original_url = null;
+          changed = true;
+        }
       }
-      if (changed) render();
+      if (changed && visible && !active) renderAgents();
     }
-    const signature = value => JSON.stringify(value && [value.workspace_id, value.agents, value.models, value.memories, value.works, value.empty, value.issues]);
-    async function refresh({ quiet = false } = {}) {
-      const scope = getWorkspace();
+
+    const signature = value => JSON.stringify(value && [value.workspace_id, value.agents, value.models, value.issues]);
+    function refresh({ quiet = false } = {}) {
+      if (!visible) return Promise.resolve(false);
+      if (syncWorkspace()) {
+        renderAgents();
+        renderView();
+        root.scrollTop = 0;
+      }
+      const scope = workspace;
+      if (!scope) return Promise.resolve(false);
       if (flight?.scope === scope && flight.serial === generation) return flight.promise;
       const serial = ++generation;
-      if (!scope) { render(); return false; }
-      loading = true; const hadError = !!error; error = ""; if (!quiet || !data) render();
-      const request = { scope, serial, promise: null }; flight = request;
-      request.promise = (async () => { try {
-        const value = await api(window.RabbitMyAI.PATH, { method: "GET" }, false);
-        if (serial !== generation || scope !== getWorkspace()) return false;
-        const next = window.RabbitMyAI.project(value, scope), changed = signature(data) !== signature(next);
-        if (changed) data = next;
-        clearTimeout(expiry); expiry = setTimeout(expireExecutionFacts, 6000);
-        onRead(value); if (quiet && (changed || hadError)) render(); return true;
-      } catch (e) { if (serial === generation) { error = e?.message || "已有目录暂时无法读取。"; expireExecutionFacts(); if (quiet) render(); } return false; }
-      finally { if (flight === request) flight = null; if (serial === generation) { loading = false; if (!quiet || !data) render(); } }
-      })(); return request.promise;
+      loading = true;
+      const hadError = Boolean(error);
+      error = "";
+      if ((!quiet || !data) && !active) renderAgents();
+      const request = { scope, serial, promise: null };
+      flight = request;
+      request.promise = (async () => {
+        const isCurrent = () => visible && serial === generation && scope === getWorkspace();
+        try {
+          const value = await api(window.RabbitMyAI.DASHBOARD_PATH, { method: "GET" }, false);
+          if (!isCurrent()) return false;
+          const next = window.RabbitMyAI.project(value, scope);
+          const changed = signature(data) !== signature(next);
+          if (changed) data = next;
+          clearTimeout(expiry);
+          expiry = setTimeout(expireExecutionFacts, 6000);
+          onRead(value);
+          if (!active && (changed || hadError)) renderAgents();
+          return true;
+        } catch (failure) {
+          if (isCurrent()) {
+            error = failure?.message || "已有目录暂时无法读取。";
+            expireExecutionFacts();
+          }
+          return false;
+        } finally {
+          if (flight === request) flight = null;
+          if (isCurrent()) {
+            loading = false;
+            if (!active && (error || !quiet || !data)) renderAgents();
+          }
+        }
+      })();
+      return request.promise;
     }
-    async function checkNow() {
-      if (checking || loading) return;
-      checking = true; error = ""; render();
-      try { await onCheck(); await refresh(); }
-      catch (e) { error = e?.message || "核对尚未完成，已有事实保留。"; }
-      finally { checking = false; render(); }
-    }
-    return { show() { visible = true; render(); return refresh(); }, hide() { visible = false; generation++; loading = false; clearTimeout(expiry); render(); }, refresh, snapshot: () => data && data.workspace_id === getWorkspace() ? data : null, actions: () => currentActions, reportMount: () => report };
+
+    return {
+      show() {
+        visible = true;
+        root.hidden = false;
+        syncWorkspace();
+        renderAgents();
+        renderView(active ? viewReturn || { top: scrollTop, section: active.kind } : null);
+        viewReturn = null;
+        if (!active) root.scrollTop = scrollTop;
+        if (!active && restoreFocus(detailReturn)) detailReturn = null;
+        const showVisit = visit;
+        return refresh({ quiet: true }).then(result => {
+          if (visible && showVisit === visit && !active && detailReturn) {
+            restoreFocus(detailReturn);
+            detailReturn = null;
+          }
+          return result;
+        });
+      },
+      hide() {
+        if (!visible) return;
+        scrollTop = root.scrollTop || 0;
+        if (active) {
+          const trigger = document.activeElement;
+          viewReturn = { ...focusOf(trigger && root.contains(trigger) ? trigger : null), section: active.kind };
+        }
+        visible = false;
+        root.hidden = true;
+        generation++;
+        visit++;
+        loading = false;
+        clearTimeout(expiry);
+        expireExecutionFacts();
+      },
+      resetView() {
+        active = null;
+        homeReturn = detailReturn = viewReturn = null;
+        scrollTop = 0;
+      },
+      getView() {
+        if (!workspace || workspace !== getWorkspace()) return null;
+        const top = value => Math.min(1e9, Math.max(0, Math.floor(Number(value) || 0)));
+        return { kind: active?.kind || "home", focusId: active?.id || null, expanded,
+          scrollTop: top(visible ? root.scrollTop : scrollTop), homeScrollTop: top(homeReturn?.top),
+          homeFocus: homeReturn?.key || detailReturn?.key || null };
+      },
+      restoreView(view) {
+        if (!view || !["home", ...Object.keys(TITLES)].includes(view.kind)) return;
+        syncWorkspace();
+        active = view.kind === "home" ? null : { kind: view.kind, id: view.focusId };
+        expanded = view.expanded === true;
+        scrollTop = view.scrollTop;
+        homeReturn = active ? { key: view.homeFocus, top: view.homeScrollTop, section: active.kind } : null;
+        detailReturn = !active && view.homeFocus ? { key: view.homeFocus, top: scrollTop } : null;
+      },
+      refresh,
+      snapshot: () => data && data.workspace_id === getWorkspace() ? data : null,
+    };
   }
+
   window.RabbitMyAIPage = Object.freeze({ create });
 })();

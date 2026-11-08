@@ -55,7 +55,13 @@ RUNTIME_FILES = (
     "admission_gate.py", "service_admission.py", "service_maintenance.py", "native_maintenance.py",
     'rabbit_specialist/interface_tasks.py', 'rabbit_specialist/interface_task_coordinator.py', 'rabbit_specialist/draft_configuration.py', 'rabbit_specialist/core_conversation.py', "native_model_management.py", "native_chat_management.py", "native_work_status.py", "my_ai_overview.py", "external_work.py", "rabbit_runtime/hapi_work.py",
     "native_task_input.py", "native_task_result.py",
+    "dashboard_brief.py", "dashboard_usage.py", "dashboard_hermes_usage.py",
+    "dashboard_pi_usage.py", "dashboard_dsh_usage.py", "dashboard_minimax_usage.py", "dashboard_native_launch.py",
+    "dashboard_dsh_loopback.json",
+    "rabbit_runtime/hermes/dashboard.py",
     'rabbit_runtime/codex_rpc.py', 'rabbit_runtime/native_rpc_transport.py', 'rabbit_runtime/native_json.py', 'rabbit_runtime/native_session_store.py', 'rabbit_runtime/native_session_lease.py', 'rabbit_runtime/codex_native_session.py',
+    'rabbit_runtime/directory_identity.py', 'rabbit_runtime/scope_anchors.py',
+    'rabbit_content/markdown_root_reconfirmation.py', 'rabbit_content/_directory_identity.py',
     'rabbit_runtime/specialist_service.py', 'rabbit_runtime/specialist_tool_status.py', "specialist_http.py", "specialist_memory.py", 'rabbit_specialist/specialist_workspace.py', 'rabbit_specialist/specialist_connection.py', 'rabbit_runtime/codex_connection.py', "native_chats.py", "native_catalogue.py", "native_http_common.py", "rabbit_preparation/handoff.py", "native_profile_intents.py", "native_profile_catalog.py",
     "rabbit_runtime/pi/rpc.py", "rabbit_runtime/pi/connection.py", "pi_native.py", "rabbit_runtime/pi/session_store.py", "rabbit_runtime/pi/session_file.py", "pi_history_adoption.py",
     "rabbit_runtime/pi/profile_catalog.py", "pi_profile_intents.py", "rabbit_runtime/pi/model_capabilities.py", "rabbit_runtime/pi/thinking_levels.mjs",
@@ -88,6 +94,8 @@ RUNTIME_FILES = (
     "rabbit_content/markdown_chat_sync.py", "rabbit_content/markdown_sync_files.py",
     "rabbit_ui/assets/index.html", "rabbit_ui/assets/app.js", "rabbit_ui/assets/style.css", "agent_definitions.json", "rabbit_ui/assets/agents.js",
     "rabbit_ui/assets/workspace.js", "rabbit_ui/assets/workspace.css", "rabbit_ui/assets/my_ai.js", "rabbit_ui/assets/my_ai_page.js", "rabbit_ui/assets/my_ai.css", "rabbit_ui/assets/browser_state.js", "rabbit_ui/assets/history_quotes.js", "rabbit_ui/assets/continuations.js",
+    "rabbit_ui/assets/dashboard_sections.js", "rabbit_ui/assets/dashboard_sections.css", "rabbit_ui/assets/pixel-rabbit.js",
+    "rabbit_ui/assets/pixel-rabbit-idle.png", "rabbit_ui/assets/pixel-rabbit-half-blink.png", "rabbit_ui/assets/pixel-rabbit-blink.png",
     "rabbit_ui/assets/work_status.js", "rabbit_ui/assets/work_status.css",
     "rabbit_ui/assets/composer_shell.js", "rabbit_ui/assets/composer_shell.css",
     "rabbit_ui/assets/soft_paper.css", "rabbit_ui/assets/soft-paper.jpg", "rabbit_ui/assets/native_index_text.js",
@@ -100,7 +108,7 @@ RUNTIME_FILES = (
     "rabbit_ui/assets/text_file_download.js", "rabbit_ui/assets/file_tasks.js", "rabbit_ui/assets/file_materials.js", "rabbit_ui/assets/project_publish.js",
     "rabbit_ui/assets/markdown_chats.js", "rabbit_ui/assets/conversation_groups.js",
     "rabbit_ui/assets/markdown-it.min.js", "rabbit_ui/assets/rich_text.js", "rabbit_ui/assets/markdown-it.LICENSE",
-    "rabbit_ui/assets/rabbit-app-1024.png", "rabbit_ui/assets/app.webmanifest", "rabbit_ui/assets/materials.js", "rabbit_ui/assets/profiles.js", "rabbit_ui/assets/native_memory.js",
+    "rabbit_ui/assets/rabbit-app-1024.png", "rabbit_ui/assets/rabbit-split.png", "rabbit_ui/assets/app.webmanifest", "rabbit_ui/assets/materials.js", "rabbit_ui/assets/profiles.js", "rabbit_ui/assets/native_memory.js",
 )
 TOOL_FILES = ("local_history_mcp.py", "rabbit_management_client.py", "rabbit_management_mcp.py", "hapi_work_connect.py")
 
@@ -283,10 +291,15 @@ class MaintenanceClient:
                         or re.fullmatch(r'[a-z][a-z_]{0,47}', row['reason']) is None)):
                 raise InstallError(invalid)
             agents[row['agent']] = row
-        if not value['complete'] or any(not row['complete'] or row['reason'] is not None for row in agents.values()):
-            names = '、'.join(labels[key] for key, row in agents.items() if not row['complete'] or row['reason'] is not None)
+        codex = agents['codex']
+        codex_partial = codex['enabled'] and not codex['complete'] and codex['reason'] == 'partial_observation'
+        incomplete = [labels[key] for key, row in agents.items()
+                      if (not row['complete'] or row['reason'] is not None) and not (key == 'codex' and codex_partial)]
+        if incomplete or value['complete'] != all(row['complete'] for row in agents.values()):
+            names = '、'.join(incomplete)
             raise InstallError((names + ' 的' if names else '') + invalid)
         actions, seen, action_paths = [], set(), set()
+        codex_recheck = False
         for row in value['works']:
             if (type(row) is not dict or row.keys() != {'agent', 'role', 'chat_id', 'owner', 'complete', 'reason',
                     'status', 'connection_state', 'epoch', 'native_session_id', 'pending_requests'}
@@ -302,18 +315,25 @@ class MaintenanceClient:
                 raise InstallError(invalid)
             seen.add(identity)
             label = '小白兔专员' if row['role'] == 'specialist' else labels[row['agent']] + ' 对话 ' + row['chat_id'][:8]
-            if row['complete'] is not True:
+            # Validate this shape for a specific user-facing notice only.
+            recheck = (codex_partial and row['agent'] == 'codex' and row['complete'] is False
+                       and row['status'] == 'unknown' and row['reason'] == 'turn_unconfirmed')
+            if row['complete'] is not True and not recheck:
                 raise InstallError(label + ' 的状态待核对；没有断开连接或部署。')
             if row['status'] == 'running':
                 raise InstallError(label + ' 仍在运行；请等任务结束后再更新，没有强行断开。')
             if row['status'] == 'needs_user':
                 raise InstallError(label + ' 正在等待你的确认；请处理原请求后再更新，没有代答或断开。')
-            if (row['status'] != 'idle' or row['reason'] is not None or row['connection_state'] != 'ready'
+            if (not recheck and (row['status'] != 'idle' or row['reason'] is not None)
+                    or row['connection_state'] != 'ready'
                     or type(row['pending_requests']) is not int or row['pending_requests'] != 0
                     or type(row['epoch']) is not str or re.fullmatch(r'[0-9a-f]{32}', row['epoch']) is None
                     or type(row['native_session_id']) is not str
                     or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}', row['native_session_id']) is None):
                 raise InstallError(label + ' 的状态或上次结果待核对；没有断开连接或部署。')
+            if recheck:
+                codex_recheck = True
+                continue
             path = '/api/specialist/disconnect' if row['role'] == 'specialist' else (
                 '/api/' + paths[row['agent']] + '/' + row['chat_id'] + '/disconnect')
             # Both specialist cores share one coordinator. Its existing close
@@ -322,6 +342,14 @@ class MaintenanceClient:
             if path not in action_paths:
                 actions.append((label, path))
                 action_paths.add(path)
+        if codex_partial:
+            if not codex_recheck:
+                raise InstallError('Codex 的' + invalid)
+            raise InstallError(
+                'Codex 的本轮状态尚未核实。请在“管理 → Agent → 小白兔已连接的工作”定位原对话或专员，'
+                '核对原任务、审批及未知回执。确认结束后，普通对话用“更多 → 断开连接”，'
+                '专员用“设置 → 小白兔专员 → 连接与工具 → 断开连接，保留原对话”。'
+                '原界面确认正常断开后，再运行安装。')
         # Validate every row first. Each existing endpoint rechecks its own
         # current owner under its action lock before releasing an executor.
         for label, path in actions:

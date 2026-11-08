@@ -132,7 +132,7 @@ class HermesHistoryAdoption:
         finally: os.close(descriptor)
 
     def _binding_matches(self, identity, source):
-        binding = self.store.binding(identity)
+        binding = self.store.current_binding(identity)
         owners = self.store.source_bindings()
         keys = {row['session_id'] for row in owners if row['chat_id'] == identity}
         chain = source['chain']

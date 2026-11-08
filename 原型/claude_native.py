@@ -192,7 +192,7 @@ class ClaudeNativeHolder:
             _, count = self._records.pop(0); self._record_bytes -= count; self._omitted += 1
 
     def _binding(self):
-        return self.store.binding(self.identity)
+        return self.store.current_binding(self.identity)
 
     def _scope(self, value):
         return type(value) is dict and value.get('session_id') == self._binding()['session_id']
@@ -724,7 +724,7 @@ class ClaudeNativeChats:
             raise _error('closing', 'Claude原生入口正在收尾，请稍后核对原回执。', status=503)
 
     def _prepare(self, identity):
-        if self.store.binding(identity) is not None:
+        if self.store.current_binding(identity) is not None:
             return  # Preserve an adopted original cwd and file anchor.
         cwd = self.root / chat_id(identity)
         if self.root.is_symlink() or cwd.is_symlink(): raise ValueError('Claude workspace is not an owned directory.')
@@ -829,7 +829,7 @@ class ClaudeNativeChats:
                 except SpecialistHTTPError:
                     raise _error('receipt_invalid', '请提供一个完整Claude发送编号。', status=400, unsent=False) from None
                 self.catalogue.get(identity)
-                binding = self.store.binding(identity)
+                binding = self.store.current_binding(identity)
                 operation = self.store.lookup(client)
                 if operation is not None and operation['chat_id'] != identity:
                     raise _error('request_conflict', '原回执不属于这段Claude对话。', unsent=False)

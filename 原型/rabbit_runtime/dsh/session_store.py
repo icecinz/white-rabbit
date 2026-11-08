@@ -22,10 +22,11 @@ import uuid
 
 from ..native_session_store import (NativeSessionStoreError, open_directory as _directory, file_identity as _identity,
     validate_path as _path, validate_token as _token, validate_native_id as _native_id, request_sha256)
+from ..scope_anchors import ScopeAnchors, ScopeAnchorError
 
 
 APPLICATION_ID = 0x52444E53  # RDNS; independent from shared and other native ledgers.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PENDING = frozenset(('submitted_unknown', 'accepted'))
 REASON_STATUSES = {'completed': 'completed', 'aborted': 'interrupted',
     'interrupted': 'interrupted', 'blocked': 'failed', 'error': 'failed',
@@ -153,7 +154,9 @@ _V1_DDL = (
 ADOPTIONS_DDL = '''CREATE TABLE dsh_adoptions (
     chat_id TEXT PRIMARY KEY REFERENCES dsh_bindings(chat_id),
     source_anchor TEXT NOT NULL, created_at TEXT NOT NULL)'''
-_DDL = _V1_DDL + (ADOPTIONS_DDL,)
+_V2_DDL = _V1_DDL + (ADOPTIONS_DDL,)
+_ANCHORS_DDL = ScopeAnchors.ddl('dsh_bindings', 'chat_id')
+_DDL = _V2_DDL + (_ANCHORS_DDL,)
 _ANCHOR_FIELDS = frozenset(('session_id','cwd','cwd_device','cwd_inode',
     'source_root','root_device','root_inode','project_dir','project_device','project_inode',
     'session_dir','session_device','session_inode','source_path','file_device','file_inode','header_sha256'))
@@ -257,12 +260,13 @@ def _expected_schema(ddl):
 
 
 _EXPECTED_V1_SCHEMA = _expected_schema(_V1_DDL)
+_EXPECTED_V2_SCHEMA = _expected_schema(_V2_DDL)
 _EXPECTED_SCHEMA = _expected_schema(_DDL)
 
 
 class DSHNativeStore:
     def __init__(self, path, *, readonly=False, allow_upgrade=False):
-        """New stores use v2; only explicit writable opt-in upgrades exact v1."""
+        """New stores use v3; only explicit writable opt-in upgrades exact v1."""
         if type(readonly) is not bool or type(allow_upgrade) is not bool:
             raise DSHStoreError('invalid_arguments')
         if readonly and allow_upgrade:raise DSHStoreError('readonly')
@@ -273,6 +277,7 @@ class DSHNativeStore:
         if not self.path.name:
             raise DSHStoreError('invalid_arguments')
         self.readonly, self.lock = readonly, threading.RLock()
+        self._anchors = ScopeAnchors()
         self._closed, self._owner_pid = False, os.getpid()
         self._parent_fd = self._file_fd = self._lock_fd = None
         self._lock_name = '.' + self.path.name + '.lock'
@@ -302,7 +307,7 @@ class DSHNativeStore:
                                         os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self._parent_fd)
             self._regular(os.fstat(self._file_fd))
             self._file_identity = _identity(os.fstat(self._file_fd))
-            with self._db(write=created or allow_upgrade, initialize=created, upgrade=allow_upgrade):
+            with self._db(write=not readonly, initialize=created, upgrade=allow_upgrade):
                 pass
         except BaseException as error:
             self.close()
@@ -385,12 +390,21 @@ class DSHNativeStore:
                         if _schema(db) != _EXPECTED_V1_SCHEMA or db.execute('PRAGMA foreign_key_check').fetchone() is not None:
                             raise DSHStoreError('invalid_schema')
                         db.execute(ADOPTIONS_DDL)
+                        db.execute(_ANCHORS_DDL)
                         db.execute('PRAGMA user_version='+str(SCHEMA_VERSION))
+                    elif version == 2:
+                        if _schema(db) != _EXPECTED_V2_SCHEMA:
+                            raise DSHStoreError('invalid_schema')
+                        if write:
+                            db.execute(_ANCHORS_DDL)
+                            db.execute('PRAGMA user_version='+str(SCHEMA_VERSION))
                     elif version != SCHEMA_VERSION:
                         raise DSHStoreError('invalid_schema')
-                    if _schema(db) != _EXPECTED_SCHEMA:raise DSHStoreError('invalid_schema')
-                yield db
-                self._check_path()
+                    expected = _EXPECTED_V2_SCHEMA if version == 2 and not write else _EXPECTED_SCHEMA
+                    if _schema(db) != expected:raise DSHStoreError('invalid_schema')
+                with self._anchors.transaction():
+                    yield db
+                    self._check_path()
                 if write:
                     db.commit()
             except DSHStoreError:
@@ -399,7 +413,7 @@ class DSHNativeStore:
                 raise DSHStoreError('conflict') from None
             except sqlite3.Error:
                 raise DSHStoreError('io_failed') from None
-            except (OSError, NativeSessionStoreError):
+            except (OSError, NativeSessionStoreError, ScopeAnchorError):
                 raise DSHStoreError('scope_changed') from None
             finally:
                 if db is not None:
@@ -408,19 +422,16 @@ class DSHNativeStore:
                     db.close()
 
 
-    @staticmethod
-    def _binding(db, chat_id):
+    def _binding(self, db, chat_id, *, current=False, seed=False):
         row = db.execute('SELECT * FROM dsh_bindings WHERE chat_id=?', (chat_id,)).fetchone()
         if row is None:
             return None
         value = dict(row)
         _uuid(value['chat_id']); _id(value['session_id'])
-        fd = _directory(_path(value['cwd']))
-        try:
-            if _identity(os.fstat(fd)) != (value['cwd_device'], value['cwd_inode']):
-                raise DSHStoreError('scope_changed')
-        finally:
-            os.close(fd)
+        observed = self._anchors.verify(db, chat_id, 'cwd', value['cwd'],
+            (value['cwd_device'], value['cwd_inode']), seed=seed)
+        if current:
+            value['cwd_device'], value['cwd_inode'] = observed
         value['preset_known'] = bool(value['preset_known'])
         if value['agent_preset'] is not None:
             _finite_text(value['agent_preset'])
@@ -465,20 +476,35 @@ class DSHNativeStore:
         except OSError:
             raise DSHStoreError('scope_changed') from None
         with self._db(write=True) as db:
-            old = self._binding(db,chat_id)
+            old = self._binding(db,chat_id,current=True,seed=True)
             if old:
                 if ((old['cwd'],old['cwd_device'],old['cwd_inode'])!=(str(cwd),*identity)
                         or session_id is not None and old['session_id']!=session_id):
                     raise DSHStoreError('conflict')
+                self._current_adoption(db,chat_id,seed=True)
                 return old
             session_id = session_id or str(uuid.uuid4())
             db.execute('INSERT INTO dsh_bindings VALUES(?,?,?,?,?,NULL,0,NULL,NULL,NULL,?)',
                        (chat_id,session_id,str(cwd),*identity,_stamp()))
-            return self._binding(db,chat_id)
+            return self._binding(db,chat_id,current=True,seed=True)
 
     def binding(self, chat_id):
         with self._db() as db:
             return self._binding(db,_uuid(chat_id))
+
+    def current_binding(self, chat_id):
+        """Project the verified cwd only; adoption source checks stay explicit."""
+        with self._db() as db:
+            return self._binding(db, _uuid(chat_id), current=True)
+
+    def seed_matching_anchors(self):
+        """Explicit maintenance: every legacy role must match before any seed commits."""
+        with self._db(write=True) as db:
+            identities = [row[0] for row in db.execute('SELECT chat_id FROM dsh_bindings ORDER BY chat_id')]
+            for chat_id in identities:
+                self._binding(db, chat_id, seed=True)
+                self._current_adoption(db, chat_id, seed=True)
+            return len(identities)
 
     def bindings(self):
         with self._db() as db:
@@ -503,6 +529,22 @@ class DSHNativeStore:
         """Detached saved metadata only; no source file/header/Agent read."""
         with self._db() as db:return self._adoption(db,_uuid(chat_id))
 
+    def _current_adoption(self, db, chat_id, *, seed=False):
+        value = self._adoption(db, chat_id)
+        if value is None:
+            return None
+        anchor = value['source_anchor']
+        for path, device, inode in _ANCHOR_DIRECTORIES + (('source_path','file_device','file_inode'),):
+            observed = self._anchors.verify(db, chat_id, path, anchor[path],
+                (anchor[device], anchor[inode]), kind='file' if path == 'source_path' else 'directory', seed=seed)
+            anchor[device], anchor[inode] = observed
+        return value
+
+    def current_adoption(self, chat_id):
+        """Project current identities without rewriting the historical source_anchor JSON."""
+        with self._db() as db:
+            return self._current_adoption(db, _uuid(chat_id))
+
     def adopt(self, chat_id, cwd, session_id, agent_preset, source_anchor):
         """Reserve an existing source atomically, without native ACK or body.
 
@@ -523,7 +565,7 @@ class DSHNativeStore:
                 if any(db.execute('SELECT 1 FROM '+table+' WHERE chat_id=? LIMIT 1',(chat_id,)).fetchone()
                         for table in ('dsh_creations','dsh_prompts','dsh_controls')):
                     raise DSHStoreError('conflict')
-                old=self._binding(db,chat_id);adoption=self._adoption(db,chat_id)
+                old=self._binding(db,chat_id,current=True,seed=True);adoption=self._current_adoption(db,chat_id,seed=True)
                 if old is not None:
                     if (adoption is None or adoption['source_anchor'] != anchor or old['session_id'] != session_id
                             or old['agent_preset'] != agent_preset):raise DSHStoreError('conflict')
@@ -532,7 +574,8 @@ class DSHNativeStore:
                     db.execute('INSERT INTO dsh_bindings VALUES(?,?,?,?,?,?,1,NULL,NULL,NULL,?)',
                         (chat_id,session_id,str(cwd),anchor['cwd_device'],anchor['cwd_inode'],agent_preset,stamp))
                     db.execute('INSERT INTO dsh_adoptions VALUES(?,?,?)',(chat_id,raw,stamp))
-                return self._binding(db,chat_id)
+                self._current_adoption(db,chat_id,seed=True)
+                return self._binding(db,chat_id,current=True,seed=True)
 
     def sources(self):
         with self._db() as db:
@@ -667,7 +710,7 @@ class DSHNativeStore:
         """Anchor actual native inspection; never create a native receipt."""
         chat_id=_uuid(chat_id)
         with self._db(write=True) as db:
-            binding=self._binding(db,chat_id);adoption=self._adoption(db,chat_id)
+            binding=self._binding(db,chat_id,current=True);adoption=self._current_adoption(db,chat_id)
             if binding is None or adoption is None:raise DSHStoreError('not_found')
             anchor=adoption['source_anchor']
             if (type(proof) is not dict or proof.get('location') != {'kind':'jsonl','path':anchor['source_path']}
@@ -930,6 +973,7 @@ class DSHNativeStore:
             if self._closed:
                 return
             self._closed = True
+            self._anchors.close()
             # Do not LOCK_UN: a forked child's close must not unlock its parent.
             for name in ('_file_fd', '_lock_fd', '_parent_fd'):
                 fd = getattr(self, name)

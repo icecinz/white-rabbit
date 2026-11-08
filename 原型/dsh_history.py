@@ -27,6 +27,7 @@ COUNTS=('events','replacements','unknown_ignorable_events','omitted_tool_blocks'
     'omitted_image_blocks','unsupported_content_blocks','unknown_context_records','context_omitted_tool_blocks',
     'context_omitted_thinking_blocks','context_omitted_image_blocks','text_messages','generated_context_messages')
 TRANSFORM_FIELDS={'native_message_id','native_seq','native_role','context_role','phase','source_kind','replacement'}
+USAGE_BUCKETS=('uncachedInputTokens','outputTokens','cacheReadTokens','cacheWriteTokens')
 
 
 class DshHistoryError(ValueError):
@@ -64,6 +65,10 @@ class DshHistoryDecoder:
         """Inspect only the exact supplied bytes; never resume or reserve ownership."""
         return self._run(raw,compression=compression,mode='resume_inspect')
 
+    def inspect_usage(self,raw,*,compression):
+        """Return only the exact session identity and provider-reported counters."""
+        return self._run(raw,compression=compression,mode='usage_inspect')
+
     def _run(self,raw,*,compression,mode=None):
         if type(raw) is not bytes or len(raw)>MAX_FILE_BYTES or compression not in ('none','zstd'):raise DshHistoryError()
         worker=Path(__file__).with_name('dsh_history_worker.mjs')
@@ -72,17 +77,32 @@ class DshHistoryDecoder:
             # there are no IO threads, CLI flags, arbitrary methods or retries.
             payload={'schema_version':1,'compression':compression,'body':base64.b64encode(raw).decode('ascii')}
             if mode is not None:
-                if mode!='resume_inspect':raise DshHistoryError()
+                if mode not in ('resume_inspect','usage_inspect'):raise DshHistoryError()
                 payload['mode']=mode
             result=subprocess.run([str(self.node), '--max-old-space-size=256', str(worker), '--package-root',str(self.package_root)],
                 input=_json(payload).encode(),
                 stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=20,check=False,start_new_session=True)
-            if result.returncode!=0 or len(result.stdout)>(65536 if mode=='resume_inspect' else MAX_OUTPUT_BYTES):raise DshHistoryError()
+            if result.returncode!=0 or len(result.stdout)>(65536 if mode is not None else MAX_OUTPUT_BYTES):raise DshHistoryError()
             value=_decode(result.stdout.decode('utf-8','strict'))
+            if mode=='usage_inspect':return _checked_usage(value)
             return _checked_resume(value) if mode=='resume_inspect' else _checked(value)
         except DshHistoryError:raise
         except (OSError,ValueError,TypeError,UnicodeError,RecursionError,subprocess.SubprocessError):
             raise DshHistoryError() from None
+
+
+def _checked_usage(value):
+    fields={'schema_version','mode','session_id','cwd','project_key','session_key','usage'}
+    if (type(value) is not dict or value.keys()!=fields or type(value['schema_version']) is not int
+            or value['schema_version']!=1 or value['mode']!='usage_inspect'
+            or not _opaque(value['session_id']) or type(value['cwd']) is not str
+            or not Path(value['cwd']).is_absolute()
+            or not all(_opaque(value[key]) and '/' not in value[key] and value[key] not in ('.','..')
+                       for key in ('project_key','session_key'))):raise DshHistoryError()
+    usage=value['usage']
+    if usage is not None and (type(usage) is not dict or usage.keys()!=set(USAGE_BUCKETS)
+            or not all(_integer(count) for count in usage.values())):raise DshHistoryError()
+    return value
 
 
 def _checked_resume(value):

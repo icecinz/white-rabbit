@@ -6,7 +6,7 @@ White Rabbit is an assembly of reusable cores around one local application host.
 
 The host owns shared transactions, the chat catalog, HTTP, orchestration, and lifecycle. Native agents own their original sessions, tool loops, credentials, and permission decisions. Packaging does not turn the system into seven services or seven databases.
 
-This is the **0.2.0-alpha.1 early source snapshot**. My AI projects existing metadata, the specialist coordinates one history over two native cores, and remote integration is historical. These structures do not replace native authentication, permissions, or environment-specific configuration.
+This is the **0.2.0-alpha.2 early source snapshot**. My AI projects existing metadata, the specialist coordinates one history over two native cores, and remote integration is historical. These structures do not replace native authentication, permissions, or environment-specific configuration.
 
 Application ledgers also have their own data scope. The Claude operation ledger can freeze a successful, non-truncated, top-level SDK final answer of at most 128 KiB alongside its original request identity and SHA-256. Exact reads can use that saved body after disconnect/rebuild and identify it as `stored_sdk_result`, without claiming a live owner. Older records without bodies are not reconstructed; legacy read-only V1 ledgers are not migrated by result lookup, and invalid or mismatched evidence is rejected. These ledgers are private runtime data, not public source files. Full original transcripts and internal session state remain owned by the native agent.
 
@@ -27,6 +27,8 @@ Six packages have independent directories, versions, and `pyproject.toml` files.
 ## Overview and specialist data boundaries
 
 `my_ai_overview.py` projects saved profiles, existing model/agent caches, recent-work indexes, and observed execution metadata. Reading it does not perform connection discovery, start an agent, or recall memory content. UI actions route by the same object's stable identity; read, continue, and original-application links remain different capabilities. Unknown or stale facts stay unverified.
+
+The dashboard separates cached Agent facts, usage sources, and a local briefing. Usage cards distinguish account readings from individual sessions and refresh only on request. The local briefing reads a bounded Markdown document from the configured document source. See `原型/dashboard_usage.py`, `原型/dashboard_brief.py`, and `原型/rabbit_ui/assets/dashboard_sections.js`.
 
 The specialist coordinator stores one bounded application history of received user/assistant prose, source identities, per-core native session IDs, and received-text positions. Native tools, approvals, and execution receipts remain in their original holders. Switching supplies missing prose on the next turn, rather than replaying historical tool commands or migrating native internal state. Its persistence and unknown-operation guards are application integration, not proof of all-model or restart acceptance.
 

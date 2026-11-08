@@ -23,9 +23,11 @@ import uuid
 from ..native_session_store import (NativeSessionStoreError, open_directory as _directory, file_identity as _identity,
     validate_path as _path, validate_token as _token, request_sha256)
 
+from ..scope_anchors import ScopeAnchors, ScopeAnchorError
+
 
 APPLICATION_ID = 0x52484E53  # RHNS; separate from shared chat and Codex ledgers.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_RESULT_BYTES = 128 * 1024
 _MAX_SAVED_BYTES = MAX_RESULT_BYTES * 6 + 4096
 PENDING = frozenset(('submitted_unknown', 'accepted'))
@@ -94,7 +96,9 @@ _DDL_V1 = (
 )
 _RESULT_DDL = ('ALTER TABLE hermes_operations ADD COLUMN result_json TEXT',
                'ALTER TABLE hermes_operations ADD COLUMN result_sha256 TEXT')
-_DDL = _DDL_V1 + _RESULT_DDL
+_DDL_V2 = _DDL_V1 + _RESULT_DDL
+_ANCHOR_DDL = ScopeAnchors.ddl('hermes_bindings', 'chat_id')
+_DDL = _DDL_V2 + (_ANCHOR_DDL,)
 _OPERATION_COLUMNS = 'client_id,chat_id,request_sha256,status,created_at,updated_at'
 
 
@@ -113,6 +117,7 @@ def _expected_schema(ddl):
 
 
 _EXPECTED_SCHEMA_V1 = _expected_schema(_DDL_V1)
+_EXPECTED_SCHEMA_V2 = _expected_schema(_DDL_V2)
 _EXPECTED_SCHEMA = _expected_schema(_DDL)
 
 
@@ -156,6 +161,7 @@ class HermesNativeStore:
             raise HermesStoreError('invalid_arguments')
         self.readonly, self.lock = readonly, threading.RLock()
         self._closed, self._owner_pid = False, os.getpid()
+        self._anchors = ScopeAnchors()
         self._parent_fd = self._file_fd = self._lock_fd = None
         self._lock_name = '.' + self.path.name + '.lock'
         created = False
@@ -259,22 +265,25 @@ class HermesNativeStore:
                     db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
                 else:
                     version = db.execute('PRAGMA user_version').fetchone()[0]
-                    expected = {1: _EXPECTED_SCHEMA_V1, 2: _EXPECTED_SCHEMA}.get(version)
+                    expected = {1: _EXPECTED_SCHEMA_V1, 2: _EXPECTED_SCHEMA_V2, 3: _EXPECTED_SCHEMA}.get(version)
                     if (db.execute('PRAGMA application_id').fetchone()[0] != APPLICATION_ID
                             or expected is None or _schema(db) != expected):
                         raise HermesStoreError('invalid_schema')
                     if not write:
                         db.execute('PRAGMA query_only=ON')
                     db.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
-                    if version == 1 and write:
+                    if version < SCHEMA_VERSION and write:
                         if not migrate:
                             raise HermesStoreError('invalid_schema')
-                        for sql in _RESULT_DDL:
-                            db.execute(sql)
+                        if version == 1:
+                            for sql in _RESULT_DDL:
+                                db.execute(sql)
+                        db.execute(_ANCHOR_DDL)
                         db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
                         if _schema(db) != _EXPECTED_SCHEMA:
                             raise HermesStoreError('invalid_schema')
-                yield db
+                with self._anchors.transaction():
+                    yield db
                 self._check_path()
                 if write:
                     db.commit()
@@ -284,7 +293,7 @@ class HermesNativeStore:
                 raise HermesStoreError('conflict') from None
             except sqlite3.Error:
                 raise HermesStoreError('io_failed') from None
-            except (OSError, NativeSessionStoreError):
+            except (OSError, NativeSessionStoreError, ScopeAnchorError):
                 raise HermesStoreError('scope_changed') from None
             finally:
                 if db is not None:
@@ -292,18 +301,16 @@ class HermesNativeStore:
                         db.rollback()
                     db.close()
 
-    @staticmethod
-    def _binding(db, chat_id):
+    def _binding(self, db, chat_id, *, current=False, seed=False):
         row = db.execute('SELECT * FROM hermes_bindings WHERE chat_id=?', (chat_id,)).fetchone()
         if row is None: return None
         result = dict(row); _uuid(result['chat_id'])
         for field, prefix in (('cwd', 'cwd'), ('profile_home', 'home')):
             if result[field] is None: continue
-            descriptor = _directory(_path(result[field]))
-            try:
-                if _identity(os.fstat(descriptor)) != (result[prefix+'_device'], result[prefix+'_inode']):
-                    raise HermesStoreError('scope_changed')
-            finally: os.close(descriptor)
+            observed = self._anchors.verify(db, chat_id, field, str(_path(result[field])),
+                (result[prefix+'_device'], result[prefix+'_inode']), seed=seed)
+            if current:
+                result[prefix+'_device'], result[prefix+'_inode'] = observed
         if result['session_key'] is not None: validate_session_id(result['session_key'])
         return result
 
@@ -324,18 +331,33 @@ class HermesNativeStore:
         try: identity = _identity(os.fstat(descriptor))
         finally: os.close(descriptor)
         with self._db(write=True) as db:
-            old = self._binding(db, chat_id)
+            old = self._binding(db, chat_id, current=True, seed=True)
             if old:
                 if (old['cwd'], old['cwd_device'], old['cwd_inode']) != (str(cwd), *identity):
                     raise HermesStoreError('conflict')
-                return old
+                return self._binding(db, chat_id)
             now = _stamp()
             db.execute('INSERT INTO hermes_bindings VALUES(?,?,?,?,NULL,NULL,NULL,NULL,?,?)',
                        (chat_id, str(cwd), *identity, now, now))
-            return self._binding(db, chat_id)
+            return self._binding(db, chat_id, seed=True)
 
     def binding(self, chat_id):
         with self._db() as db: return self._binding(db, _uuid(chat_id))
+
+    def current_binding(self, chat_id):
+        """Verified current filesystem observations; original binding rows stay intact."""
+        with self._db() as db:
+            return self._binding(db, _uuid(chat_id), current=True)
+
+    def seed_matching_anchors(self):
+        """Explicitly register all currently matching legacy directories atomically."""
+        with self._db(write=True, migrate=True) as db:
+            identities = [row[0] for row in db.execute('SELECT chat_id FROM hermes_bindings ORDER BY chat_id')]
+            roles = 0
+            for identity in identities:
+                binding = self._binding(db, identity, seed=True)
+                roles += 1 + (binding['profile_home'] is not None)
+            return {'bindings': len(identities), 'anchors': roles}
 
     def anchor_home(self, chat_id, home):
         chat_id, home = _uuid(chat_id), _path(home)
@@ -343,15 +365,15 @@ class HermesNativeStore:
         try: identity = _identity(os.fstat(descriptor))
         finally: os.close(descriptor)
         with self._db(write=True) as db:
-            old = self._binding(db, chat_id)
+            old = self._binding(db, chat_id, current=True, seed=True)
             if old is None: raise HermesStoreError('not_found')
             if old['profile_home'] is not None:
                 if (old['profile_home'], old['home_device'], old['home_inode']) != (str(home), *identity):
                     raise HermesStoreError('conflict')
-                return old
+                return self._binding(db, chat_id)
             db.execute('UPDATE hermes_bindings SET profile_home=?,home_device=?,home_inode=?,updated_at=? WHERE chat_id=?',
                        (str(home), *identity, _stamp(), chat_id))
-            return self._binding(db, chat_id)
+            return self._binding(db, chat_id, seed=True)
 
     def attach(self, chat_id, session_key, *, previous=None):
         """Caller proves a compression edge before advancing an existing key."""
@@ -406,7 +428,7 @@ class HermesNativeStore:
             try: scopes.append(_identity(os.fstat(descriptor)))
             finally: os.close(descriptor)
         with self._db(write=True) as db:
-            old = self._binding(db, chat_id)
+            old = self._binding(db, chat_id, current=True, seed=True)
             if db.execute('SELECT 1 FROM hermes_operations WHERE chat_id=? LIMIT 1', (chat_id,)).fetchone():
                 raise HermesStoreError('conflict')
             owned = {row[0] for row in db.execute('SELECT session_key FROM hermes_keys WHERE chat_id=?', (chat_id,))}
@@ -428,7 +450,7 @@ class HermesNativeStore:
                 db.execute('UPDATE hermes_bindings SET session_key=?,updated_at=? WHERE chat_id=?',
                            (keys[-1], _stamp(), chat_id))
             db.executemany('INSERT OR IGNORE INTO hermes_keys VALUES(?,?)', [(key, chat_id) for key in keys])
-            return self._binding(db, chat_id)
+            return self._binding(db, chat_id, seed=True)
 
     def begin(self, chat_id, client_id, request):
         chat_id = _uuid(chat_id)
@@ -585,6 +607,7 @@ class HermesNativeStore:
             if self._closed:
                 return
             self._closed = True
+            self._anchors.close()
             # Close, rather than LOCK_UN, so a forked child's cleanup cannot
             # release its parent's shared open-file-description lock.
             for field in ('_file_fd', '_lock_fd', '_parent_fd'):

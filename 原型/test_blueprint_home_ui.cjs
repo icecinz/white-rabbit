@@ -9,11 +9,15 @@ function body(source, begin, end) { const a = source.indexOf(begin), b = source.
 const clone = value => JSON.parse(JSON.stringify(value));
 const settle = async () => { for (let n = 0; n < 5; n++) await Promise.resolve(); };
 class Node {
-  constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.events = {}; this.parentNode = null; this.textContent = ''; this.className = ''; this.attrs = {}; }
+  constructor(tag, document) { this.tag = tag; this.document = document; this.children = []; this.dataset = {}; this.events = {}; this.parentNode = null; this.textContent = ''; this.className = ''; this.attrs = {}; }
   append(...nodes) { for (const node of nodes) { if (node.parentNode) node.parentNode.children = node.parentNode.children.filter(item => item !== node); this.children.push(node); node.parentNode = this; } }
   replaceChildren(...nodes) { this.children.forEach(node => { node.parentNode = null; }); this.children = []; this.append(...nodes); }
   addEventListener(type, callback) { this.events[type] = callback; }
   setAttribute(key, value) { this.attrs[key] = value; }
+  contains(node) { return walk(this).includes(node); }
+  querySelectorAll(selector) { return walk(this).filter(node => selector === '[data-dashboard-focus]' ? node.dataset.dashboardFocus : selector === `[data-dashboard-focus="${node.dataset.dashboardFocus}"]`); }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  focus() { this.document.activeElement = this; }
   click() { const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } }; this.events.click?.(event); return event; }
 }
 function walk(node) { return [node, ...node.children.flatMap(walk)]; }
@@ -23,15 +27,17 @@ function sample(scope = 'fixture') {
   return { workspace_id: scope, empty: false, agents: [1, 2, 3, 4].map(n => resource('agent', n)),
     models: [1, 2, 3, 4].map(n => resource('model', n)), memories: [1, 2, 3, 4].map(n => resource('memory', n)), works: [], issues: [] };
 }
-function pageFixture(provider = async scope => sample(scope)) {
+function pageFixture(provider = async scope => sample(scope), sections = {}) {
   let scope = 'fixture', nextTimer = 0;
-  const root = new Node('section'), actions = [], requests = [], timers = new Map();
-  const window = { RabbitMyAI: { PATH: '/api/management/my-ai', project: value => clone(value) } };
-  vm.runInNewContext(pageSource, { window, document: { createElement: tag => new Node(tag) }, Promise,
+  const document = { createElement: tag => new Node(tag, document) };
+  document.body = document.activeElement = document.createElement('body');
+  const root = document.createElement('section'), actions = [], requests = [], timers = new Map();
+  const window = { RabbitMyAI: { DASHBOARD_PATH: '/api/management/my-ai?view=dashboard', project: value => clone(value) } };
+  vm.runInNewContext(pageSource, { window, document, Promise,
     setTimeout(callback, delay) { timers.set(++nextTimer, { callback, delay }); return nextTimer; }, clearTimeout(id) { timers.delete(id); } });
   const page = window.RabbitMyAIPage.create({ root, getWorkspace: () => scope,
-    api: async (...args) => { requests.push(args); return provider(scope); }, onAction: action => actions.push(action), onNewChat() {}, onCheck() {} });
-  return { page, root, actions, requests, scope(value) { scope = value; }, expire() { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(item => item.callback()); }, timers };
+    api: async (...args) => { requests.push(args); return provider(scope); }, onAction: action => actions.push(action), sections });
+  return { page, root, document, actions, requests, scope(value) { scope = value; }, expire() { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(item => item.callback()); }, timers };
 }
 function pollFixture(initialPage = 'my-ai', deferred = false) {
   let release;
@@ -75,28 +81,35 @@ async function test(name, run) { await run(); console.log(`ok ${++passed} - ${na
       assert.equal(state.profile_snapshot, saved); assert.equal(state.profileChoices.get(id), saved); assert.equal(state.profileSelectionSync, 'pending');
     }
   });
-  await test('the overview renders three summaries per resource with full-directory actions', async () => {
+  await test('home shows at most three Agent summaries and expands to the exact Agent objects', async () => {
     const f = pageFixture(); await f.page.show();
-    const sections = walk(f.root).filter(node => node.className === 'my-ai-resource'); assert.equal(sections.length, 3);
-    for (const section of sections) { assert.equal(walk(section).filter(node => node.className === 'my-ai-resource-row').length, 3); assert(control(section, '查看全部'), 'each summary has its full-directory action'); }
-    assert(control(f.root, 'agent 4'), 'working Agent is prioritized in the three-item summary'); assert(!control(f.root, 'model 4'));
+    const summaries = walk(f.root).filter(node => node.className === 'my-ai-agent-name');
+    assert.equal(summaries.length, 3);
+    assert.equal(summaries[0].textContent, 'agent 4', 'working Agent is prioritized');
+    assert(!control(f.root, 'model 4')); assert(!control(f.root, '最近工作'));
+    control(f.root, '展开 ↓').click();
+    assert.equal(walk(f.root).filter(node => node.className === 'my-ai-agent-row').length, 4);
+    control(f.root, 'agent 4').click(); await settle();
+    assert.deepEqual(clone(f.actions[0]), { kind: 'manage', target: { kind: 'agent', id: 'agent-4', fromMyAI: true } });
+    f.page.hide(); await f.page.show();
+    assert.equal(f.document.activeElement, control(f.root, 'agent 4'));
     f.page.hide();
   });
   await test('workspace changes discard old objects and old retained controls cannot dispatch', async () => {
     let release; const f = pageFixture(async scope => scope === 'fixture' ? sample(scope) : new Promise(resolve => { release = resolve; }));
-    await f.page.show(); const old = control(f.root, 'agent 1'); f.scope('new-workspace'); const pending = f.page.show();
+    await f.page.show(); control(f.root, '展开 ↓').click(); const old = control(f.root, 'agent 1'); f.scope('new-workspace'); const pending = f.page.show();
     assert(!control(f.root, 'agent 1')); old.click(); await settle(); assert.equal(f.actions.length, 0);
-    release(sample('new-workspace')); await pending; control(f.root, 'agent 1').click(); await settle(); assert.equal(f.actions.length, 1);
+    release(sample('new-workspace')); await pending; control(f.root, '展开 ↓').click(); control(f.root, 'agent 1').click(); await settle(); assert.equal(f.actions.length, 1);
     f.page.hide();
   });
   await test('simultaneous overview reads share one HTTP request', async () => {
     let release; const f = pageFixture(() => new Promise(resolve => { release = resolve; }));
     const first = f.page.show(), second = f.page.refresh(); assert.equal(f.requests.length, 1);
-    assert.equal(f.requests[0][0], '/api/management/my-ai'); assert.equal(f.requests[0][1].method, 'GET'); assert.equal(f.requests[0][2], false);
+    assert.equal(f.requests[0][0], '/api/management/my-ai?view=dashboard'); assert.equal(f.requests[0][1].method, 'GET'); assert.equal(f.requests[0][2], false);
     release(sample()); await Promise.all([first, second]); f.page.hide();
   });
   await test('unchanged quiet refresh preserves rendered controls and their actions', async () => {
-    const f = pageFixture(); await f.page.show(); const old = control(f.root, 'agent 1');
+    const f = pageFixture(); await f.page.show(); control(f.root, '展开 ↓').click(); const old = control(f.root, 'agent 1');
     await f.page.refresh({ quiet: true }); assert.equal(control(f.root, 'agent 1'), old, 'no full redraw for unchanged facts');
     old.click(); await settle(); assert.equal(f.actions.length, 1, 'the preserved control remains usable'); f.page.hide();
   });
@@ -104,6 +117,33 @@ async function test(name, run) { await run(); console.log(`ok ${++passed} - ${na
     const f = pageFixture(); await f.page.show(); assert(walk(f.root).some(node => node.dataset.state === 'running'));
     assert([...f.timers.values()].some(timer => timer.delay === 6000)); const requests = f.requests.length; f.expire();
     assert(!walk(f.root).some(node => node.dataset.state === 'running')); assert.equal(f.requests.length, requests); f.page.hide();
+  });
+  await test('return restores the asynchronous source entry and rejects detached visit controls', async () => {
+    const renders = [];
+    const f = pageFixture(undefined, { usage: { render(mount, context) { renders.push({ mount, context }); } } });
+    const ready = ({ mount, context }) => {
+      const trigger = f.document.createElement('button');
+      trigger.dataset.dashboardFocus = 'usage-codex';
+      mount.append(trigger); context.onReady(); return trigger;
+    };
+    await f.page.show();
+    const first = renders.at(-1), trigger = ready(first);
+    trigger.focus(); f.root.scrollTop = 210;
+    first.context.open('codex');
+    assert.equal(f.root.dataset.dashboardView, 'usage');
+    assert.equal(renders.at(-1).context.focusId, 'codex');
+    first.context.open('foreign');
+    assert.equal(renders.at(-1).context.focusId, 'codex');
+    const back = control(f.root, '← 我的 AI'); back.click();
+    assert.equal(f.root.dataset.dashboardView, 'home');
+    assert.equal(f.document.activeElement, back);
+    const restored = ready(renders.at(-1));
+    assert.equal(f.document.activeElement, restored);
+    assert.equal(f.root.scrollTop, 210);
+    renders.at(-1).context.open('codex'); control(f.root, '← 我的 AI').click();
+    const moved = control(f.root, '展开 ↓'); moved.focus(); ready(renders.at(-1));
+    assert.equal(f.document.activeElement, moved, 'late cards cannot take back user focus');
+    f.page.hide();
   });
   await test('passive sidebar availability does not read or start the specialist', async () => {
     const source = fs.readFileSync(path.join(assets, 'specialist.js'), 'utf8');

@@ -17,6 +17,7 @@
   <link rel="stylesheet" href="/composer_shell.css">
   <link rel="stylesheet" href="/soft_paper.css">
   <link rel="stylesheet" href="/my_ai.css">
+  <link rel="stylesheet" href="/dashboard_sections.css">
   <script src="/agents.js" defer></script>
   <script src="/markdown-it.min.js" defer></script>
   <script src="/rich_text.js" defer></script>
@@ -40,6 +41,7 @@
   <script src="/specialist_tools.js" defer></script>
   <script src="/composer_shell.js" defer></script>
   <script src="/specialist.js" defer></script>
+  <script src="/pixel-rabbit.js" defer></script>
   <script src="/pi_native_history.js" defer></script>
   <script src="/pi_native.js" defer></script>
   <script src="/hermes_native_history.js" defer></script>
@@ -58,6 +60,7 @@
   <script src="/native_index_text.js" defer></script>
   <script src="/my_ai.js" defer></script>
   <script src="/my_ai_page.js" defer></script>
+  <script src="/dashboard_sections.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -65,12 +68,30 @@
     <button class="sidebar-backdrop" id="sidebar-backdrop" aria-label="关闭会话列表" hidden></button>
     <aside class="sidebar" id="sidebar" aria-label="对话与导航">
       <div class="brand">
-        <button type="button" id="home-logo" class="brand-home" aria-label="返回我的 AI"><img class="brand-mark" src="/rabbit-app-1024.png" alt="" width="40" height="40"></button>
-        <div><h1>小白兔</h1><p id="brand-agents"></p></div>
+        <h1>
+          <button type="button" id="home-logo" class="brand-home" aria-label="小白兔，回到主页">
+            <span class="brand-pixel-rabbit" id="home-pixel-rabbit" aria-hidden="true">
+              <img src="/pixel-rabbit-idle.png" alt="" width="48" height="48" draggable="false">
+              <img src="/pixel-rabbit-half-blink.png" alt="" width="48" height="48" draggable="false" hidden>
+              <img src="/pixel-rabbit-blink.png" alt="" width="48" height="48" draggable="false" hidden>
+            </span>
+            <span class="brand-home-copy">
+              <span>小白兔</span>
+              <span class="brand-home-note" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false"><path d="M3 10.5 11 4a1.6 1.6 0 0 1 2 0l8 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1zM9 21v-8h6v8"/></svg>
+                <span>首页</span>
+              </span>
+            </span>
+            <span class="brand-home-tip" aria-hidden="true">回到主页</span>
+          </button>
+        </h1>
+        <p id="brand-agents" hidden></p>
         <button class="icon-button close-sidebar" id="close-sidebar" aria-label="关闭会话列表">×</button>
       </div>
       <section id="specialist-composer-card" class="specialist-composer-card" hidden aria-label="小白兔专员">
-        <button type="button" class="specialist-composer-label" id="specialist-composer-label" aria-controls="specialist-panel">小白兔专员</button>
+        <div class="specialist-composer-heading">
+          <button type="button" class="specialist-composer-label" id="specialist-composer-label" aria-controls="specialist-panel">小白兔专员</button>
+        </div>
         <div id="specialist-composer-mount"></div>
       </section>
       <nav class="main-navigation" aria-label="主要页面">
@@ -78,7 +99,7 @@
         <button id="management-nav" class="page-nav" data-page="management">管理</button>
         <button id="settings-nav" class="page-nav" data-page="settings">设置</button>
       </nav>
-      <div class="sidebar-content">
+      <div id="sidebar-content" class="sidebar-content" role="region" aria-label="侧栏内容" tabindex="0">
       <div id="sidebar-chat-content" class="sidebar-chat-content">
       <div class="new-chat-row"><button class="new-chat-button" id="new-chat"><span aria-hidden="true">＋</span> 新对话</button></div>
       <div class="list-tools">
@@ -86,19 +107,27 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
           <input id="search-input" type="search" placeholder="搜索全部对话" autocomplete="off" aria-label="搜索会话">
         </label>
-        <div id="history-tools">
-          <div class="source-filters" id="source-filters" aria-label="对话分类">
-            <button class="source-filter active" data-agent="all" aria-pressed="true">全部</button>
+        <section id="history-tools" class="sidebar-list-group" aria-labelledby="original-dialogues-label">
+          <div class="sidebar-list-heading">
+            <h2 id="original-dialogues-label">原对话</h2>
+            <button type="button" id="refresh-history" title="重新读取原对话" aria-label="更新原对话">更新</button>
           </div>
-          <div class="history-update"><span id="history-summary">原来的对话，保留原文</span><button id="refresh-history" title="重新读取历史记录" aria-label="更新历史记录">更新</button></div>
-        </div>
+          <div class="source-filters" id="source-filters" role="group" aria-label="原对话来源">
+            <button type="button" class="source-filter active" data-agent="all" aria-pressed="true">全部</button>
+          </div>
+        </section>
+        <section id="conversation-folder-tools" class="sidebar-list-group" aria-labelledby="conversation-folder-label" hidden>
+          <div class="sidebar-list-heading" id="conversation-folder-heading">
+            <h2 id="conversation-folder-label"><button type="button" class="markdown-folder-entry" id="open-markdown-chats" data-control-interface="ai">对话夹</button></h2>
+          </div>
+          <div class="source-filters conversation-folder-filters" id="conversation-folder-filters" role="group" aria-label="自建对话夹"></div>
+        </section>
       </div>
-      <button type="button" class="context-preview-button markdown-folder-entry" id="open-markdown-chats" data-control-interface="ai" hidden>文件夹</button>
       <div class="session-list" id="session-list" aria-label="全部对话"></div>
       </div>
       <nav id="sidebar-section-list" class="sidebar-section-list" aria-label="页面分类" hidden></nav>
       </div>
-      <div class="sidebar-footer"><span class="privacy-dot" aria-hidden="true"></span> 记录保存在这台电脑 <span id="connection-state" aria-live="polite"></span></div>
+      <div class="sidebar-footer"><span id="connection-state" aria-live="polite"></span></div>
     </aside>
 
     <main class="main-panel">

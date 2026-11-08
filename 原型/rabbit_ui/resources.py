@@ -10,24 +10,25 @@ import secrets
 import stat
 
 
-INLINE_STYLES = ('style.css', 'workspace.css', 'specialist.css', 'work_status.css', 'composer_shell.css', 'soft_paper.css', 'my_ai.css')
+INLINE_STYLES = ('style.css', 'workspace.css', 'specialist.css', 'work_status.css', 'composer_shell.css', 'soft_paper.css', 'my_ai.css', 'dashboard_sections.css')
 INLINE_SCRIPTS = (
     'agents.js', 'markdown-it.min.js', 'rich_text.js', 'materials.js',
     'status_checks.js', 'profiles.js', 'native_memory.js', 'work_status.js', 'workspace.js', 'browser_state.js',
     'text_file_download.js', 'file_tasks.js', 'file_materials.js',
     'project_publish.js', 'markdown_chats.js', 'conversation_groups.js',
     'history_quotes.js', 'native_materials.js', 'handoff_view.js',
-    'specialist_context.js', 'specialist_tools.js', 'composer_shell.js', 'specialist.js', 'pi_native_history.js',
+    'specialist_context.js', 'specialist_tools.js', 'composer_shell.js', 'specialist.js', 'pixel-rabbit.js', 'pi_native_history.js',
     'pi_native.js', 'hermes_native_history.js', 'hermes_attachment_state.js',
     'hermes_native.js', 'claude_material_draft.js', 'claude_native.js',
     'dsh_material_draft.js', 'dsh_native.js', 'native_chats.js',
     'native_handoff.js', 'native_adoption.js', 'native_text_quote.js',
-    'native_file_quote.js', 'continuations.js', 'native_index_text.js', 'my_ai.js', 'my_ai_page.js', 'app.js',
+    'native_file_quote.js', 'continuations.js', 'native_index_text.js', 'my_ai.js', 'my_ai_page.js', 'dashboard_sections.js', 'app.js',
 )
 HELP_FILES = ('manual.md', 'specialist-guide.md')
-INLINE_ASSETS = frozenset(('index.html', 'rabbit-app-1024.png', 'soft-paper.jpg') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES)
-ASSET_FILES = ('index.html', 'rabbit-app-1024.png', 'soft-paper.jpg', 'app.webmanifest',
-               'markdown-it.LICENSE', 'old-letter.md') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES
+PIXEL_FRAMES = ('pixel-rabbit-idle.png', 'pixel-rabbit-half-blink.png', 'pixel-rabbit-blink.png')
+INLINE_ASSETS = frozenset(('index.html', 'rabbit-app-1024.png', 'soft-paper.jpg') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES + PIXEL_FRAMES)
+ASSET_FILES = ('index.html', 'rabbit-app-1024.png', 'rabbit-split.png', 'soft-paper.jpg', 'app.webmanifest',
+               'markdown-it.LICENSE', 'old-letter.md') + INLINE_STYLES + INLINE_SCRIPTS + HELP_FILES + PIXEL_FRAMES
 MAX_INLINE_ASSET_BYTES = 2 * 1024 * 1024
 _ROUTES = {'/': 'index.html', **{'/' + name: name for name in ASSET_FILES if name != 'markdown-it.LICENSE'}}
 _CONTENT_TYPES = {
@@ -127,7 +128,7 @@ def self_contained_document(web_root, *, agent_bootstrap):
         if attrs.get('rel') == 'manifest':
             return ''  # A proxied preview is not a standalone PWA installation.
         if attrs.get('href') == '/rabbit-app-1024.png':
-            # Reuse the single inline brand image after the DOM is complete.
+            # The browser icons share one inline URL after the DOM is complete.
             return re.sub(r'\s+href\s*=\s*([\"\'])/rabbit-app-1024\.png\1', '', tag)
         return tag
 
@@ -145,14 +146,19 @@ def self_contained_document(web_root, *, agent_bootstrap):
             or len(scripts) != len(INLINE_SCRIPTS) or set(scripts) != set(INLINE_SCRIPTS)
             or re.search(r'<script\b', html, flags=re.I)):
         raise ValueError('界面素材顺序或清单不完整。')
-    logo = asset('rabbit-app-1024.png')
-    if not logo.startswith(b'\x89PNG\r\n\x1a\n'):
+    icon = asset('rabbit-app-1024.png')
+    if not icon.startswith(b'\x89PNG\r\n\x1a\n'):
         raise ValueError('界面图标格式无效。')
-    logo_uri = 'data:image/png;base64,' + base64.b64encode(logo).decode('ascii')
-    html, logo_count = re.subn(r'(<img\b[^>]*\bsrc\s*=\s*)([\"\'])/rabbit-app-1024\.png\2',
-        lambda match: match.group(1) + match.group(2) + logo_uri + match.group(2), html, flags=re.I)
-    if logo_count != 1:
-        raise ValueError('界面图标入口不完整。')
+    icon_uri = 'data:image/png;base64,' + base64.b64encode(icon).decode('ascii')
+    for name in PIXEL_FRAMES:
+        image = asset(name)
+        if not image.startswith(b'\x89PNG\r\n\x1a\n'):
+            raise ValueError('界面图标格式无效。')
+        uri = 'data:image/png;base64,' + base64.b64encode(image).decode('ascii')
+        html, count = re.subn(r'(<img\b[^>]*\bsrc\s*=\s*)([\"\'])/' + re.escape(name) + r'\2',
+            lambda match: match.group(1) + match.group(2) + uri + match.group(2), html, flags=re.I)
+        if count != 1:
+            raise ValueError('界面图标入口不完整。')
 
     paper = asset('soft-paper.jpg')
     if not paper.startswith(b'\xff\xd8\xff'):
@@ -178,8 +184,8 @@ def self_contained_document(web_root, *, agent_bootstrap):
     script_bootstrap = ('<script nonce="' + nonce + '">(function(){var nonce=document.currentScript.nonce;' + decode +
         'var sources=' + encoded(scripts) + ';sources.forEach(function(source){var node=document.createElement("script");'
         'node.nonce=nonce;node.textContent=decode(source);document.body.appendChild(node);});'
-        'var logo=document.querySelector(".brand-mark");if(logo){document.querySelectorAll("link[rel=icon],link[rel=apple-touch-icon]")'
-        '.forEach(function(node){node.href=logo.src;});}})();</script>')
+        'var icon=' + json.dumps(icon_uri) + ';document.querySelectorAll("link[rel=icon],link[rel=apple-touch-icon]")'
+        '.forEach(function(node){node.href=icon;});})();</script>')
     if html.lower().count('</head>') != 1 or html.lower().count('</body>') != 1:
         raise ValueError('界面结构不完整。')
     html = re.sub(r'</head>', lambda _match: style_bootstrap + '</head>', html, count=1, flags=re.I)

@@ -25,7 +25,7 @@
     const retry = button("重新读取", () => load({ offset: 0, revision: null })), sources = node("select", "rbs-control"), sourceLabel = node("label", "rbs-field"), storageNote = node("p", "rbs-note");
     sourceLabel.append(node("span", "", "历史分段"), sources); sources.setAttribute("aria-label", "历史分段");
     more.append(summary, retry, sourceLabel, storageNote, operations); paging.append(previous, range, next); page.append(more, notice, errorNode, excerptNode, messages, paging); root.append(page); root.hidden = true;
-    let workspace = "", selected = null, visible = false, generation = 0, reading = false, data = null, match = null, excerpt = "", title = "", errorText = "", storageFailed = false, language = "zh-CN";
+    let workspace = "", selected = null, visible = false, generation = 0, reading = false, data = null, dataGeneration = null, match = null, excerpt = "", title = "", errorText = "", storageFailed = false, language = "zh-CN";
     const tr = (zh, en) => language === "en" ? en : zh;
     const key = () => "rabbit.native-reading.v1." + encodeURIComponent(workspace);
     function save() {
@@ -41,6 +41,16 @@
       render();
     }
     function context() { return selected && workspace === String(getWorkspace() || "") ? { workspace_id: workspace, agent: selected.agent, chat_id: selected.chat_id, title } : null; }
+    function getHistorySourceContext() {
+      if (!visible || reading || errorText || dataGeneration !== generation || !data || !context()
+          || data.workspace_id !== workspace || data.agent !== selected.agent || data.chat_id !== selected.chat_id
+          || data.source_session_id !== selected.source_session_id || data.revision !== selected.revision
+          || !sid(data.source_session_id) || /[\s\p{Cc}\p{Cf}\p{Cs}]/u.test(data.source_session_id)) return null;
+      // Only a current validate() result establishes the source; restored
+      // positions and catalogue/index_sources metadata never do.
+      return { workspace_id: workspace, agent: data.agent, chat_id: data.chat_id,
+        source_session_id: data.source_session_id, generation };
+    }
     function select(value, details = {}) {
       restore();
       if (value?.workspaceId !== workspace || !workspace || !agents.has(value?.agent) || !uuid(value?.chatId)) throw Error("原对话或工作区暂不可读取。");
@@ -82,13 +92,13 @@
       if (requested.message_id) query.set("message_id", requested.message_id); else query.set("offset", String(requested.offset));
       if (requested.revision) query.set("revision", requested.revision);
       const current = () => visible && request === generation && scope === workspace && scope === String(getWorkspace() || "");
-      reading = true; errorText = ""; render();
+      reading = true; errorText = ""; render(); onViewChange(context());
       try {
         const value = await api("/api/library/native-text?" + query);
         if (!current()) return false;
-        data = validate(value, requested); title = data.title; selected = position({ agent: data.agent, chat_id: data.chat_id, source_session_id: data.source_session_id, offset: data.offset, revision: data.revision });
+        data = validate(value, requested); dataGeneration = request; title = data.title; selected = position({ agent: data.agent, chat_id: data.chat_id, source_session_id: data.source_session_id, offset: data.offset, revision: data.revision });
         if (data.located_message_id) match = { session_id: data.source_session_id, messageId: data.located_message_id, index: data.located_message_index, query: match?.query || "" };
-        save(); render(); onViewChange(context());
+        save(); render();
         const target = match && Array.from(messages.children).find(item => item.dataset.messageId === match.messageId);
         if (target) { target.focus?.({ preventScroll: true }); target.scrollIntoView?.({ block: "center" }); }
         else scrollRoot.scrollTop = 0;
@@ -99,7 +109,7 @@
         else if (error.status === 404) { data = null; errorText = error.code === "native_text_unavailable" ? error.message : tr("这段对话的已绑定记录暂不可读取。", "The bound record is unavailable."); }
         else errorText = error.status ? tr("已有记录暂时无法读取。", "The existing record could not be read.") : error.message || tr("已有记录暂时无法读取。", "The existing record could not be read.");
         render(); return false;
-      } finally { if (current()) { reading = false; renderControls(); } }
+      } finally { if (current()) { reading = false; renderControls(); onViewChange(context()); } }
     }
     function renderControls() {
       retry.disabled = reading; previous.disabled = reading || !data || data.offset === 0; next.disabled = reading || !data || data.next_offset === null; sources.disabled = reading;
@@ -124,7 +134,7 @@
     sources.addEventListener("change", () => { if (data?.sources.some(row => row.session_id === sources.value)) { match = null; return load({ source_session_id: sources.value, offset: 0 }); } });
     return {
       restore, select,
-      selected: () => context(), getViewContext: () => visible ? context() : null,
+      selected: () => context(), getViewContext: () => visible ? context() : null, getHistorySourceContext,
       show() { restore(); if (!selected) return false; visible = true; root.hidden = false; return load(); },
       hide() { generation++; visible = reading = false; root.hidden = true; },
       clear() { generation++; selected = data = match = null; title = excerpt = errorText = ""; visible = reading = false; root.hidden = true; if (workspace) save(); },

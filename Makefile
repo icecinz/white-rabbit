@@ -21,3 +21,4 @@ test: check-python
 
 test-ui:
 	$(NODE) 原型/test_blueprint_home_ui.cjs
+	$(NODE) 原型/test_workspace_ui.cjs

@@ -9,10 +9,16 @@ import sqlite3
 import uuid
 
 from rabbit_preparation.material_references import validate_material_refs as validate_refs
+from rabbit_content.history_markdown_reference import reference_identity
 
 
 PATH = '/api/management/native-chat-origin'
 SCOPE = 'native_continuation_source'
+TARGETS_SCOPE = 'native_continuation_targets'
+# Two existing native target catalogues, each limited to 128 application chats.
+# Reverse reads reject larger/corrupt stores instead of returning partial links.
+MAX_TARGETS = 256
+MAX_RECORD_BYTES = 8192
 AGENTS = {'codex': 'native_chats', 'hermes': 'hermes_native_chats'}
 FIELDS = ('target_agent', 'target_chat_id', 'creation_id', 'source_view',
           'source_revision', 'selected_message_ids', 'material_refs', 'snapshot_sha256')
@@ -25,6 +31,7 @@ _MESSAGES = {
     'corrupt': (409, '已保存的接续来源需要核对，没有替换。'),
     'unavailable': (503, '所选原生对话入口暂时不可用。'),
     'storage_unconfirmed': (503, '接续来源的保存尚未确认，请按原目标读取核对。'),
+    'capacity': (409, '接续关系超过一次读取容量，整份未返回，没有截断。'),
 }
 
 
@@ -66,6 +73,32 @@ def _json(value):
                       separators=(',', ':'), allow_nan=False)
 
 
+def history_source(workspace_id, agent, session_id, title):
+    """A stable index reference, never an application/native chat identity."""
+    try:
+        identity, _revision = reference_identity(workspace_id, agent, session_id)
+        return dict(kind='history_reference', workspace_id=workspace_id, id=identity,
+                    agent=agent, session_id=session_id, title=_text(title, 16384))
+    except (ValueError, TypeError, UnicodeError):
+        raise NativeOriginError() from None
+
+
+def source_key(source, workspace_id):
+    if type(source) is not dict or source.get('workspace_id') != workspace_id:
+        raise NativeOriginError()
+    if source.get('kind') == 'history_reference':
+        if set(source) != {'kind', 'workspace_id', 'id', 'agent', 'session_id', 'title'}:
+            raise NativeOriginError()
+        expected = history_source(workspace_id, source['agent'], source['session_id'], source['title'])
+        if source != expected:
+            raise NativeOriginError()
+        return 'history_reference', source['agent'], source['session_id']
+    if set(source) != {'workspace_id', 'agent', 'chat_id', 'title'}:
+        raise NativeOriginError()
+    target(source['agent'], source['chat_id']); _text(source['title'], 16384)
+    return 'native', source['agent'], source['chat_id']
+
+
 def record(value, workspace_id):
     """Copy the exact bounded declaration, without verifying its body claims."""
     try:
@@ -73,10 +106,7 @@ def record(value, workspace_id):
             raise NativeOriginError()
         target(value['target_agent'], value['target_chat_id']); _uuid(value['creation_id'])
         source = value['source_view']
-        if (type(source) is not dict or set(source) != {'workspace_id', 'agent', 'chat_id', 'title'}
-                or source['workspace_id'] != workspace_id):
-            raise NativeOriginError()
-        target(source['agent'], source['chat_id']); _text(source['title'], 16384)
+        source_key(source, workspace_id)
         for key in ('source_revision', 'snapshot_sha256'):
             if type(value[key]) is not str or _SHA.fullmatch(value[key]) is None:
                 raise NativeOriginError()
@@ -91,7 +121,7 @@ def record(value, workspace_id):
         if not selected and not refs:
             raise NativeOriginError()
         raw = _json(dict(value, material_refs=refs))
-        if len(raw.encode('utf-8')) > 8192:
+        if len(raw.encode('utf-8')) > MAX_RECORD_BYTES:
             raise NativeOriginError()
         return json.loads(raw)
     except NativeOriginError:
@@ -112,13 +142,16 @@ class NativeOrigins:
                 PRIMARY KEY(workspace_id,target_agent,target_chat_id))''')
 
     def _read_in(self, db, agent, chat_id):
-        row = db.execute('SELECT record_json FROM native_continuation_sources '
+        row = db.execute('SELECT CASE WHEN length(CAST(record_json AS BLOB))<=? '
+            'THEN record_json END AS record_json FROM native_continuation_sources '
             'WHERE workspace_id=? AND target_agent=? AND target_chat_id=?',
-            (self.workspace_id, agent, chat_id)).fetchone()
+            (MAX_RECORD_BYTES, self.workspace_id, agent, chat_id)).fetchone()
         if row is None:
             return None
+        return self._decode(row['record_json'], agent, chat_id)
+
+    def _decode(self, raw, agent, chat_id):
         try:
-            raw = row['record_json']
             value = record(json.loads(raw), self.workspace_id)
             if (value['target_agent'] != agent or value['target_chat_id'] != chat_id
                     or _json(value) != raw):
@@ -132,6 +165,29 @@ class NativeOrigins:
         try:
             with self.store.lock, self.store._open(readonly=True) as db:
                 return self._read_in(db, agent, chat_id)
+        except (sqlite3.Error, OSError):
+            raise NativeOriginError('storage_unconfirmed') from None
+
+    def targets(self, kind, agent, session_id):
+        if kind != 'history_reference':
+            raise NativeOriginError()
+        expected = source_key(history_source(self.workspace_id, agent, session_id, '索引来源'),
+                              self.workspace_id)
+        try:
+            with self.store.lock, self.store._open(readonly=True) as db:
+                rows = db.execute('SELECT target_agent,target_chat_id,CASE WHEN '
+                    'length(CAST(record_json AS BLOB))<=? THEN record_json END AS record_json '
+                    'FROM native_continuation_sources WHERE workspace_id=? '
+                    'ORDER BY target_agent,target_chat_id LIMIT ?',
+                    (MAX_RECORD_BYTES, self.workspace_id, MAX_TARGETS + 1)).fetchall()
+            if len(rows) > MAX_TARGETS:
+                raise NativeOriginError('capacity')
+            result = []
+            for row in rows:
+                value = self._decode(row['record_json'], row['target_agent'], row['target_chat_id'])
+                if source_key(value['source_view'], self.workspace_id) == expected:
+                    result.append(value)
+            return result
         except (sqlite3.Error, OSError):
             raise NativeOriginError('storage_unconfirmed') from None
 

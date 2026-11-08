@@ -1,6 +1,7 @@
 (() => {
   "use strict";
   const PATH = "/api/management/my-ai";
+  const DASHBOARD_PATH = PATH + "?view=dashboard";
   const LABELS = Object.freeze({ codex: "Codex", pi: "Pi", hermes: "Hermes", claude: "Claude Code", dsh: "DeepSeek Harness" });
   const PROGRAMS = Object.freeze({ hindsight: "Hindsight", hermes_files: "Hermes 文档记忆", mem0: "Mem0" });
   const object = value => !!value && typeof value === "object" && !Array.isArray(value);
@@ -20,6 +21,16 @@
     if (row.kind === "history" && agent(row.agent) && session(row.session_id) && row.key === `history:${row.agent}:${row.session_id}`)
       return { kind: "history", key: row.key, agent: row.agent, session_id: row.session_id, read_only: true };
     return null;
+  }
+  function hasIndexedText(row) {
+    const sources = row.index_sources, primary = row.index_source, ids = new Set();
+    if (!Array.isArray(sources) || !sources.length || sources.length > 128 || !object(primary) || primary.agent !== row.agent) return false;
+    for (const source of sources) {
+      if (!object(source) || source.agent !== row.agent || !session(source.session_id) || ids.has(source.session_id)) return false;
+      try { encodeURIComponent(source.session_id); } catch (_) { return false; }
+      ids.add(source.session_id);
+    }
+    return ids.has(primary.session_id);
   }
   function originalSession(row, observations) {
     if (row.kind === "history") return row.agent === "codex" && uuid(row.session_id) ? row.session_id : null;
@@ -54,9 +65,17 @@
         : observed.some(work => work.status === "running") ? "running"
         : row.checked === true && row.available !== true ? "needs_attention"
         : row.checked === true && row.available === true ? "checked" : row.has_saved_configuration === true || row.native_enabled === true ? "configured" : "unverified";
+      const prefix = `local/${row.id}/`;
+      const savedModels = new Set(value.ai_profiles.filter(profile => object(profile) && profile.agent_instance_id === `local/${row.id}`
+        && text(profile.model_id, 220) && profile.model_id.startsWith(prefix) && profile.model_id.length > prefix.length)
+        .map(profile => profile.model_id.slice(prefix.length)));
+      const sessionIds = new Set(observed.filter(work => work.role === "chat" && uuid(work.chat_id) && uuid(work.native_session_id)).map(work => work.native_session_id));
+      const originalUrl = row.id === "codex" && sessionIds.size === 1 ? window.RabbitAgents?.originalAppUrl?.(row.id, [...sessionIds][0]) : null;
       agentMap.set(row.id, { id: row.id, name: names(row.name, LABELS[row.id]), status,
         status_label: ({ needs_user: "等待确认", running: "进行中", configured: "有连接设置 · 待核对", needs_attention: "连接待处理", checked: "接入检查通过", unverified: "待核对" })[status],
         detail: names(row.reason, "尚未手动核对本机连接。"), native_enabled: row.native_enabled === true, has_saved_configuration: row.has_saved_configuration === true,
+        recorded_model: names(row.model, savedModels.size === 1 ? [...savedModels][0] : ""),
+        original_url: originalUrl || null,
         model_count: 0, latest_activity: null, target: { kind: "agent", id: row.id } });
     }
     const addModel = (row, source, detail) => {
@@ -90,9 +109,10 @@
       if (!location || keys.has(location.key)) failure();
       keys.add(location.key);
       const observed = location.kind === "native" ? observations.find(work => work.role === "chat" && work.agent === row.agent && work.chat_id === row.id) : null;
+      const readable = location.kind !== "native" || hasIndexedText(row);
       const status = observed?.complete === true && observed.reason === null && observed.connection_state === "ready" && ["running", "needs_user"].includes(observed.status) ? observed.status
-        : row.kind === "chat" && row.running === true ? "running" : location.read_only ? "read_only" : "continuable";
-      const actions = [{ kind: "read", label: "阅读", target: { ...location, read_only: true } }];
+        : row.kind === "chat" && row.running === true ? "running" : !location.read_only ? "continuable" : readable ? "read_only" : "unavailable";
+      const actions = readable ? [{ kind: "read", label: "阅读", target: { ...location, read_only: true } }] : [];
       if (!location.read_only) actions.push({ kind: "continue", label: "继续", target: { ...location } });
       const original = originalSession(row, observations);
       const url = original && typeof window.RabbitAgents?.originalAppUrl === "function" ? window.RabbitAgents.originalAppUrl("codex", original) : null;
@@ -102,8 +122,8 @@
       const timestamp = stamp(row.timestamp) || stamp(row.created_at);
       works.push({ key: row.key, name: names(row.title, "未命名工作"), agent: owner,
         agent_name: owner ? LABELS[owner] : "共同对话", timestamp, timestamp_kind: row.timestamp_kind || (row.kind === "history" ? "indexed_activity" : "chat_activity"), status,
-        status_label: ({ running: "进行中", needs_user: "等待确认", read_only: "仅可阅读", continuable: "可继续" })[status],
-        detail: row.kind === "history" ? "已有文字索引" : row.kind === "native" ? "小白兔管理的原生对话" : "本机共同对话",
+        status_label: ({ running: "进行中", needs_user: "等待确认", read_only: "仅可阅读", continuable: "可继续", unavailable: "暂不能在此打开" })[status],
+        detail: row.kind === "history" ? "已有文字索引" : row.kind === "native" ? readable ? "小白兔管理的原生对话" : "尚无已核实的文字索引" : "本机共同对话",
         target: location, actions });
       if (owner && timestamp && agentMap.has(owner) && (row.kind !== "native" || row.timestamp_kind === "confirmed_activity")) {
         const summary = agentMap.get(owner);
@@ -120,5 +140,5 @@
     if (typeof api !== "function") failure();
     return project(await api(PATH, { method: "GET" }, false), workspace);
   }
-  window.RabbitMyAI = Object.freeze({ PATH, project, load, target });
+  window.RabbitMyAI = Object.freeze({ PATH, DASHBOARD_PATH, project, load, target });
 })();

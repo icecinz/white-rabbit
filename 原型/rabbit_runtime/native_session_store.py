@@ -19,9 +19,11 @@ import stat
 import threading
 from urllib.parse import quote
 
+from .scope_anchors import ScopeAnchors, ScopeAnchorError
+
 
 APPLICATION_ID = 0x52424E53  # RBNS, separate from the shared-chat database.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 KINDS = frozenset(('thread_start', 'thread_resume', 'turn_start', 'turn_interrupt'))
 TERMINAL = frozenset(('completed', 'failed', 'interrupted'))
 STATUSES = frozenset(('submitted_unknown', 'accepted', 'rejected')) | TERMINAL
@@ -169,7 +171,7 @@ def _stamp():
     return datetime.now(timezone.utc).isoformat(timespec='microseconds')
 
 
-_DDL = (
+_DDL_V1 = (
     '''CREATE TABLE native_sessions (
         session_key TEXT PRIMARY KEY, cwd TEXT NOT NULL,
         cwd_device INTEGER NOT NULL, cwd_inode INTEGER NOT NULL,
@@ -196,15 +198,18 @@ _DDL = (
         WHERE kind='turn_start' AND turn_id IS NOT NULL''',
 )
 
+_ANCHOR_DDL = ScopeAnchors.ddl('native_sessions', 'session_key')
+_DDL = _DDL_V1 + (_ANCHOR_DDL,)
+
 
 def _schema(db):
     return tuple(tuple(row) for row in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name'))
 
 
-def _expected_schema():
+def _expected_schema(ddl=_DDL):
     db = sqlite3.connect(':memory:')
     try:
-        for statement in _DDL:
+        for statement in ddl:
             db.execute(statement)
         return _schema(db)
     finally:
@@ -212,6 +217,7 @@ def _expected_schema():
 
 
 _EXPECTED_SCHEMA = _expected_schema()
+_EXPECTED_SCHEMA_V1 = _expected_schema(_DDL_V1)
 
 
 class NativeSessionStore:
@@ -226,6 +232,7 @@ class NativeSessionStore:
         self.lock = threading.RLock()
         self._parent_fd = self._file_fd = self._lock_fd = None
         self._closed = False
+        self._anchors = ScopeAnchors()
         created = False
         try:
             self._parent_fd = open_directory(self.path.parent)
@@ -262,6 +269,11 @@ class NativeSessionStore:
             # unrelated/chat database must never be initialized or recovered.
             with self._db(write=created, initialize=created):
                 pass
+            if not readonly and not created:
+                # Only an explicitly writable owner may add the exact new
+                # evidence table, after the untouched legacy schema was read.
+                with self._db(write=True):
+                    pass
         except BaseException as error:
             self.close()
             if isinstance(error, NativeSessionStoreError):
@@ -277,6 +289,7 @@ class NativeSessionStore:
             if self._closed:
                 return
             self._closed = True
+            self._anchors.close()
             for field in ('_file_fd', '_lock_fd', '_parent_fd'):
                 descriptor = getattr(self, field)
                 if descriptor is not None:
@@ -337,21 +350,28 @@ class NativeSessionStore:
                     db.execute('PRAGMA application_id=' + str(APPLICATION_ID))
                     db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
                 else:
+                    version = db.execute('PRAGMA user_version').fetchone()[0]
+                    expected = {1: _EXPECTED_SCHEMA_V1, 2: _EXPECTED_SCHEMA}.get(version)
                     if (db.execute('PRAGMA application_id').fetchone()[0] != APPLICATION_ID
-                            or db.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION
-                            or _schema(db) != _EXPECTED_SCHEMA):
+                            or expected is None or _schema(db) != expected):
                         raise NativeSessionStoreError('invalid_schema')
                     if write:
                         db.execute('BEGIN IMMEDIATE')
+                        if version == 1:
+                            db.execute(_ANCHOR_DDL)
+                            db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
                     else:
                         db.execute('PRAGMA query_only=ON')
                         db.execute('BEGIN')
-                yield db
+                with self._anchors.transaction():
+                    yield db
                 self._check_path()
                 if write:
                     db.commit()
             except NativeSessionStoreError:
                 raise
+            except ScopeAnchorError:
+                raise NativeSessionStoreError('scope_changed') from None
             except sqlite3.IntegrityError:
                 raise NativeSessionStoreError('conflict') from None
             except sqlite3.Error:
@@ -423,14 +443,9 @@ class NativeSessionStore:
             raise NativeSessionStoreError('invalid_state') from None
         return value
 
-    @staticmethod
-    def _check_cwd(binding):
-        descriptor = open_directory(validate_path(binding['cwd']))
-        try:
-            if file_identity(os.fstat(descriptor)) != (binding['cwd_device'], binding['cwd_inode']):
-                raise NativeSessionStoreError('scope_changed')
-        finally:
-            os.close(descriptor)
+    def _check_cwd(self, binding, db, *, seed=False):
+        return self._anchors.verify(db, binding['session_key'], 'cwd',
+            validate_path(binding['cwd']), (binding['cwd_device'], binding['cwd_inode']), seed=seed)
 
     def bind(self, session_key, cwd):
         """Reserve a cwd only; native thread identity is accepted atomically later."""
@@ -446,13 +461,21 @@ class NativeSessionStore:
         with self._db(write=True) as db:
             old = self._binding(db, session_key)
             if old:
-                if old['cwd'] != str(cwd) or (old['cwd_device'], old['cwd_inode']) != (device, inode):
+                if old['cwd'] != str(cwd):
+                    raise NativeSessionStoreError('conflict')
+                try:
+                    observed = self._check_cwd(old, db, seed=True)
+                except ScopeAnchorError:
+                    raise NativeSessionStoreError('conflict') from None
+                if observed != (device, inode):
                     raise NativeSessionStoreError('conflict')
                 return old
             stamp = _stamp()
             db.execute('INSERT INTO native_sessions VALUES(?,?,?,?,NULL,NULL,?,?)',
                        (session_key, str(cwd), device, inode, stamp, stamp))
-            return self._binding(db, session_key)
+            binding = self._binding(db, session_key)
+            self._check_cwd(binding, db, seed=True)
+            return binding
 
     def adopt_thread(self, session_key, cwd, thread_id, session_id=None):
         """Register a trusted existing identity, without fabricating an ACK.
@@ -478,8 +501,8 @@ class NativeSessionStore:
                           (session_key,)).fetchone() is not None:
                 raise NativeSessionStoreError('conflict')
             if old is not None:
-                self._check_cwd(old)
-                if (old['cwd'], old['cwd_device'], old['cwd_inode'], old['thread_id'], old['session_id']) != (
+                observed = self._check_cwd(old, db, seed=True)
+                if (old['cwd'], *observed, old['thread_id'], old['session_id']) != (
                         str(cwd), *identity, thread_id, session_id):
                     raise NativeSessionStoreError('conflict')
                 return old
@@ -487,7 +510,7 @@ class NativeSessionStore:
             db.execute('INSERT INTO native_sessions VALUES(?,?,?,?,?,?,?,?)',
                        (session_key, str(cwd), *identity, thread_id, session_id, stamp, stamp))
             binding = self._binding(db, session_key)
-            self._check_cwd(binding)
+            self._check_cwd(binding, db, seed=True)
             return binding
 
     def read_binding(self, session_key):
@@ -526,8 +549,25 @@ class NativeSessionStore:
             binding = self._binding(db, validate_token(session_key))
             if binding is None:
                 raise NativeSessionStoreError('not_found')
-            self._check_cwd(binding)
+            self._check_cwd(binding, db)
             return binding
+
+    def current_binding(self, session_key):
+        """Verified current device observation; persisted metadata stays raw."""
+        with self._db() as db:
+            binding = self._binding(db, validate_token(session_key))
+            if binding is None:
+                raise NativeSessionStoreError('not_found')
+            device, inode = self._check_cwd(binding, db)
+            return dict(binding, cwd_device=device, cwd_inode=inode)
+
+    def seed_matching_anchors(self):
+        """Explicit maintenance operation; all original rows remain unchanged."""
+        with self._db(write=True) as db:
+            keys = [row[0] for row in db.execute('SELECT session_key FROM native_sessions ORDER BY session_key')]
+            for key in keys:
+                self._check_cwd(self._binding(db, key), db, seed=True)
+            return {'bindings': len(keys), 'anchors': len(keys)}
 
     def read_operation(self, client_id, *, session_key=None):
         client_id = validate_token(client_id)
@@ -592,7 +632,7 @@ class NativeSessionStore:
             binding = self._binding(db, session_key)
             if binding is None:
                 raise NativeSessionStoreError('not_found')
-            self._check_cwd(binding)
+            self._check_cwd(binding, db)
             if 'cwd' in request and request['cwd'] != binding['cwd']:
                 raise NativeSessionStoreError('conflict')
             target_turn = None
@@ -629,7 +669,7 @@ class NativeSessionStore:
             if row is None:
                 raise NativeSessionStoreError('not_found')
             binding = self._binding(db, row['session_key'])
-            self._check_cwd(binding)
+            self._check_cwd(binding, db)
             if row['kind'] == 'thread_start':
                 if turn_id is not None:
                     raise NativeSessionStoreError('conflict')

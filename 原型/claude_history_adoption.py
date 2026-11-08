@@ -162,7 +162,7 @@ class ClaudeHistoryAdoption:
                 if fd is not None: os.close(fd)
 
     def _binding_matches(self, identity, source):
-        binding=self.store.binding(identity)
+        binding=self.store.current_binding(identity)
         expected={key:source['descriptor'][key] for key in ('session_id','cwd','path','device','inode','cwd_device','cwd_inode')}
         if (binding is None or binding['session_id']!=source['session_id'] or binding['native_file']!=expected
                 or any(row['chat_id']!=identity and row['session_id']==source['session_id']
@@ -171,7 +171,7 @@ class ClaudeHistoryAdoption:
 
     def _prepare(self, session_id):
         source=self._source(session_id);identity,creation=adoption_identities(self.workspace_id,source['session_id'])
-        if self.store.binding(identity) is not None: self._binding_matches(identity,source)
+        if self.store.current_binding(identity) is not None: self._binding_matches(identity,source)
         elif ('claude',source['session_id']) in self.excluded_sources(): _error('source_already_owned')
         return source,dict(source=source,workspace_id=self.workspace_id,chat_id=identity,creation_id=creation,history_mode=HISTORY_MODE)
 
@@ -202,7 +202,7 @@ class ClaudeHistoryAdoption:
             adopted=True,execution_started=False,body_copied=False)
 
     def verify_open(self, identity):
-        identity=chat_id(identity);self.catalogue.get(identity);binding=self.store.binding(identity)
+        identity=chat_id(identity);self.catalogue.get(identity);binding=self.store.current_binding(identity)
         if binding is None or not is_adopted_binding(self.workspace_id,identity,binding['session_id']): _error('existing_binding_conflict')
         source,proof=self._prepare(binding['session_id'])
         if proof['chat_id']!=identity: _error('existing_binding_conflict')

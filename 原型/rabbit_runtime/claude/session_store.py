@@ -22,10 +22,11 @@ import uuid
 
 from ..native_session_store import (NativeSessionStoreError, open_directory as _directory, file_identity as _identity,
                                   validate_path as _path, validate_token as _token, request_sha256)
+from ..scope_anchors import ScopeAnchors, ScopeAnchorError
 
 
 APPLICATION_ID = 0x52434E53  # RCNS: distinct from shared, Codex, Pi and Hermes.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_RESULT_BYTES = 128 * 1024
 _MAX_SAVED_BYTES = MAX_RESULT_BYTES * 6 + 4096
 PENDING = frozenset(('submitted_unknown', 'accepted'))
@@ -110,7 +111,9 @@ _RESULT_DDL = (
     'ALTER TABLE claude_prompts ADD COLUMN result_json TEXT',
     'ALTER TABLE claude_prompts ADD COLUMN result_sha256 TEXT',
 )
-_DDL = _DDL_V1 + _RESULT_DDL
+_DDL_V2 = _DDL_V1 + _RESULT_DDL
+_ANCHORS_DDL = ScopeAnchors.ddl('claude_bindings', 'chat_id')
+_DDL = _DDL_V2 + (_ANCHORS_DDL,)
 _PROMPT_COLUMNS = ('client_id,chat_id,session_id,epoch,request_sha256,message_sha256,status,'
                    'native_user_uuid,native_result_uuid,created_at,updated_at')
 _RESULT_IDENTITY = ('chat_id', 'client_id', 'session_id', 'epoch', 'request_sha256',
@@ -133,6 +136,7 @@ def _expected_schema(ddl):
 
 
 _EXPECTED_SCHEMA_V1 = _expected_schema(_DDL_V1)
+_EXPECTED_SCHEMA_V2 = _expected_schema(_DDL_V2)
 _EXPECTED_SCHEMA = _expected_schema(_DDL)
 
 
@@ -180,6 +184,7 @@ class ClaudeNativeStore:
         if not self.path.name:
             raise ClaudeStoreError('invalid_arguments')
         self.readonly, self.lock = readonly, threading.RLock()
+        self._anchors = ScopeAnchors()
         self._closed, self._owner_pid = False, os.getpid()
         self._parent_fd = self._file_fd = self._lock_fd = None
         self._lock_name = '.' + self.path.name + '.lock'
@@ -284,20 +289,23 @@ class ClaudeNativeStore:
                     db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
                 else:
                     version = db.execute('PRAGMA user_version').fetchone()[0]
-                    expected = {1: _EXPECTED_SCHEMA_V1, 2: _EXPECTED_SCHEMA}.get(version)
+                    expected = {1: _EXPECTED_SCHEMA_V1, 2: _EXPECTED_SCHEMA_V2, 3: _EXPECTED_SCHEMA}.get(version)
                     if (db.execute('PRAGMA application_id').fetchone()[0] != APPLICATION_ID
                             or expected is None or _schema(db) != expected):
                         raise ClaudeStoreError('invalid_schema')
-                    if version == 1 and write:
+                    if version in (1, 2) and write:
                         if not migrate:
                             raise ClaudeStoreError('invalid_schema')
-                        for sql in _RESULT_DDL:
-                            db.execute(sql)
+                        if version == 1:
+                            for sql in _RESULT_DDL:
+                                db.execute(sql)
+                        db.execute(_ANCHORS_DDL)
                         db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
                         if _schema(db) != _EXPECTED_SCHEMA:
                             raise ClaudeStoreError('invalid_schema')
-                yield db
-                self._check_path()
+                with self._anchors.transaction():
+                    yield db
+                    self._check_path()
                 if write:
                     db.commit()
             except ClaudeStoreError:
@@ -306,7 +314,7 @@ class ClaudeNativeStore:
                 raise ClaudeStoreError('conflict') from None
             except sqlite3.Error:
                 raise ClaudeStoreError('io_failed') from None
-            except (OSError, NativeSessionStoreError):
+            except (OSError, NativeSessionStoreError, ScopeAnchorError):
                 raise ClaudeStoreError('scope_changed') from None
             finally:
                 if db is not None:
@@ -329,29 +337,28 @@ class ClaudeNativeStore:
         finally:
             os.close(parent)
 
-    @classmethod
-    def _binding(cls, db, chat_id):
+    def _binding(self, db, chat_id, *, current=False, seed=False):
         row = db.execute('SELECT * FROM claude_bindings WHERE chat_id=?', (chat_id,)).fetchone()
         if row is None:
             return None
         value = dict(row)
         validate_uuid(value['chat_id']); validate_uuid(value['session_id'])
-        fd = _directory(_path(value['cwd']))
-        try:
-            if _identity(os.fstat(fd)) != (value['cwd_device'], value['cwd_inode']):
-                raise ClaudeStoreError('scope_changed')
-        finally:
-            os.close(fd)
+        cwd_identity = self._anchors.verify(db, chat_id, 'cwd', value['cwd'],
+            (value['cwd_device'], value['cwd_inode']), seed=seed)
+        if current:
+            value['cwd_device'], value['cwd_inode'] = cwd_identity
         path, device, inode = (value.pop(key) for key in ('native_path', 'native_device', 'native_inode'))
         value['native_file'] = None
         if path is not None:
             path = _path(path)
             if path.name != value['session_id'] + '.jsonl':
                 raise ClaudeStoreError('invalid_schema')
-            cls._file(path, (device, inode))
+            native_identity = self._anchors.verify(db, chat_id, 'native_path', str(path),
+                (device, inode), kind='file', seed=seed)
             value['native_file'] = {key: value[key] for key in
                                     ('session_id', 'cwd', 'cwd_device', 'cwd_inode')}
-            value['native_file'].update(path=str(path), device=device, inode=inode)
+            value['native_file'].update(path=str(path), device=native_identity[0] if current else device,
+                                        inode=native_identity[1] if current else inode)
         return value
 
     @staticmethod
@@ -391,7 +398,7 @@ class ClaudeNativeStore:
         except OSError:
             raise ClaudeStoreError('scope_changed') from None
         with self._db(write=True) as db:
-            old = self._binding(db, chat_id)
+            old = self._binding(db, chat_id, current=True, seed=True)
             if old:
                 if ((old['cwd'], old['cwd_device'], old['cwd_inode']) != (str(cwd), *identity)
                         or session_id is not None and old['session_id'] != session_id):
@@ -400,11 +407,24 @@ class ClaudeNativeStore:
             session_id = session_id or str(uuid.uuid4())
             db.execute('INSERT INTO claude_bindings VALUES(?,?,?,?,?,NULL,NULL,NULL,?)',
                        (chat_id, session_id, str(cwd), *identity, _stamp()))
-            return self._binding(db, chat_id)
+            return self._binding(db, chat_id, current=True, seed=True)
 
     def binding(self, chat_id):
         with self._db() as db:
             return self._binding(db, validate_uuid(chat_id))
+
+    def current_binding(self, chat_id):
+        """Verify saved anchors and project live device observations, without writes."""
+        with self._db() as db:
+            return self._binding(db, validate_uuid(chat_id), current=True)
+
+    def seed_matching_anchors(self):
+        """Explicit maintenance: all existing roles match or the transaction rolls back."""
+        with self._db(write=True) as db:
+            identities = [row[0] for row in db.execute('SELECT chat_id FROM claude_bindings ORDER BY chat_id')]
+            for chat_id in identities:
+                self._binding(db, chat_id, seed=True)
+            return len(identities)
 
     def bindings(self):
         with self._db() as db:
@@ -453,7 +473,7 @@ class ClaudeNativeStore:
             self._file(path,(descriptor['device'],descriptor['inode']))
             expected = {key:descriptor[key] for key in required}
             with self._db(write=True) as db:
-                old = self._binding(db,chat_id)
+                old = self._binding(db,chat_id,current=True,seed=True)
                 if any(db.execute('SELECT 1 FROM '+table+' WHERE chat_id=?',(chat_id,)).fetchone()
                         for table in ('claude_creations','claude_prompts','claude_controls')):
                     raise ClaudeStoreError('conflict')
@@ -463,7 +483,7 @@ class ClaudeNativeStore:
                 else:
                     db.execute('INSERT INTO claude_bindings VALUES(?,?,?,?,?,?,?,?,?)',
                         (chat_id,session_id,str(cwd),*cwd_identity,str(path),descriptor['device'],descriptor['inode'],_stamp()))
-                return self._binding(db,chat_id)
+                return self._binding(db,chat_id,current=True,seed=True)
         except ClaudeStoreError:
             raise
         except NativeSessionStoreError:
@@ -486,7 +506,7 @@ class ClaudeNativeStore:
         except NativeSessionStoreError:
             raise ClaudeStoreError('invalid_arguments') from None
         with self._db(write=True) as db:
-            binding = self._binding(db, chat_id)
+            binding = self._binding(db, chat_id, current=True, seed=True)
             if binding is None:
                 raise ClaudeStoreError('not_found')
             if (any(binding[key] != descriptor[key] for key in
@@ -497,9 +517,10 @@ class ClaudeNativeStore:
             expected = {key: descriptor[key] for key in required}
             if binding['native_file'] is not None and binding['native_file'] != expected:
                 raise ClaudeStoreError('conflict')
-            db.execute('UPDATE claude_bindings SET native_path=?,native_device=?,native_inode=? WHERE chat_id=?',
-                       (str(path), descriptor['device'], descriptor['inode'], chat_id))
-            return self._binding(db, chat_id)
+            if binding['native_file'] is None:
+                db.execute('UPDATE claude_bindings SET native_path=?,native_device=?,native_inode=? WHERE chat_id=?',
+                           (str(path), descriptor['device'], descriptor['inode'], chat_id))
+            return self._binding(db, chat_id, current=True, seed=True)
 
     def begin_create(self, chat_id, client_id, epoch):
         chat_id, client_id, epoch = validate_uuid(chat_id), validate_uuid(client_id), _epoch(epoch)
@@ -751,6 +772,7 @@ class ClaudeNativeStore:
             if self._closed:
                 return
             self._closed = True
+            self._anchors.close()
             # Do not LOCK_UN: a forked child's close must not unlock its parent.
             for name in ('_file_fd', '_lock_fd', '_parent_fd'):
                 fd = getattr(self, name)

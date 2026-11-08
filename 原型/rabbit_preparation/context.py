@@ -2,7 +2,7 @@
 import json
 import re
 from rabbit_content.attachments import validate_native_attachments, MAX_HISTORY_IMAGES
-from rabbit_content.history_records import source_phase, context_content
+from rabbit_content.history_records import source_phase, context_content, APP_TASK_PHASE
 from .text_file_context import validate_materials
 
 MAX_CONTEXT_IMAGES = 8
@@ -79,6 +79,10 @@ def build_context(messages, max_chars=120000, inspect=False, pinned_ids=None, *,
     metadata = attachment_metadata if isinstance(attachment_metadata, dict) else {}
     records, origins = [], []
     for position, message in enumerate(messages, 1):
+        # App-delivered tasks are source evidence, not a replayable user turn.
+        # Exclude before inspecting materials or pins, even for direct callers.
+        if message.get('phase') == APP_TASK_PHASE:
+            continue
         if message.get('role') not in ('user', 'assistant'):
             continue
         if message.get('status', 'completed') not in ('completed', 'imported'):

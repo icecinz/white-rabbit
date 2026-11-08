@@ -53,6 +53,8 @@ class DemoAdapter:
 
 
 class DemoService(Service):
+    dashboard_local_actions = False
+
     def status(self, *, cached_only=False):
         return dict(super().status(cached_only=cached_only), demo_mode=True)
 

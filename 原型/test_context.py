@@ -4,6 +4,23 @@ from rabbit_preparation.context import build_context, ContextCapacityError
 
 
 class ContextTests(unittest.TestCase):
+    def test_application_task_phase_is_excluded_even_directly_with_materials_or_other_status(self):
+        for status in ('imported', 'completed', None):
+            task = {'id': 'app-task', 'role': 'user', 'content': 'APP_TASK_MUST_NOT_REPLAY',
+                    'phase': 'app_task_context', 'attachment_ids': ['invalid-if-inspected'],
+                    'native_attachments': 'invalid-if-inspected'}
+            if status is not None: task['status'] = status
+            messages = [task, {'id': 'draft', 'role': 'user', 'content': '本轮用户请求'}]
+            original = json.dumps(messages, ensure_ascii=False)
+            prompt, info = build_context(messages, inspect=True)
+            self.assertNotIn('APP_TASK_MUST_NOT_REPLAY', prompt)
+            self.assertEqual([row['message_id'] for row in info['records']], ['draft'])
+            self.assertEqual(json.dumps(messages, ensure_ascii=False), original)
+            with self.assertRaisesRegex(ValueError, '必带前文已无法读取'):
+                build_context(messages, pinned_ids=['app-task'])
+        with self.assertRaisesRegex(ValueError, '没有找到本轮用户消息'):
+            build_context([{'role': 'user', 'phase': 'app_task_context', 'content': '旧应用任务'}])
+
     def test_plain_prompt_bytes_and_payload_only_budget_remain_unchanged(self):
         record = {'role': 'user', 'content': '旧文字', 'source_ai': None}
         payload = json.dumps(record, ensure_ascii=False)

@@ -4,20 +4,20 @@
 
 White Rabbit aims to make several agents feel reachable from one place while keeping their identities, data, and capabilities understandable. Three requirements shape the design: preserve native work, let AI handle supported management, and make the parts independently reusable.
 
-The 0.2.0-alpha.1 early source snapshot implements the following paths. Native connection requirements and capabilities remain explicit rather than inferred from the page layout.
+The 0.2.0-alpha.2 early source snapshot implements the following paths. Native connection requirements and capabilities remain explicit rather than inferred from the page layout.
 
 ## Four places, one application
 
 | Place | Purpose | Action boundary |
 | --- | --- | --- |
-| My AI | Summarize agents, discovered models, memory profiles, and recent work | Enter the same resource's management detail or the exact work item; New conversation opens the composer, and the rabbit icon returns here |
+| My AI | View frequently used agents and usage, or read a local briefing | Expand an agent to open its details. Usage refreshes on request. Home in the sidebar returns to the dashboard |
 | Conversations | Start, search, read, or continue work | Sending starts work; choosing a configuration stays on the same page, and refresh retains the page and browser-local draft |
 | Management and settings | Inspect resource details and maintain supported configuration | Sources and observation times belong in details; zero connections has a Connect your first agent action |
 | Rabbit specialist | Give management instructions without leaving the current work | The upper-left input stays available; its title opens the continuous history and guide |
 
 Opening or polling **My AI** reads saved directories, indexes, and cached execution facts. It does not start an agent, probe a model, or read memory content. Discovered models stay labeled as discovered; stale or unknown execution observations are not upgraded to running or idle. Only an explicit **Check and update** begins the separate report pipeline.
 
-![My AI at a narrow width](../assets/home-narrow.png)
+![Dashboard in demo mode](../assets/dashboard-demo.jpg)
 
 *Running application with invented resources and work, not a design mockup. Configure and verify it in your own environment.*
 

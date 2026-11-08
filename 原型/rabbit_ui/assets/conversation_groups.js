@@ -2,20 +2,20 @@
 (() => {
   "use strict";
   const node = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
-  function create({ api, root, filters, directory, getWorkspace, onSelect, onAssign, onError }) {
+  function create({ api, root, filters, heading, directory, getWorkspace, onSelect, onAssign, onError }) {
     let data = null, selected = null, enabled = false, scope = "", version = 0, busy = false, focus, wasInert = false;
     const button = (text, fn, ai = false) => {
       const n = node("button", "file-task-action", text); n.type = "button";
       if (ai) n.dataset.controlInterface = "ai"; n.addEventListener("click", fn); return n;
     };
     const add = button("＋", () => open(), true); add.className = "source-filter group-add";
-    add.setAttribute("aria-label", "新建对话分组"); add.title = "新建分组"; add.hidden = true; filters.append(add);
+    add.setAttribute("aria-label", "新建对话夹"); add.title = "新建对话夹"; add.hidden = true; heading.append(add);
     function render() {
       for (const n of filters.querySelectorAll(".group-filter")) n.remove();
       for (const path of data?.folders || []) {
         const n = button(path, () => select(path)); n.className = "source-filter group-filter";
         n.dataset.folder = path; n.title = path; n.classList.toggle("active", path === selected);
-        n.setAttribute("aria-pressed", String(path === selected)); filters.insertBefore(n, add);
+        n.setAttribute("aria-pressed", String(path === selected)); filters.append(n);
       }
       add.hidden = !enabled;
     }
@@ -40,8 +40,8 @@
       root.hidden = false; root.replaceChildren();
       const current = () => !root.hidden && version === stamp && getWorkspace() === workspace;
       const panel = node("div", "file-task-preview conversation-group-panel"), head = node("header", "file-task-preview-header");
-      const heading = node("h2", "", item ? "加入分组" : "新建分组"); heading.id = "conversation-group-title";
-      const dismiss = button("关闭", close); head.append(heading, dismiss); panel.append(head);
+      const title = node("h2", "", item ? "加入对话夹" : "新建对话夹"); title.id = "conversation-group-title";
+      const dismiss = button("关闭", close); head.append(title, dismiss); panel.append(head);
       const status = node("p", "file-task-note"); status.setAttribute("role", "status");
       const choices = node("div", "conversation-group-choices");
       let readRequired = false;
@@ -53,10 +53,10 @@
           for (const control of choices.querySelectorAll("button")) control.disabled = true;
         }
       };
-      const label = node("label", "conversation-group-name", "分组名称"), input = node("input", "file-task-path"); input.setAttribute("aria-label", "分组名称"); input.maxLength = 80;
+      const label = node("label", "conversation-group-name", "对话夹名称"), input = node("input", "file-task-path"); input.setAttribute("aria-label", "对话夹名称"); input.maxLength = 80;
       label.append(input);
       const controls = node("div", "file-task-actions");
-      const make = button("新建分组", async () => {
+      const make = button("新建对话夹", async () => {
         if (busy || readRequired || !current()) return;
         const name = input.value.trim();
         if (!name || /[\\/:\x00-\x1f\x7f]/.test(name) || name.startsWith(".")) { status.textContent = "请填写普通的文件夹名称。"; input.focus(); return; }
@@ -64,7 +64,7 @@
         try {
           const value = await api("/api/markdown-chats/folders", { method: "POST", body: JSON.stringify({ path: name }) }, false);
           if (!current()) return;
-          if (value?.workspace_id !== workspace || value.folder?.path !== name || typeof value.folder.created !== "boolean") throw Error("分组结果暂未确认，请重新读取文件夹。");
+          if (value?.workspace_id !== workspace || value.folder?.path !== name || typeof value.folder.created !== "boolean") throw Error("新建结果暂未确认，请重新读取对话夹。");
           await directory.readDirectory();
           if (!current()) return;
           const target = item ? await onAssign(item, name, data) : null;
@@ -92,7 +92,7 @@
             finally { busy = false; if (!root.hidden && version === stamp) { dismiss.disabled = false; make.disabled = choose.disabled = readRequired || !current(); } }
           }, true); choices.append(choose);
         }
-        if (item && !value.folders.length) choices.append(node("p", "file-task-note", "先创建一个分组。"));
+        if (item && !value.folders.length) choices.append(node("p", "file-task-note", "先新建一个对话夹。"));
       } catch (error) { if (current()) status.textContent = error.message || "文件夹暂未读出。"; }
       if (current()) input.focus();
     }

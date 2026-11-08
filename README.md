@@ -12,22 +12,22 @@ White Rabbit brings agents, models, conversations, materials, and memory into a 
 
 “All” describes the direction. The current application has experimental native routes for **Codex, Hermes, Pi, Claude Code, and DeepSeek Harness (DSH)** on one Mac. Each keeps its own supported models, tools, sessions, and approvals; the application does not make every model interchangeable with every agent.
 
-**0.2.0-alpha.1 · Blueprint 2.0 early source snapshot.** My AI brings resources and recent work together; the specialist can use Codex or DSH within one application history. Connection requirements and supported operations remain agent-specific. Configure a native agent you already use, then verify a real reply and same-conversation continuation in your own environment.
+**0.2.0-alpha.2 · Early source snapshot.** My AI now has a dashboard for frequently used agents, quotas, and usage. The specialist can use Codex or DSH within one application history. Configure a native agent you already use and verify a real reply and same-conversation continuation in your environment.
 
 **Early development release · macOS/POSIX · Python 3.11+**. The interface is still mainly Chinese; English covers basic navigation, management, and settings labels. Documentation is available in both languages.
 
 **Installing for the first time?** Start with the [beginner guide](docs/getting-started.md). You can download the source ZIP and ask an assistant with local file and command access to help. There is no double-click app installer yet. You need a Mac, Python 3.11+, and one already configured native agent; a web-only chat cannot perform local installation. The fictional demo is a separate interface preview.
 
-![My AI overview in the running application](assets/home.png)
+![My AI dashboard demo](assets/dashboard-demo.jpg)
 
-*Running application with invented resources and work, not a design mockup. Configure and verify it in your own environment.*
+*Demo of the new dashboard with fictional resources and empty account and session readings.*
 
 ## What you can do
 
-- **See your AI and recent work:** My AI summarizes agents, discovered models, memory profiles, and recent work. Open a resource's management details, continue a supported conversation, or read its exactly bound saved text.
+- **See your AI and usage.** Expand frequently used agents on the dashboard and open their management details. Search and continue conversations from the sidebar.
 - **Continue native-agent work:** use experimental connections for Codex, Hermes, Pi, Claude Code, and DeepSeek Harness, preserving their native sessions, tools, and approval rules.
 - **Find and organize project material:** search indexed histories, group related conversations, and keep Markdown references or snapshots alongside files and results.
-- **Continue between Codex and Hermes:** preview selected text, complete registered files, and original images as fixed snapshots. Prepare a draft first; only Send creates the new native conversation, with a route back to its source.
+- **Continue between Codex and Hermes.** Preview selected text, complete registered files, and original images as fixed snapshots. Send creates the new conversation. From a supported read-only source, open an existing continuation result and return to the same source.
 - **Choose AI and memory separately:** saved AI profiles describe agent/model settings; memory profiles independently select additional long-term material.
 - **Ask the Rabbit specialist:** enable one management conversation and choose Codex or DSH as its core. Both use the application's supported management interfaces; ordinary-agent support and specialist-core support are tracked separately.
 - **Reuse the parts:** take an independently packaged core into another Python application without adopting the entire White Rabbit host.
@@ -40,14 +40,17 @@ Each route retains its own sending, approval, and recovery protocol. Codex suppo
 | --- | --- | --- |
 | Ordinary AI conversations | Native routes for Codex, Hermes, Pi, Claude Code, and DSH | Login, model access, tools, attachments, and recovery are agent-specific; this is not universal support |
 | Specialist core | Codex and DSH share one application history while retaining separate native sessions; both use supported management interfaces | Tool/model availability depends on the native setup. DSH specialist shared-memory selection is unconnected; Hermes is a later option. Switching is not complete native-state migration |
-| Find existing work | My AI resource summaries and exact-item navigation; supported continuation and saved-text reading | Overview uses saved/cached facts and can remain unverified; direct control of ongoing external desktop tasks is not connected |
-| Open in the original application | Existing local Codex links identify the original thread | System handoff and the installed target application need verification in each environment. Other agents have no general opening guarantee; opening is navigation, not control of a live task |
+| Find existing work | Sidebar search, saved-text reading, and links from a source to its existing continuation result | Saved text and supported session recovery have separate entry points. Control of live external desktop tasks remains outside this release |
+| Quotas and usage | Codex and DeepSeek account cards. Hermes, Pi, and DeepSeek Harness session cards | Each source keeps its own scope and reading time. MiniMax setup separates mainland China and international accounts, with credentials for pay-as-you-go balance and subscription quota |
+| Open in the original application | Open a linked Codex thread or use the available original entry for an agent. Hermes and DSH can open their local web interfaces | Openings depend on the installed application and local environment. Links to an original interface provide navigation |
 | External work discovery | Optional, manual HAPI Hub discovery and links to the original session page | HAPI sending, approvals, and stopping remain in HAPI; discovery is not control |
 | Context and memory | Codex ↔ Hermes continuation with selected materials; Hindsight and separate Hermes document-memory routes | Continuation does not migrate internal agent state; Mem0 still needs configuration and has no automatic saving |
 | Human and AI operations | Shared application interfaces, versioned settings, and the dedicated specialist | GUI-only application operation and AI/mixed interface modes are not connected |
 | Product scope | Local Mac; device, wake-up, phone-preview entries and IM.codes-specific compatibility removed from this source snapshot | Historical phone access was not cross-device AI control; cross-computer takeover and wake-up were never implemented |
 
-Opening **My AI** reads existing directories, indexes, and cached execution facts. It does not start an agent, send a probe message, or read memory content. A discovered model is not a tested model, and unobserved external work is not assumed idle. Start with **New conversation**, or use **Connect your first agent** when nothing is connected; the rabbit icon returns to the overview.
+**My AI** shows frequently used agents, quota and usage cards, and a brief. It opens with saved facts and readings. Select **Update** to read available sources. If an update fails, the previous reading and time stay visible for the same connection. The brief opens a local article with its date and sources when one is available.
+
+Use the sidebar to start or find conversations and the management page for model and memory settings. Select **Home** at the upper left to return to the dashboard. The sidebar keeps its tabs in place and remembers where you scrolled in each section. If there are no agents, choose **查看 Agent 接入** (View agent setup).
 
 ```mermaid
 flowchart TD
@@ -73,7 +76,7 @@ Choose the core in **Settings → Rabbit specialist**. Missing conversation pros
 
 ![Specialist core selection in settings](assets/specialist.png)
 
-*Running application with invented resources and work, not a design mockup. Configure and verify it in your own environment.*
+*Earlier settings screen from the running application, with invented data.*
 
 You can ask, for example:
 
@@ -111,7 +114,7 @@ White Rabbit's program and data live in that directory. Keep the source folder f
 
 ![Fictional rule-based interface demo](assets/demo.png)
 
-*A separate rule-based preview; it does not call a real agent.*
+*Earlier screenshot of the local rule-based preview. The demo supplies simulated replies.*
 
 ```sh
 git clone https://github.com/icecinz/white-rabbit.git

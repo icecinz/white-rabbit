@@ -1,0 +1,69 @@
+.dashboard-section-heading, .dashboard-section-actions { display:flex; align-items:center; justify-content:space-between; gap:8px 14px; flex-wrap:wrap; }
+.dashboard-section-heading { margin-bottom:9px; }
+.dashboard-section-heading h2, .dashboard-waiting-title, .dashboard-brief h2, .dashboard-brief h3, .dashboard-source-head h3 { font-family:"Songti SC", "Noto Serif CJK SC", serif; margin:0; }
+.dashboard-section-heading h2 { font-size:clamp(20px,2.2vw,26px); }
+.dashboard-section-actions { margin-left:auto; justify-content:flex-end; }
+.dashboard-refresh-controls { display:flex; align-items:center; gap:6px; min-width:0; max-width:100%; }
+.dashboard-refresh-controls time { overflow-wrap:anywhere; }
+.dashboard-link, .dashboard-brief-title, .dashboard-update, .dashboard-external { display:inline-flex; align-items:center; min-height:42px; max-width:100%; background:transparent; color:var(--accent); padding:0 4px; text-align:left; overflow-wrap:anywhere; text-decoration:none; }
+.dashboard-link:hover, .dashboard-brief-title:hover, .dashboard-external:hover { text-decoration:underline; text-underline-offset:3px; }
+.dashboard-update, .dashboard-external { border:1px solid var(--border); padding:0 10px; border-radius:5px; background:var(--paper); }
+.dashboard-refresh-controls .dashboard-update { min-height:30px; padding-inline:8px; font-size:13px; white-space:nowrap; }
+.dashboard-external { color:var(--moss-text, #496249); }
+.dashboard-update[aria-disabled="true"], .dashboard-external[aria-disabled="true"] { opacity:.6; cursor:wait; }
+.dashboard-source-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(210px,100%),1fr)); gap:12px; }
+.dashboard-source-full { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.dashboard-source-card { min-width:0; padding:15px 17px; background:var(--paper); border:1px solid var(--border); border-radius:6px; overflow-wrap:anywhere; }
+.dashboard-source-card:focus-visible, .dashboard-source-located { outline:2px solid var(--accent); outline-offset:2px; }
+.dashboard-source-head { display:grid; grid-template-columns:minmax(0,1fr) fit-content(50%); align-items:center; column-gap:8px; }
+.dashboard-source-head h3 { font-size:18px; }
+.dashboard-source-head .dashboard-link { font:inherit; padding-inline:0; }
+.dashboard-source-head .dashboard-external { justify-self:end; }
+.dashboard-source-scope { grid-column:1 / -1; }
+.dashboard-source-head:has(> .dashboard-source-actions) { grid-template-rows:auto 1fr; align-items:start; }
+.dashboard-source-head:has(> .dashboard-source-actions) h3 { display:flex; align-items:center; min-height:42px; }
+.dashboard-source-head:has(> .dashboard-source-actions) .dashboard-source-scope { grid-column:1; }
+.dashboard-source-actions { grid-area:1 / 2 / span 2; display:flex; flex-direction:column; align-items:flex-end; gap:6px; }
+.dashboard-muted, .dashboard-source-message, .dashboard-empty { font-size:13px; line-height:1.55; color:var(--muted); }
+.dashboard-source-head p, .dashboard-empty { margin:4px 0; }
+.dashboard-scope-label { display:inline-block; margin-inline-end:6px; border:1px solid var(--border); border-radius:3px; padding:0 5px; color:var(--accent); font-size:11px; vertical-align:1px; }
+.dashboard-empty { padding:7px 0; }
+.dashboard-empty .dashboard-link { margin-inline-start:12px; }
+.dashboard-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(105px,100%),1fr)); gap:12px; margin:14px 0; }
+.my-ai-usage .dashboard-metrics:last-child { margin-bottom:0; }
+.dashboard-metric { min-width:0; }
+.dashboard-metric dt { color:var(--muted); font-size:12px; }
+.dashboard-metric dd { margin:4px 0 0; }
+.dashboard-value { font:500 clamp(23px,2.6vw,32px)/1.15 "Songti SC", Georgia, serif; font-variant-numeric:tabular-nums; }
+.dashboard-unit { margin-inline-start:6px; color:var(--muted); font:12px/1.4 system-ui,sans-serif; }
+.dashboard-metric-note, .dashboard-source-foot { display:flex; flex-wrap:wrap; gap:4px 10px; }
+.dashboard-breakdown, .dashboard-source-foot { border-top:1px solid var(--border); padding-top:8px; margin-top:12px; }
+.dashboard-breakdown h4 { margin:0 0 4px; font-weight:500; }
+.dashboard-breakdown summary { cursor:pointer; color:var(--accent); }
+.dashboard-breakdown dl { margin:0; }
+.dashboard-daily-note { margin:6px 0 3px; }
+.dashboard-daily-list { max-height:15em; overflow:auto; padding-inline-end:5px; }
+.dashboard-breakdown .dashboard-metric { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+.dashboard-breakdown .dashboard-value { font:13px/1.6 system-ui,sans-serif; }
+.dashboard-metric-read-at { display:block; text-align:end; }
+.dashboard-source-message { margin:7px 0 0; }
+.dashboard-source-links { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+.dashboard-minimax-form { display:grid; gap:8px; margin-top:8px; }
+.dashboard-minimax-form label { display:grid; gap:3px; }
+.dashboard-minimax-form input, .dashboard-minimax-form select { width:100%; min-width:0; padding:8px; border:1px solid var(--border); border-radius:5px; background:var(--paper); color:var(--ink); }
+.dashboard-minimax-form button { justify-self:start; }
+.dashboard-minimax-form p { margin:0; }
+.dashboard-minimax-form p:empty { display:none; }
+.dashboard-waiting-title { margin:20px 0 9px; font-size:18px; }
+.dashboard-source-waiting .dashboard-source-card { background:var(--panel); }
+.dashboard-brief { max-width:740px; border:1px solid var(--border); border-left:3px solid var(--moss,#60775f); border-radius:6px; background:var(--paper); padding:14px 20px; overflow-wrap:anywhere; }
+.dashboard-brief-full { padding:clamp(16px,3.4vw,30px); }
+.dashboard-brief-mirror { display:block; }
+.dashboard-brief h2 { margin-top:8px; font-size:clamp(23px,3vw,30px); }
+.dashboard-brief-title { font:inherit; font-size:clamp(19px,2.2vw,23px); padding-inline:0; }
+.dashboard-brief-lead { color:var(--moss-text,#496249); line-height:1.75; margin:4px 0 10px; }
+.dashboard-brief-text { line-height:1.85; }
+.dashboard-brief-text pre, .dashboard-brief-text table { max-width:100%; overflow:auto; }
+.dashboard-brief-text a { display:inline-block; padding-block:10px; min-height:42px; color:var(--accent); }
+@media(max-width:720px) { .dashboard-source-grid { grid-template-columns:minmax(0,1fr); } .dashboard-refresh-controls .dashboard-update { min-height:42px; } }
+@media(max-width:430px) { .dashboard-section-heading { gap:2px 6px; } .dashboard-section-actions { gap:5px; } .dashboard-source-card, .dashboard-brief { padding-inline:12px; } }

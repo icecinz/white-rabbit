@@ -88,7 +88,7 @@ def _agents(service, profiles):
     return result
 
 
-def snapshot(service):
+def snapshot(service, *, dashboard=False):
     """Read the already-owned service's metadata, without calling refresh APIs."""
     issues = []
     try:
@@ -98,28 +98,30 @@ def snapshot(service):
     except Exception:
         ai = []
         issues.append('saved_ai_profiles_unavailable')
-    try:
-        # Saved parameters only: list() does not access a Bank or its content.
-        source = service.memory_profiles.list()['profiles']
-        memories = [{key: deepcopy(row[key]) for key in _MEMORY_FIELDS if key in row}
-                    for row in source]
-    except Exception:
-        memories = []
-        issues.append('saved_memory_profiles_unavailable')
+    memories = []
+    if not dashboard:
+        try:
+            # Saved parameters only: list() does not access a Bank or its content.
+            source = service.memory_profiles.list()['profiles']
+            memories = [{key: deepcopy(row[key]) for key in _MEMORY_FIELDS if key in row}
+                        for row in source]
+        except Exception:
+            issues.append('saved_memory_profiles_unavailable')
     models, model_age = _cached_models(service, issues)
     try:
         capabilities = deepcopy(service._native_profile_capabilities())
     except Exception:
         capabilities = {}
         issues.append('native_catalogue_cache_unavailable')
-    try:
-        source = service.library.list(query='', agent='all', offset=0, limit=12, include_internal=False)
-        recent = {key: deepcopy(source.get(key)) for key in ('total', 'next_offset', 'revision')}
-        recent['items'] = [{key: deepcopy(row[key]) for key in _RECENT_FIELDS if key in row}
-                           for row in source['items']]
-    except Exception:
-        recent = {'items': [], 'total': None, 'next_offset': None, 'revision': None}
-        issues.append('recent_work_unavailable')
+    recent = {'items': [], 'total': None, 'next_offset': None, 'revision': None}
+    if not dashboard:
+        try:
+            source = service.library.list(query='', agent='all', offset=0, limit=12, include_internal=False)
+            recent = {key: deepcopy(source.get(key)) for key in ('total', 'next_offset', 'revision')}
+            recent['items'] = [{key: deepcopy(row[key]) for key in _RECENT_FIELDS if key in row}
+                               for row in source['items']]
+        except Exception:
+            issues.append('recent_work_unavailable')
     try:
         work = native_work_status.snapshot(service)
     except Exception:

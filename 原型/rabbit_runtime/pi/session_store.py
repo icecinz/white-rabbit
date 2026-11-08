@@ -25,9 +25,11 @@ from ..native_session_store import (NativeSessionStoreError, open_directory as _
     validate_path as _path, validate_token as _token)
 from .material_protocol import request_sha256, PiMaterialProtocolError
 
+from ..scope_anchors import ScopeAnchors, ScopeAnchorError
+
 
 APPLICATION_ID = 0x52504E53  # RPNS; separate from shared chat and Codex ledgers.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_RESULT_BYTES = 128 * 1024
 _MAX_SAVED_BYTES = MAX_RESULT_BYTES * 6 + 4096
 PENDING = frozenset(('submitted_unknown', 'accepted'))
@@ -91,7 +93,9 @@ _DDL_V1 = (
 )
 _RESULT_DDL = ('ALTER TABLE pi_operations ADD COLUMN result_json TEXT',
                'ALTER TABLE pi_operations ADD COLUMN result_sha256 TEXT')
-_DDL = _DDL_V1 + _RESULT_DDL
+_DDL_V2 = _DDL_V1 + _RESULT_DDL
+_ANCHOR_DDL = ScopeAnchors.ddl('pi_bindings', 'chat_id')
+_DDL = _DDL_V2 + (_ANCHOR_DDL,)
 _OPERATION_COLUMNS = 'client_id,chat_id,request_sha256,status,created_at,updated_at'
 
 
@@ -110,6 +114,7 @@ def _expected_schema(ddl):
 
 
 _EXPECTED_SCHEMA_V1 = _expected_schema(_DDL_V1)
+_EXPECTED_SCHEMA_V2 = _expected_schema(_DDL_V2)
 _EXPECTED_SCHEMA = _expected_schema(_DDL)
 
 
@@ -152,6 +157,7 @@ class PiNativeStore:
             raise PiStoreError('invalid_arguments')
         self.readonly, self.lock = readonly, threading.RLock()
         self._closed, self._owner_pid = False, os.getpid()
+        self._anchors = ScopeAnchors()
         self._parent_fd = self._file_fd = self._lock_fd = None
         self._lock_name = '.' + self.path.name + '.lock'
         created = False
@@ -248,22 +254,25 @@ class PiNativeStore:
                     db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
                 else:
                     version = db.execute('PRAGMA user_version').fetchone()[0]
-                    expected = {1: _EXPECTED_SCHEMA_V1, 2: _EXPECTED_SCHEMA}.get(version)
+                    expected = {1: _EXPECTED_SCHEMA_V1, 2: _EXPECTED_SCHEMA_V2, 3: _EXPECTED_SCHEMA}.get(version)
                     if (db.execute('PRAGMA application_id').fetchone()[0] != APPLICATION_ID
                             or expected is None or _schema(db) != expected):
                         raise PiStoreError('invalid_schema')
                     if not write:
                         db.execute('PRAGMA query_only=ON')
                     db.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
-                    if version == 1 and write:
+                    if version < SCHEMA_VERSION and write:
                         if not migrate:
                             raise PiStoreError('invalid_schema')
-                        for sql in _RESULT_DDL:
-                            db.execute(sql)
+                        if version == 1:
+                            for sql in _RESULT_DDL:
+                                db.execute(sql)
+                        db.execute(_ANCHOR_DDL)
                         db.execute('PRAGMA user_version=' + str(SCHEMA_VERSION))
                         if _schema(db) != _EXPECTED_SCHEMA:
                             raise PiStoreError('invalid_schema')
-                yield db
+                with self._anchors.transaction():
+                    yield db
                 self._check_path()
                 if write:
                     db.commit()
@@ -273,7 +282,7 @@ class PiNativeStore:
                 raise PiStoreError('conflict') from None
             except sqlite3.Error:
                 raise PiStoreError('io_failed') from None
-            except (OSError, NativeSessionStoreError):
+            except (OSError, NativeSessionStoreError, ScopeAnchorError):
                 raise PiStoreError('scope_changed') from None
             finally:
                 if db is not None:
@@ -281,20 +290,17 @@ class PiNativeStore:
                         db.rollback()
                     db.close()
 
-    @staticmethod
-    def _binding(db, chat_id):
+    def _binding(self, db, chat_id, *, current=False, seed=False):
         row = db.execute('SELECT * FROM pi_bindings WHERE chat_id=?', (chat_id,)).fetchone()
         if row is None:
             return None
         result = dict(row)
         _uuid(result['chat_id'])
         for prefix in ('cwd', 'session_dir'):
-            descriptor = _directory(_path(result[prefix]))
-            try:
-                if _identity(os.fstat(descriptor)) != (result[prefix+'_device'], result[prefix+'_inode']):
-                    raise PiStoreError('scope_changed')
-            finally:
-                os.close(descriptor)
+            observed = self._anchors.verify(db, chat_id, prefix, str(_path(result[prefix])),
+                (result[prefix+'_device'], result[prefix+'_inode']), seed=seed)
+            if current:
+                result[prefix+'_device'], result[prefix+'_inode'] = observed
         if (result['session_file'] is None) != (result['session_id'] is None):
             raise PiStoreError('invalid_schema')
         if result['session_file'] is not None:
@@ -331,19 +337,32 @@ class PiNativeStore:
         except OSError:
             raise PiStoreError('scope_changed') from None
         with self._db(write=True) as db:
-            old = self._binding(db, chat_id)
+            old = self._binding(db, chat_id, current=True, seed=True)
             expected = (str(cwd), *identities[:2], str(session_dir), *identities[2:])
             if old:
                 if tuple(old[k] for k in ('cwd','cwd_device','cwd_inode','session_dir','session_dir_device','session_dir_inode')) != expected:
                     raise PiStoreError('conflict')
-                return old
+                return self._binding(db, chat_id)
             now = _stamp()
             db.execute('INSERT INTO pi_bindings VALUES(?,?,?,?,?,?,?,NULL,NULL,?,?)', (chat_id, *expected, now, now))
-            return self._binding(db, chat_id)
+            return self._binding(db, chat_id, seed=True)
 
     def binding(self, chat_id):
         with self._db() as db:
             return self._binding(db, _uuid(chat_id))
+
+    def current_binding(self, chat_id):
+        """Verified current filesystem observations; original binding rows stay intact."""
+        with self._db() as db:
+            return self._binding(db, _uuid(chat_id), current=True)
+
+    def seed_matching_anchors(self):
+        """Explicitly register all currently matching legacy directories atomically."""
+        with self._db(write=True, migrate=True) as db:
+            identities = [row[0] for row in db.execute('SELECT chat_id FROM pi_bindings ORDER BY chat_id')]
+            for identity in identities:
+                self._binding(db, identity, seed=True)
+            return {'bindings': len(identities), 'anchors': len(identities) * 2}
 
     def sources(self):
         """Persisted native IDs only; do not inspect session files or cwd."""
@@ -364,6 +383,17 @@ class PiNativeStore:
                      **({'activity_at': row['activity_at']} if include_activity else {})}
                     for row in db.execute('SELECT b.chat_id,b.session_id' + activity + ' FROM pi_bindings b' + join +
                         ' WHERE b.session_id IS NOT NULL ORDER BY b.session_id')]
+
+    def latest_source_binding(self):
+        """Read the latest exact native binding, with existing scope checks."""
+        with self._db() as db:
+            row = db.execute('''SELECT b.chat_id FROM pi_bindings b
+                WHERE b.session_id IS NOT NULL
+                ORDER BY MAX(b.updated_at, COALESCE((SELECT MAX(o.updated_at)
+                    FROM pi_operations o WHERE o.chat_id=b.chat_id AND o.status IN
+                    ('accepted','completed','failed','interrupted')), b.updated_at)) DESC,
+                    b.chat_id LIMIT 1''').fetchone()
+            return self._binding(db, _uuid(row['chat_id']), current=True) if row is not None else None
 
     def adopt(self, chat_id, cwd, session_dir, session_file, session_id):
         """Atomically reserve an existing identity, without an operation receipt.
@@ -387,7 +417,7 @@ class PiNativeStore:
             info = os.fstat(fd); self._regular(info)
             expected = (str(cwd), *identities[:2], str(session_dir), *identities[2:], str(path), session_id)
             with self._db(write=True) as db:
-                old = self._binding(db, chat_id)
+                old = self._binding(db, chat_id, current=True, seed=True)
                 if db.execute('SELECT 1 FROM pi_operations WHERE chat_id=?', (chat_id,)).fetchone():
                     raise PiStoreError('conflict')
                 if old is not None:
@@ -401,7 +431,7 @@ class PiNativeStore:
                 self._regular(current)
                 if _identity(current) != _identity(info):
                     raise PiStoreError('scope_changed')
-                return self._binding(db, chat_id)
+                return self._binding(db, chat_id, seed=True)
         except PiStoreError:
             raise
         except NativeSessionStoreError:
@@ -472,8 +502,7 @@ class PiNativeStore:
         with self._db() as db:
             return self._operation(db, client_id)
 
-    @staticmethod
-    def _saved_result(db, receipt):
+    def _saved_result(self, db, receipt):
         if db.execute('PRAGMA user_version').fetchone()[0] == 1:
             return None
         row = db.execute('''SELECT result_sha256,length(CAST(result_json AS BLOB)) AS size,
@@ -493,7 +522,7 @@ class PiNativeStore:
                     or any(identity[key] != receipt[key] for key in ('chat_id', 'client_id', 'request_sha256'))):
                 raise ValueError
             validate_session_id(identity['session_id'])
-            binding = PiNativeStore._binding(db, receipt['chat_id'])
+            binding = self._binding(db, receipt['chat_id'])
             if binding is None or binding['session_id'] != identity['session_id']:
                 raise ValueError
             result = _completion(receipt, value['result'])
@@ -600,6 +629,7 @@ class PiNativeStore:
             if self._closed:
                 return
             self._closed = True
+            self._anchors.close()
             # Close, rather than LOCK_UN, so a forked child's cleanup cannot
             # release its parent's shared open-file-description lock.
             for field in ('_file_fd', '_lock_fd', '_parent_fd'):

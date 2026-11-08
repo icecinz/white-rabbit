@@ -100,7 +100,7 @@
         || identity(file) !== identity(source) || file.folder !== file.path.split("/").slice(0, -1).join("/")) throw Error("这段对话的唯一文件和版本暂不可核对，请重新读取。");
     const from = movePath(file.path), to = movePath((folder ? folder + "/" : "") + from.split("/").at(-1));
     if (from === to) return false;
-    if (getWorkspace() !== workspace) throw Error("工作区已变化，请重新选择分组。");
+    if (getWorkspace() !== workspace) throw Error("工作区已变化，请重新选择对话夹。");
     const request = { binding_id: binding.publication_id, expected_head_id: binding.head_id,
       source_path: from, source_sha256: file.sha256, target_folder: folder };
     try {
@@ -251,7 +251,7 @@
         if (row.paths.length > 1) target.append(node("p", "file-task-note", row.paths.join(" · ")));
       }
       tree.append(groups);
-      if (!data.chats.length) tree.append(node("p", "file-task-note", "还没有已核验的整理文件。在共同聊天或原生对话中选择“整理到文件夹”。"));
+      if (!data.chats.length) tree.append(node("p", "file-task-note", "还没有已核验的整理文件。在共同聊天或原生对话中选择“整理到对话夹”。"));
       if (!data.complete || data.issues.length) tree.append(node("p", "file-task-error", "目录存在无法完整核对的条目；不会据此删除或重建文件。"));
       if (data.unregistered.length) tree.append(node("p", "file-task-note", `另有 ${data.unregistered.length} 份未登记或其他工作区的文件；未自动导入。`));
       for (const raw of data.publications) {
@@ -310,9 +310,9 @@
       const shell = document.querySelector(".app-shell"); if (shell) { shellWasInert = shell.inert; shell.inert = true; }
       const panel = node("div", "file-task-preview markdown-chats-panel"), head = node("header", "file-task-preview-header");
       const grouping = options?.group === true && selected && !syncing(selected);
-      const title = node("h2", "", grouping ? "加入分组" : "对话文件夹"); title.id = "markdown-chats-title";
+      const title = node("h2", "", grouping ? "加入对话夹" : "对话夹"); title.id = "markdown-chats-title";
       head.append(title, action("关闭", close, false)); panel.append(head);
-      panel.append(node("p", "file-task-note", grouping ? `分组：${selectedFolder}` : "对话按真实文件夹整理。"));
+      panel.append(node("p", "file-task-note", grouping ? `对话夹：${selectedFolder}` : "对话按真实文件夹整理。"));
       rootPath = node("p", "file-task-note markdown-root"); panel.append(rootPath);
       status = node("p", "file-task-note"); status.setAttribute("role", "status");
       form = node("section"); form.hidden = !source;
@@ -320,7 +320,7 @@
       destination.value = initialPath;
       destination.addEventListener("input", () => { prepared = null; preview.textContent = ""; controls(); });
       check = action(syncing(source) ? "预览最新完整内容" : "检查并预览全文", prepare); confirm = action(syncing(source) ? "确认更新这份文件" : "确认创建整理文件", () => submit());
-      if (grouping) { destination.hidden = check.hidden = true; confirm.textContent = "加入分组"; }
+      if (grouping) { destination.hidden = check.hidden = true; confirm.textContent = "加入对话夹"; }
       preview = node("pre", "markdown-chat-preview");
       const detail = node("details"); detail.append(node("summary", "", "完整 Markdown 内容"), preview);
       form.append(node("p", "file-task-note", source?.title || ""), destination, check, confirm, detail);

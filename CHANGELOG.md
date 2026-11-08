@@ -1,5 +1,25 @@
 # Public snapshots · 公开更新
 
+## 0.2.0-alpha.2 — 2026-11-08
+
+- My AI now shows frequently used agents, quotas and usage, and a brief. Expand an agent to open its management details. Conversations stay in the sidebar, with model and memory settings in Management.
+- The dashboard displays Codex subscription quotas and account usage, DeepSeek account balances, and session usage from Hermes, Pi, and DeepSeek Harness. It reads new values on request and keeps each source’s scope and reading time. Successful readings in the same minute can share a time beside Update. After a failed update, the same connection can retain its previous reading and time.
+- MiniMax has separate mainland China and international settings. Configure the matching credentials for pay-as-you-go balances or subscription quotas.
+- Original application shortcuts include local web interfaces for Hermes and DeepSeek Harness. The sidebar keeps its tabs in place and remembers each section’s scroll position.
+- A supported read-only conversation can open its existing continuation result and return to the same source. Search position and drafts are retained.
+- Conversation folders and native workspaces use persistent directory identity where available. The content package can be installed independently, and the source package includes an empty conversation folder for setup.
+- A pixel rabbit appears in the Home button. Settings → About shows the project’s birthday and age, with the splits illustration under Core ability. The brief reads a local article with its date and sources. Automatic collection and publication are outside this release.
+
+### 中文
+
+- “我的 AI”改成仪表盘，放常用 Agent、额度与用量和简报。展开 Agent 可以进入对应的管理详情。对话仍在左栏，模型和记忆配置在管理页。
+- Codex 显示订阅额度和账户用量，DeepSeek 显示账户余额。Hermes、Pi 和 DeepSeek Harness 显示会话用量。点更新才读取新值，各来源保留自己的范围和读取时间。同一分钟读到的多项结果可以在更新按钮旁共用一个时间。更新失败时，同一连接可以保留上次读数和时间。
+- MiniMax 可以按中国大陆或国际地区配置。按量余额和套餐额度分别使用对应的凭据。
+- Hermes 和 DeepSeek Harness 可以从原应用入口打开本机网页。左栏标签固定，各区分别记住滚动位置。
+- 支持的只读对话可以打开已有的接续结果，再回到同一段原文。原来的搜索位置和草稿保留。
+- 对话文件夹和原生工作区会在有可靠信息时使用持久的目录身份。内容模块可以单独安装，源码包附有空的对话文件夹，供首次配置使用。
+- 左上的首页按钮里加了像素兔。“设置 → 关于”显示项目生日和年龄，“核心能力”里可以看劈叉图。简报读取带日期和来源的本地文稿，自动收集和发布暂不在这版里。
+
 ## 0.2.0-alpha.1 — 2026-11-03
 
 Early Blueprint 2.0 source snapshot. Configure and verify native connections in your own environment; supported application interfaces do not replace agent authentication or permissions.

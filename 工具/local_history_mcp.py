@@ -35,6 +35,14 @@ HISTORY_NOTICE = (
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_SOURCE_LINE_BYTES = 8 * 1024 * 1024
 CONTENT_JSON_PREFIX = "\x00json:"
+APP_TASK_PHASE = 'app_task_context'
+# This envelope is an application-declared source, never proof of parentage or
+# a human-authored role. Keep this grammar aligned with history_records.py.
+_APP_TASK_ENVELOPE = re.compile(
+    r'\A\s*<codex_delegation>\s*<source_thread_id>'
+    r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})'
+    r'</source_thread_id>\s*<input>([\s\S]*)</input>\s*</codex_delegation>\s*\Z')
+_APP_TASK_RESERVED_TAG = re.compile(r'</?(?:codex_delegation|source_thread_id|input)(?=[\s/>])')
 TEXT_BLOCK_TYPES = {"input_text", "output_text", "text"}
 ATTACHMENT_BLOCK_TYPES = {
     "input_image", "output_image", "image", "image_url", "local_image",
@@ -68,6 +76,26 @@ def redact(text):
     for pattern, replacement in SECRET_PATTERNS:
         value = pattern.sub(replacement, value)
     return value
+
+
+def codex_app_task(output):
+    """Recognize one complete, unambiguous app task without decoding its input."""
+    if not isinstance(output, str):
+        return None
+    match = _APP_TASK_ENVELOPE.fullmatch(output)
+    if not match or not match[2].strip() or _APP_TASK_RESERVED_TAG.search(match[2]):
+        return None
+    try:
+        output.encode('utf-8')
+    except UnicodeEncodeError:
+        return None
+    return {'declared_source_thread_id': match[1], 'input': match[2]}
+
+
+def _app_task_id(value):
+    return (isinstance(value, str) and 1 <= len(value) <= 256
+            and not any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127
+                        or 0xd800 <= ord(ch) <= 0xdfff for ch in value))
 
 
 def timestamp(value):
@@ -559,6 +587,7 @@ def save_native_attachments(connection, agent, session_id, message_id, role, whe
 
 def ingest_codex(connection, codex_root, stats, *, snapshot=None):
     root = Path(codex_root).expanduser()
+    app_task_identities = {}
     for subdirectory, archived in (("sessions", False), ("archived_sessions", True)):
         directory = root / subdirectory
         if snapshot is None and not directory.exists():
@@ -602,6 +631,30 @@ def ingest_codex(connection, codex_root, stats, *, snapshot=None):
                                          parent=find_parent(payload), forked=payload.get("forked_from_id"),
                                          archived=archived, started=timestamp(payload.get("timestamp") or record.get("timestamp")),
                                          source_path=path)
+                        elif (session_id and record.get('type') == 'response_item'
+                              and payload.get('type') == 'function_call_output'
+                              and payload.get('namespace') == 'codex_app'
+                              and payload.get('name') in ('create_thread', 'send_message_to_thread')
+                              and _app_task_id(payload.get('id'))):
+                            identity, output = payload['id'], payload.get('output')
+                            # Compare before redaction, including malformed copies. Never
+                            # index metadata, event mirrors, call_id or other tool output.
+                            fingerprint = hashlib.sha256(json.dumps(
+                                [payload['name'], output], ensure_ascii=True, sort_keys=True,
+                                separators=(',', ':')).encode('utf-8')).digest()
+                            key = (session_id, identity)
+                            known_app_task = key in app_task_identities
+                            previous = app_task_identities.setdefault(key, fingerprint)
+                            existing = _native_message_exists(connection, 'codex', session_id, identity)
+                            if previous != fingerprint or (existing and not known_app_task):
+                                raise RuntimeError('Codex application task identity conflict; previous index retained')
+                            if codex_app_task(output) is None:
+                                continue
+                            wrote = save_message(connection, 'codex', session_id, identity, 'user',
+                                timestamp(record.get('timestamp')), output, path, line_number, line_number,
+                                APP_TASK_PHASE)
+                            stats['codex_messages_added'] += wrote
+                            stats['duplicates_skipped'] += 1 - wrote
                         elif (session_id and record.get("type") == "response_item"
                               and payload.get("type") == "message"
                               and payload.get("role") in ("user", "assistant")):
@@ -621,6 +674,8 @@ def ingest_codex(connection, codex_root, stats, *, snapshot=None):
                                 else:
                                     identity = native_image_message_id(when, role, payload.get("phase", ""), described["attachments"])
                             duplicate = _native_message_exists(connection, "codex", session_id, identity)
+                            if (session_id, identity) in app_task_identities:
+                                raise RuntimeError('Codex application task identity conflict; previous index retained')
                             if text.strip():
                                 wrote = save_message(connection, "codex", session_id, identity,
                                                      role, when, text, path, line_number, line_number,

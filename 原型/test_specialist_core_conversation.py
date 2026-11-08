@@ -178,10 +178,73 @@ class ConversationTests(unittest.TestCase):
 
     def test_capacity_rejects_complete_history_before_target_open_without_truncation(self):
         self.codex.rows[0]['item']['content'][0]['text']='字'*MAX_CONTEXT_BYTES
+        cursor=self.conversation.state['cores']['dsh']['received_seq']
         with self.assertRaises(SpecialistHTTPError) as error:self.switch('dsh')
         self.assertEqual(error.exception.code,'specialist_core_context_capacity')
+        self.assertIn('待补前文序号 1–2（2条正文）无法整体带入',str(error.exception))
+        self.assertRegex(str(error.exception),r'完整输入需\d+字节，程序单次上限98304字节')
+        self.assertNotIn('字'*16,str(error.exception))
         self.assertEqual(self.factories,0)
         self.assertEqual(self.conversation.current_core,'codex')
+        self.assertEqual(self.conversation.state['cores']['dsh']['received_seq'],cursor)
+
+    def test_capacity_explains_exact_missing_sequence_span_and_utf8_bytes_without_prose(self):
+        import rabbit_specialist.core_conversation as module
+        self.conversation.state['entries']=[
+            {'seq':1,'kind':'message','role':'user','text':'前文私密甲'*200,'core':'codex','source_id':'first'},
+            {'seq':2,'kind':'core_switch','core':'codex','text':'核心已切换为 Codex'},
+            {'seq':3,'kind':'message','role':'assistant','text':'前文私密乙'*200,'core':'codex','source_id':'last'}]
+        user='本轮私密输入。'
+        before=deepcopy(self.conversation.state);disk=self.path.read_bytes()
+        complete=self.conversation._context('dsh',user);required=len(complete.encode('utf-8'))
+        with patch.object(module,'MAX_CONTEXT_BYTES',required):
+            self.assertEqual(self.conversation._context('dsh',user),complete)
+        with patch.object(module,'MAX_CONTEXT_BYTES',required-1):
+            with self.assertRaises(SpecialistHTTPError) as failure:self.conversation._context('dsh',user)
+        message=str(failure.exception)
+        self.assertIn('待补前文使完整输入超限',message)
+        self.assertIn('待补前文序号 1–3（2条正文）无法整体带入',message)
+        self.assertIn(f'完整输入需{required}字节，程序单次上限{required-1}字节',message)
+        self.assertIn(f'本轮输入{len(user.encode("utf-8"))}字节',message)
+        for private in ['前文私密甲','前文私密乙','本轮私密输入']:self.assertNotIn(private,message)
+        self.assertEqual(self.conversation.state,before)
+        self.assertEqual(self.path.read_bytes(),disk)
+        self.assertEqual(self.factories,0);self.assertEqual(self.inner.sent,[])
+
+    def test_current_request_and_real_directory_target_overflow_is_not_called_missing_history(self):
+        import rabbit_specialist.core_conversation as module
+        self.refresh()
+        asset=Path(__file__).parent/'rabbit_ui/assets/specialist_context.js'
+        script="const fs=require('fs'),vm=require('vm');global.window={};vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(window.RabbitSpecialistContext.block({schema_version:2,workspace_id:'e'.repeat(64),target:{kind:'agent_instance',agent_instance_id:'local/dsh'},observed:null}));"
+        block=subprocess.run(['node','-e',script,str(asset)],check=True,capture_output=True,text=True).stdout
+        user='容量私密当前请求。';parts=[{'type':'text','text':user},{'type':'text','text':block}]
+        required=len((user+'\n\n'+block).encode('utf-8'))
+        before=deepcopy(self.conversation.state);disk=self.path.read_bytes()
+        with patch.object(module,'MAX_CONTEXT_BYTES',required-1):
+            with self.assertRaises(SpecialistHTTPError) as failure:self.conversation.dispatch('POST','/api/specialist/send',
+                body={'client_id':'specialist/ui/'+str(uuid.uuid4()),'inputs':parts})
+        message=str(failure.exception)
+        self.assertIn('本轮输入（当前请求与当前目标）自身已超限',message)
+        self.assertIn('没有待补前文',message)
+        self.assertIn(f'完整输入需{required}字节，程序单次上限{required-1}字节',message)
+        self.assertIn('接续说明及封装0字节，前文编码增量0字节',message)
+        self.assertNotIn(user,message);self.assertNotIn('local/dsh',message)
+        self.assertEqual(self.conversation.state,before);self.assertEqual(self.path.read_bytes(),disk)
+        self.assertEqual(self.inner.sent,[]);self.assertEqual(self.factories,0)
+
+    def test_no_history_with_specialist_wrapper_overflow_is_identified_separately(self):
+        import rabbit_specialist.core_conversation as module
+        before=deepcopy(self.conversation.state);disk=self.path.read_bytes();user='私密本轮。'
+        required=len(self.conversation._context('dsh',user).encode('utf-8'))
+        with patch.object(module,'MAX_CONTEXT_BYTES',required-1):
+            with self.assertRaises(SpecialistHTTPError) as failure:self.conversation._context('dsh',user)
+        message=str(failure.exception)
+        self.assertIn('本轮输入与接续说明已超限',message)
+        self.assertIn('没有待补前文',message)
+        self.assertIn(f'完整输入需{required}字节，程序单次上限{required-1}字节',message)
+        self.assertNotIn(user,message)
+        self.assertEqual(self.conversation.state,before);self.assertEqual(self.path.read_bytes(),disk)
+        self.assertEqual(self.factories,0);self.assertEqual(self.inner.sent,[])
 
     def test_target_failure_keeps_original_core_history_and_no_marker(self):
         self.dsh.fail=True

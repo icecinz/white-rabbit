@@ -195,7 +195,7 @@ class HermesNativeHolder:
 
     def _confirm_native_draft(self, draft):
         identity = draft['identity']
-        binding = self.store.binding(self.identity)
+        binding = self.store.current_binding(self.identity)
         if (identity['cwd'] != binding['cwd'] or identity['profile_home'] != binding['profile_home']
                 or binding['session_key'] not in (None, identity['session_key'])):
             raise _error('draft_identity', 'Hermes初始会话身份与原生绑定不同，未另起替代会话。')
@@ -579,7 +579,7 @@ class HermesNativeHolder:
 
     def _advance_key(self, key):
         key = _session_id(key)
-        binding = self.store.binding(self.identity)
+        binding = self.store.current_binding(self.identity)
         expected = self._live_key or binding['session_key']
         if expected is not None and key != expected:
             check = dict(binding, session_key=expected)
@@ -615,7 +615,7 @@ class HermesNativeHolder:
         if type(value.get('info')) is not dict or value['info'].get('cwd') != binding['cwd']:
             raise _error('identity_changed', 'Hermes原生工作目录与这段对话不符。', status=503)
         self._advance_key(value.get('session_key'))
-        binding = self.store.binding(self.identity)
+        binding = self.store.current_binding(self.identity)
         if binding['session_key'] is not None: _native_keys(binding, target=self._live_key)
         with self._cache:
             self._native_state, self._messages = _public_state(value), _copy(value['messages'])
@@ -669,19 +669,19 @@ class HermesNativeHolder:
                 raise _error('attachment_pending', '旧原图阶段尚未结束，不能另建后台或按标题恢复。', unsent=False)
             if self._rpc is not None or self.store.pending(self.identity):
                 raise _error('pending', 'Hermes原连接或旧请求仍待确认，不能恢复或另起替代会话。')
-            binding = self.store.binding(self.identity)
+            binding = self.store.current_binding(self.identity)
             if self._profiles_enabled:
                 draft = self.profile_intents.draft(self.identity)
                 if draft is not None and binding['session_key'] is None:
                     self._confirm_native_draft(draft)
-                    binding = self.store.binding(self.identity)
+                    binding = self.store.current_binding(self.identity)
             # Exact metadata proof precedes resume: native resume otherwise
             # falls back to a title and may auto-continue an interrupted turn.
             chain = _native_keys(binding) if binding['session_key'] else []
             previous = binding['session_key']
             for successor in chain[1:]:
                 self.store.attach(self.identity, successor, previous=previous); previous = successor
-            binding = self.store.binding(self.identity)
+            binding = self.store.current_binding(self.identity)
             self._state, self._epoch = 'opening', secrets.token_hex(16)
             try:
                 self._rpc = self.connection.create_rpc(cwd=binding['cwd'], home=binding['profile_home'])

@@ -89,7 +89,7 @@
       quoteHistoryButton.textContent = text("引用其他对话", "Quote another chat");
       quoteHistoryButton.hidden = !["codex", "pi", "hermes", "claude", "dsh"].includes(agent) || typeof onQuoteHistory !== "function";
       quoteHistoryButton.disabled = !enabled || !visible || settingsVisible || !catalogReadable || reading || creating || !selectedRow;
-      organizeButton.textContent = text("整理到文件夹", "Organize in folders");
+      organizeButton.textContent = text("整理到对话夹", "Organize in folders");
       organizeButton.hidden = typeof onOrganize !== "function" || !canOrganize();
       organizeButton.disabled = !enabled || !visible || !catalogReadable || reading || creating || !selectedRow;
       const draft = nameDrafts.get(selected), editing = nameOpen === selected && !!draft, checking = nameRead?.id === selected, savingName = nameSaves.has(selected);

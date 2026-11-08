@@ -55,6 +55,56 @@ def insert_native_images(path, agent, sid, mid, *, role='user', ordinal=2,
     return descriptions
 
 
+class AppTaskPresentationTests(unittest.TestCase):
+    def test_application_task_displays_input_with_declared_source_and_never_becomes_user(self):
+        source = '11111111-2222-4333-8444-555555555555'
+        text = '虚构任务原文\n保留第二行 &amp; <note>示例</note>'
+        wrapper = '<codex_delegation><source_thread_id>' + source + '</source_thread_id><input>' + text + '</input></codex_delegation>'
+        result = display_message(wrapper, 'codex', 'user', phase='app_task_context')
+        self.assertEqual(result['display_content'], text)
+        self.assertEqual(result['message_kind'], 'app_task_context')
+        self.assertEqual(result['declared_source_thread_id'], source)
+        self.assertIn('非用户逐字消息', result['source_kind'])
+        self.assertIn('声明', result['source_kind'])
+        self.assertTrue(result['has_wrapper'])
+        archived = {'content': wrapper, 'backend': 'codex', 'role': 'user', 'phase': 'app_task_context'}
+        before = json.dumps(archived, ensure_ascii=False)
+        self.assertEqual(clean_for_context(archived), '')
+        self.assertEqual(clean_for_context(dict(archived, message_kind='user')), '')
+        self.assertEqual(json.dumps(archived, ensure_ascii=False), before)
+        human_quote = display_message(wrapper, 'codex', 'user')
+        self.assertEqual(human_quote['message_kind'], 'user')
+        self.assertNotIn('display_content', human_quote)
+
+    def test_import_and_markdown_keep_application_source_phase_and_original_wrapper(self):
+        from unittest.mock import patch
+        from chat_store import ChatStore
+        from rabbit_content.markdown_chat_document import render
+        source = {'agent': 'codex', 'session_id': '11111111-2222-4333-8444-555555555555'}
+        wrapper = ('<codex_delegation><source_thread_id>22222222-3333-4444-8555-666666666666'
+                   '</source_thread_id><input>虚构应用任务，不自动执行。</input></codex_delegation>')
+        indexed = dict(source, message_id='fco_synthetic_original', role='user', content=wrapper,
+                       timestamp='2026-01-01T01:01:00Z', phase='app_task_context',
+                       source_path='/synthetic/not-opened.jsonl', source_line=13)
+        with tempfile.TemporaryDirectory(prefix='app-task-import-', dir='/private/tmp') as directory, \
+             patch('subprocess.Popen', side_effect=AssertionError('Agent launched')), \
+             patch('socket.socket', side_effect=AssertionError('Network opened')):
+            store = ChatStore(Path(directory) / 'chat.sqlite')
+            chat = store.create('虚构应用任务', source, [indexed])
+            archived = store.get(chat['id'])['messages'][0]
+            self.assertEqual(archived['phase'], 'app_task_context')
+            self.assertEqual(archived['content'], wrapper)
+            self.assertEqual(archived['provenance']['message_id'], indexed['message_id'])
+            self.assertEqual(clean_for_context(archived), '')
+            presentation = display_message(archived['content'], 'codex', archived['role'], phase=archived['phase'])
+            self.assertIn('非用户逐字消息', presentation['source_kind'])
+            document = render(store.markdown_snapshot(chat['id']), 'a' * 64)['data'].decode()
+            self.assertIn(wrapper, document)
+            self.assertIn('"phase":"app_task_context"', document)
+            self.assertIn('应用转交任务，非用户逐字消息', document)
+            self.assertNotIn('## 1. 用户记录', document)
+
+
 class HistoryViewTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="history-view-test-")
@@ -116,6 +166,27 @@ class HistoryViewTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_application_input_search_opens_exact_index_with_sourced_display(self):
+        wrapper = ('<codex_delegation><source_thread_id>11111111-2222-4333-8444-555555555555'
+                   '</source_thread_id><input>虚构社团安排一场20分钟分享。</input></codex_delegation>')
+        with sqlite3.connect(self.path) as db:
+            db.execute('INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?)',
+                ('codex', 'ordinary', 'fco_synthetic_search', 'user', '2026-10-09T00:00:00Z',
+                 wrapper, '/synthetic/source', 13, 'app_task_context', 12))
+        found = self.view.search('20分钟分享', agent='codex')
+        self.assertEqual(found['total'], 1)
+        match = found['results'][0]
+        self.assertEqual(match['session_id'], 'ordinary')
+        self.assertEqual(match['message_id'], 'fco_synthetic_search')
+        self.assertEqual(match['message_kind'], 'app_task_context')
+        self.assertEqual(match['excerpt_source'], 'display')
+        self.assertNotIn('codex_delegation', match['excerpt'])
+        opened = self.view.get_session('codex', match['session_id'], offset=match['message_index'], limit=1)['messages'][0]
+        self.assertEqual(opened['message_id'], match['message_id'])
+        self.assertEqual(opened['content'], wrapper)
+        self.assertEqual(opened['display_content'], '虚构社团安排一场20分钟分享。')
+        self.assertIn('非用户逐字消息', opened['source_kind'])
 
     def test_stats_and_coverage(self):
         stats = self.view.stats()

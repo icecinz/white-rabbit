@@ -5,6 +5,7 @@ receipts keep their original path; the separate read-only scanner observes
 moves and edits by stable chat ID. Neither path copies content back to a chat.
 """
 from contextlib import contextmanager
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -17,6 +18,10 @@ from .project_publish_files import ProjectPublishError, _parts
 from .markdown_sync_files import MarkdownMoveError
 from .project_publish_store import (
     ProjectPublishStore, ProjectPublishStoreError, MESSAGES, MAX_PUBLICATIONS, _uuid,
+)
+from ._directory_identity import (
+    DirectoryIdentityError, capture_directory,
+    validate_anchor, verify_directory,
 )
 
 _SHA = re.compile(r'[0-9a-f]{64}\Z')
@@ -45,6 +50,108 @@ _MESSAGES = dict(MESSAGES, **{
     'schema_changed': '整理记录的结构无法核对，原记录保留，没有自动修补。',
 })
 
+# The old scope stays byte-for-byte intact as historical binding evidence.
+# Raw device/inode ancestry still belongs to each live directory object's
+# root_scope(); this separate record is only the durable root identity.
+_ROOT_ANCHOR_DDL = (
+    ('markdown_root_anchor', '''CREATE TABLE markdown_root_anchor (
+        id INTEGER PRIMARY KEY CHECK(id=1), workspace_id TEXT NOT NULL,
+        root TEXT NOT NULL, legacy_scope_sha256 TEXT NOT NULL, anchor TEXT NOT NULL)'''),
+    ('markdown_root_anchor_no_update', '''CREATE TRIGGER markdown_root_anchor_no_update
+        BEFORE UPDATE ON markdown_root_anchor
+        BEGIN SELECT RAISE(ABORT,'markdown_root_anchor_immutable'); END'''),
+    ('markdown_root_anchor_no_delete', '''CREATE TRIGGER markdown_root_anchor_no_delete
+        BEFORE DELETE ON markdown_root_anchor
+        BEGIN SELECT RAISE(ABORT,'markdown_root_anchor_immutable'); END'''),
+)
+
+
+def _compact(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+
+
+def _text_sha256(value):
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def _anchor_schema(db, *, create=False):
+    found = {}
+    for name, ddl in _ROOT_ANCHOR_DDL:
+        row = db.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
+        if row is not None:
+            if type(row[0]) is not str or ' '.join(row[0].split()) != ' '.join(ddl.split()):
+                raise MarkdownChatRegistryError('schema_changed')
+            found[name] = row[0]
+    if found and len(found) != len(_ROOT_ANCHOR_DDL):
+        raise MarkdownChatRegistryError('schema_changed')
+    related = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE tbl_name='markdown_root_anchor'")}
+    if related != set(found):
+        raise MarkdownChatRegistryError('schema_changed')
+    if not found and create:
+        for _name, ddl in _ROOT_ANCHOR_DDL:
+            db.execute(ddl)
+    return bool(found) or create
+
+
+def _legacy_scope(value, workspace_id, root):
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, RecursionError):
+        raise MarkdownChatRegistryError('scope_changed') from None
+    if (type(parsed) is not list or len(parsed) != 3 or parsed[:2] != [workspace_id, str(root)]
+            or type(parsed[2]) is not list or len(parsed[2]) != len(Path(root).parts)
+            or any(type(pair) is not list or len(pair) != 2
+                or type(pair[0]) is not int or pair[0] < 0
+                or type(pair[1]) is not int or pair[1] <= 0 for pair in parsed[2])):
+        raise MarkdownChatRegistryError('scope_changed')
+    return parsed
+
+
+def _root_anchor(db):
+    if not _anchor_schema(db):
+        return None
+    rows = db.execute('SELECT id,workspace_id,root,legacy_scope_sha256,anchor FROM markdown_root_anchor').fetchall()
+    if not rows:
+        return None
+    if len(rows) != 1 or rows[0][0] != 1:
+        raise MarkdownChatRegistryError('schema_changed')
+    return dict(zip(('id', 'workspace_id', 'root', 'legacy_scope_sha256', 'anchor'), rows[0]))
+
+
+def _checked_anchor(row, legacy_scope, workspace_id, root, root_fd):
+    if (row['workspace_id'] != workspace_id or row['root'] != str(root)
+            or row['legacy_scope_sha256'] != _text_sha256(legacy_scope)):
+        raise MarkdownChatRegistryError('scope_changed')
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise MarkdownChatRegistryError('scope_changed')
+            result[key] = value
+        return result
+    try:
+        anchor = validate_anchor(json.loads(row['anchor'], object_pairs_hook=pairs))
+    except (TypeError, ValueError, RecursionError):
+        raise MarkdownChatRegistryError('scope_changed') from None
+    verify_directory(root_fd, anchor)
+    return anchor
+
+
+def _register_root_anchor(db, legacy_scope, current_scope, workspace_id, root, root_fd):
+    _legacy_scope(legacy_scope, workspace_id, root)
+    row = _root_anchor(db)
+    if row is not None:
+        _checked_anchor(row, legacy_scope, workspace_id, root, root_fd)
+        return
+    # No UUID evidence about an old mount can be inferred from today's inode.
+    if legacy_scope != current_scope:
+        raise MarkdownChatRegistryError('scope_changed')
+    anchor = capture_directory(root_fd)
+    _anchor_schema(db, create=True)
+    db.execute('INSERT INTO markdown_root_anchor VALUES(1,?,?,?,?)',
+        (workspace_id, str(root), _text_sha256(legacy_scope), _compact(anchor)))
+
 
 class MarkdownChatRegistryError(ValueError):
     def __init__(self, code):
@@ -62,6 +169,9 @@ def _errors():
         raise MarkdownChatRegistryError(error.code) from None
     except MarkdownDirectoryError:
         raise MarkdownChatRegistryError('directory_unavailable') from None
+    except DirectoryIdentityError as error:
+        raise MarkdownChatRegistryError('scope_changed' if error.code in (
+            'scope_changed', 'invalid_anchor', 'invalid_arguments') else 'directory_unavailable') from None
     except MarkdownChatDocumentError:
         raise MarkdownChatRegistryError('invalid_document') from None
     except (OSError, sqlite3.Error):
@@ -140,14 +250,14 @@ class MarkdownChatRegistry:
                     [workspace_id, str(self.directory.root), self.directory._lineage],
                     separators=(',', ':'),
                 )
-                with self.publisher._db(write=True) as db:
+                with self.directory.root_scope() as root_fd, self.publisher._db(write=True) as db:
                     db.execute('''CREATE TABLE IF NOT EXISTS markdown_chat_scope (
                         id INTEGER PRIMARY KEY CHECK(id=1), scope TEXT NOT NULL)''')
                     row = db.execute('SELECT scope FROM markdown_chat_scope WHERE id=1').fetchone()
-                    if row is not None and row[0] != scope:
-                        raise MarkdownChatRegistryError('scope_changed')
                     if row is None:
                         db.execute('INSERT INTO markdown_chat_scope VALUES(1,?)', (scope,))
+                    _register_root_anchor(db, row[0] if row is not None else scope,
+                        scope, workspace_id, self.directory.root, root_fd)
                     # The new organizer owns this database. Generated-artifact
                     # publications are not migrated into it.
                     rows = db.execute('SELECT * FROM project_publications').fetchall()
@@ -156,6 +266,11 @@ class MarkdownChatRegistry:
                     for item in rows:
                         self._descriptor(dict(item))
                     _install_index(db, existing_scope=row is not None)
+                    # Recheck the complete live path before the write context
+                    # commits a newly captured anchor. The outer scope also
+                    # rechecks after commit, without following a replacement.
+                    with self.directory.root_scope():
+                        pass
                 from .markdown_chat_sync import MarkdownChatSync
                 self.sync = MarkdownChatSync(self, clock=clock)
         except BaseException:

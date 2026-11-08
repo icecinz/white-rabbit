@@ -167,7 +167,7 @@ class DshHistoryAdoption:
                 if fd is not None:os.close(fd)
 
     def _binding_matches(self,identity,source):
-        binding=self.store.binding(identity);adoption=self.store.adoption(identity)
+        binding=self.store.current_binding(identity);adoption=self.store.current_adoption(identity)
         if (binding is None or adoption is None or binding['session_id']!=source['session_id']
                 or binding['cwd']!=source['cwd'] or binding['preset_known'] is not True
                 or binding['agent_preset']!=source['agent_preset']
@@ -179,7 +179,7 @@ class DshHistoryAdoption:
 
     def _prepare(self,session_id):
         source=self._source(session_id);identity,creation=adoption_identities(self.workspace_id,source['session_id'])
-        if self.store.binding(identity) is not None:self._binding_matches(identity,source)
+        if self.store.current_binding(identity) is not None:self._binding_matches(identity,source)
         elif ('dsh',source['session_id']) in self.excluded_sources():_error('source_already_owned')
         return source,dict(source=source,workspace_id=self.workspace_id,chat_id=identity,creation_id=creation,
             history_mode=HISTORY_MODE)
@@ -213,7 +213,7 @@ class DshHistoryAdoption:
             adopted=True,execution_started=False,body_copied=False)
 
     def verify_open(self,identity):
-        identity=chat_id(identity);self.catalogue.get(identity);binding=self.store.binding(identity)
+        identity=chat_id(identity);self.catalogue.get(identity);binding=self.store.current_binding(identity)
         if binding is None or not is_adopted_binding(self.workspace_id,identity,binding['session_id']):
             _error('existing_binding_conflict')
         source,proof=self._prepare(binding['session_id'])

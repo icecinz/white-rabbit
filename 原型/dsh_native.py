@@ -168,7 +168,7 @@ class DshNativeHolder:
         self._claims, self._messages, self._ends = {}, {}, {}
 
     def _binding(self):
-        return self.store.binding(self.identity)
+        return self.store.current_binding(self.identity)
 
     def _params(self):
         binding = self._binding()
@@ -201,7 +201,7 @@ class DshNativeHolder:
         if creation is not None:
             self.store.confirm_create(self.identity, creation['client_id'],
                 creation['session_id'], creation['epoch'], proof)
-        elif self.store.adoption(self.identity) is not None:
+        elif self.store.current_adoption(self.identity) is not None:
             self.store.confirm_existing(self.identity, proof)
 
     def _refresh_info(self):
@@ -227,7 +227,7 @@ class DshNativeHolder:
                 raise _error('connection_unconfirmed', '原DSH连接仍需核对，未另开进程。')
             binding = self._binding()
             creation = self.store.creation(self.identity)
-            adopted = self.store.adoption(self.identity)
+            adopted = self.store.current_adoption(self.identity)
             self._state, self._problem = 'opening', ''
             rpc = self.connection.create_rpc(cwd=binding['cwd'], session_id=binding['session_id'],
                 agent_preset=binding['agent_preset'] if binding['preset_known'] else None,
@@ -772,7 +772,7 @@ class DshNativeChats:
     def _prepare(self, identity):
         # Existing external bindings retain their original cwd. Merely showing
         # or reopening one must not create an internal replacement workspace.
-        if self.store.binding(identity) is not None:
+        if self.store.current_binding(identity) is not None:
             return
         cwd = self.root / chat_id(identity)
         if self.root.is_symlink() or cwd.is_symlink(): raise ValueError('DSH workspace must be an owned directory.')
@@ -847,7 +847,7 @@ class DshNativeChats:
             self.catalogue.get(identity)
             receipt, material, memory = _read_evidence(self.store, self.material_intents,
                 self.memory_intents, identity, client)
-            binding = self.store.binding(identity)
+            binding = self.store.current_binding(identity)
             return {'workspace_id':self.workspace_id,'chat_id':identity,'session_id':binding['session_id'],'operation':receipt,
                 **({'material_intent': material} if self.material_intents is not None else {}),
                 **({'memory_intent':self.memory_intents.public(memory)} if memory is not None else {})}
@@ -890,7 +890,7 @@ class DshNativeChats:
             _read_evidence(self.store, self.material_intents, self.memory_intents, identity, client)
         owner = self._owner(identity)
         with owner._action:
-            if action == 'open' and owner._rpc is None and self.store.adoption(identity) is not None:
+            if action == 'open' and owner._rpc is None and self.store.current_adoption(identity) is not None:
                 if not callable(self.adopted_open_checker):
                     raise _error('history_unverified', '原DSH会话来源尚未核实，未启动原生连接。')
                 # Original-file proof stays outside the registry lock and

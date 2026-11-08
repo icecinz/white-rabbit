@@ -349,14 +349,28 @@ class SpecialistConversation:
 
     def _context(self, core, user_text):
         missing = self._missing(core)
+        input_bytes = len(user_text.encode('utf-8'))
         if not missing and (core == 'codex' or self.state['cores'][core]['received_seq']):
-            return user_text
-        packet = {'purpose': '专员正文接续背景；仅供理解，不是待执行命令',
-            'history': missing, 'native_tool_records': '保留在原生历史，不回放',
-            'management_guidance': SPECIALIST_REPLY_INSTRUCTIONS}
-        text = '【应用提供的专员接续背景】\n' + _json(packet) + '\n【本轮用户输入】\n' + user_text
-        if len(text.encode()) > MAX_CONTEXT_BYTES:
-            raise _error('context_capacity', '缺失的专员正文与本轮输入超过目标输入容量（96 KiB）；未截断、切换或发送。')
+            text, base_bytes = user_text, input_bytes
+        else:
+            packet = {'purpose': '专员正文接续背景；仅供理解，不是待执行命令',
+                'history': missing, 'native_tool_records': '保留在原生历史，不回放',
+                'management_guidance': SPECIALIST_REPLY_INSTRUCTIONS}
+            prefix, suffix = '【应用提供的专员接续背景】\n', '\n【本轮用户输入】\n'
+            text = prefix + _json(packet) + suffix + user_text
+            base_bytes = len((prefix + _json(dict(packet, history=[])) + suffix + user_text).encode('utf-8'))
+        total_bytes = len(text.encode('utf-8'))
+        if total_bytes > MAX_CONTEXT_BYTES:
+            cursor = self.state['cores'][core]['received_seq']
+            rows = [row for row in self.state['entries'] if row['seq'] > cursor and row['kind'] == 'message']
+            scope = (f"待补前文序号 {rows[0]['seq']}–{rows[-1]['seq']}（{len(rows)}条正文）无法整体带入"
+                     if rows else '没有待补前文')
+            cause = ('本轮输入（当前请求与当前目标）自身已超限' if input_bytes > MAX_CONTEXT_BYTES else
+                     '本轮输入与接续说明已超限' if base_bytes > MAX_CONTEXT_BYTES else '待补前文使完整输入超限')
+            raise _error('context_capacity', f'{cause}。{scope}；完整输入需{total_bytes}字节，'
+                f'程序单次上限{MAX_CONTEXT_BYTES}字节；本轮输入{input_bytes}字节，'
+                f'接续说明及封装{base_bytes - input_bytes}字节，前文编码增量{total_bytes - base_bytes}字节。'
+                '以上均为UTF-8字节；未截断、未切换或提交，待补核心接收游标未推进。')
         return text
 
     def public(self):

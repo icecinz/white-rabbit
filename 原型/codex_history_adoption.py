@@ -181,7 +181,7 @@ class CodexHistoryAdoption:
                     os.close(fd)
 
     def _binding_matches(self, identity, source, thread):
-        binding = self.store.verify_scope('chat/codex/' + identity)
+        binding = self.store.current_binding('chat/codex/' + identity)
         if (binding['cwd'] != source['cwd']
                 or [binding['cwd_device'], binding['cwd_inode']] != source['cwd_identity']
                 or binding['thread_id'] != thread['id']

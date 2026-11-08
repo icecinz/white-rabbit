@@ -19,11 +19,10 @@ from native_http_common import SpecialistHTTPError
 from rabbit_runtime.native_session_store import open_directory as _directory, file_identity as _identity, validate_path as _path
 from pi_history import META_KEY as PI_META_KEY
 from rabbit_runtime.pi.session_store import validate_session_id as _session_id
-from rabbit_runtime.pi.session_file import validate_session_file, decode_record as _record, file_stamp as _stamp
+from rabbit_runtime.pi.session_file import MAX_HEADER_BYTES, validate_session_file, decode_record as _record, file_stamp as _stamp
 
 _NAMESPACE = uuid.UUID('873ae0d5-c97e-5ea6-a416-0f63b5859bd5')
 _SHA = re.compile(r'[0-9a-f]{64}\Z')
-MAX_HEADER_BYTES = 1024 * 1024
 
 
 class PiHistoryAdoptionError(ValueError):
@@ -65,11 +64,19 @@ class PiHistoryAdoption:
         self.workspace_id, self.excluded_sources = workspace_id, excluded_sources
         self._source_scopes = {}
 
-    def _indexed_source(self, session_id):
+    def _indexed_source(self, session_id=None):
         # Never use get_session(): it projects bodies and attachment metadata.
         with closing(self.history._open()) as db:
-            row = db.execute('SELECT session_id,title,cwd,parent_session_id,forked_from_id,kind,archived,source_path '
-                'FROM sessions WHERE agent=? AND session_id=?', ('pi', session_id)).fetchone()
+            query = ('SELECT session_id,title,cwd,parent_session_id,forked_from_id,kind,archived,source_path '
+                'FROM sessions WHERE agent=?')
+            if session_id is None:
+                row = db.execute(query + " AND kind='root' AND archived=0 AND parent_session_id IS NULL "
+                    'AND forked_from_id IS NULL ORDER BY updated_at DESC,session_id LIMIT 1', ('pi',)).fetchone()
+                if row is None:
+                    return None
+                session_id = _session_id(row['session_id'])
+            else:
+                row = db.execute(query + ' AND session_id=?', ('pi', session_id)).fetchone()
             coverage = db.execute('SELECT value FROM meta WHERE key=?', (PI_META_KEY,)).fetchone()
         if row is None: _error('source_not_found')
         value = dict(row)
@@ -96,9 +103,7 @@ class PiHistoryAdoption:
             _error('source_coverage_path_mismatch')
         return value
 
-    def _source(self, session_id):
-        session_id = _session_id(session_id)
-        value = self._indexed_source(session_id)
+    def _indexed_location(self, value):
         path, cwd = _path(value['source_path']), _path(value['cwd'])
         sessions = self.root/'sessions'
         if path.suffix != '.jsonl' or sessions not in path.parents:
@@ -106,6 +111,24 @@ class PiHistoryAdoption:
         relative = path.relative_to(sessions)
         if len(relative.parts) not in (1, 2) or any(part.startswith('.') for part in relative.parts):
             _error('source_outside_active_sessions')
+        return path, sessions, cwd
+
+    def latest_usage_source(self):
+        """Select one indexed original main session without opening its body."""
+        value = self._indexed_source()
+        if value is None:
+            return None
+        path, sessions, cwd = self._indexed_location(value)
+        title = value['title']
+        if type(title) is not str:
+            _error('invalid_source_title')
+        return {'session_id': value['session_id'], 'title': _title((title.strip() or 'Pi')[:80]),
+            'session_file': str(path), 'session_dir': str(sessions), 'cwd': str(cwd)}
+
+    def _source(self, session_id):
+        session_id = _session_id(session_id)
+        value = self._indexed_source(session_id)
+        path, sessions, cwd = self._indexed_location(value)
         directories = {directory:_dir_scope(directory) for directory in dict.fromkeys((self.root,sessions,path.parent,cwd))}
         parent = descriptor = None
         try:
@@ -151,7 +174,7 @@ class PiHistoryAdoption:
                 if fd is not None: os.close(fd)
 
     def _binding_matches(self, identity, source):
-        binding = self.store.binding(identity)
+        binding = self.store.current_binding(identity)
         if (binding is None or binding['cwd'] != source['cwd'] or binding['session_dir'] != source['session_dir']
                 or binding['session_file'] != source['source_path'] or binding['session_id'] != source['session_id']
                 or [binding['cwd_device'],binding['cwd_inode']] != source['cwd_identity']
